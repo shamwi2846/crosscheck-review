@@ -112,15 +112,21 @@ function add(root, items) {
   });
 }
 
-// Marks entry `id` 'fixed' or 'fixed — was a real bug', changing only its header line.
+// `text` with entry `id` given `status`, changing only its header line; null when there is no such entry. Pure.
+function composeMark(text, id, status) {
+  const header = new RegExp(`^## ${escape(id)} · (open|fixed|fixed — was a real bug) · (\\S+) · (\\S+?)(\\r?)$`, 'm');
+  if (!header.test(text)) return null;
+  return text.replace(header, (all, old, date, severity, cr) => `## ${id} · ${status} · ${date} · ${severity}${cr}`);
+}
+
+// Marks entry `id` 'fixed' or 'fixed — was a real bug'.
 function mark(root, id, status) {
   if (!STATUSES.includes(status)) return { ok: false, why: `the status must be one of: ${STATUSES.join(', ')}` };
   return state.withLock(state.files.project(root), write => {
     const current = readText(fileOf(root));
     if (current.unreadable) return { ok: false, why: `${NAME} can't be read (${current.unreadable})` };
-    const header = new RegExp(`^## ${escape(id)} · (open|fixed|fixed — was a real bug) · (\\S+) · (\\S+?)(\\r?)$`, 'm');
-    if (!header.test(current.text)) return { ok: false, why: `${NAME} has no entry ${id}` };
-    const text = current.text.replace(header, (all, old, date, severity, cr) => `## ${id} · ${status} · ${date} · ${severity}${cr}`);
+    const text = composeMark(current.text, id, status);
+    if (text === null) return { ok: false, why: `${NAME} has no entry ${id}` };
     return write(fileOf(root), text) ? { ok: true } : { ok: false, why: `another process took over the lock, so ${id} wasn't changed` };
   });
 }
@@ -150,4 +156,4 @@ function addLesson(root, lesson) {
   });
 }
 
-module.exports = { NAME, STATUSES, list, readFile, compose, add, mark, openFor, lessons, addLesson };
+module.exports = { NAME, STATUSES, list, readFile, compose, composeMark, add, mark, openFor, lessons, addLesson };

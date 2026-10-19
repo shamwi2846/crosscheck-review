@@ -17,6 +17,7 @@ const RISKY_FILE = /\.(mq5|mqh|set)$/i; // trading files: always reviewed in pai
 const MAPS = ['changes', 'acks', 'running', 'applied', 'chains', 'escalations'];
 
 const sha = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
+const newAttempt = () => `${new Date().toISOString().replace(/\D/g, '').slice(0, 14)}-${crypto.randomBytes(3).toString('hex')}`;
 const snapFile = (root, hash) => path.join(state.projectDir(root), 'snap', hash);
 const bundleDir = (root, attempt) => path.join(state.projectDir(root), 'bundles', attempt);
 const withMaps = s => { for (const k of MAPS) s[k] = s[k] || {}; return s; };
@@ -80,26 +81,44 @@ function resolveNamed(root, names) {
   return { named };
 }
 
-// The task file's title, its "## Requirements" section and the requirement ids in it ("R1.", "R2." ...).
+// The task file's title, its "## Requirements" section, and each requirement's text by id ("R1.", "R2." ...).
 function taskOf(text) {
   const section = text.match(/^## Requirements[^\n]*\n([\s\S]*?)(?=^## |(?![\s\S]))/m);
   if (!section) return null;
-  const ids = [...new Set([...section[1].matchAll(/^\s*\**(R\d+)[.):]/gm)].map(m => m[1]))];
-  return { title: (text.match(/^#\s+(.+)$/m) || [, '-'])[1].trim(), requirements: section[1].trim(), ids };
+  const reqs = {};
+  let id = null;
+  for (const line of section[1].split(/\r?\n/)) {
+    const starts = line.match(/^\s*\**(R\d+)[.):]/);
+    if (starts) id = starts[1];
+    if (id) reqs[id] = reqs[id] === undefined ? line : `${reqs[id]}\n${line}`;
+  }
+  for (const r of Object.keys(reqs)) reqs[r] = reqs[r].trim();
+  return { title: (text.match(/^#\s+(.+)$/m) || [, '-'])[1].trim(), requirements: section[1].trim(), ids: Object.keys(reqs), reqs };
 }
 
-// Reserves an attempt's files in one state transaction: this session's pending changes plus the named paths, read
-// from the same state the reservation is written to. Returns { files, admittedAt } or { refused }.
-function admit(root, { attempt, session, named }) {
+const dropDeadMarks = s => { for (const [key, mark] of Object.entries(s.running)) if (!state.alive(mark.pid)) delete s.running[key]; };
+const asBaseline = version => (version === DELETED ? null : version); // (a missing file's successor is a new file)
+
+// Reserves an attempt's files in one state transaction, choosing them from the same state the reservation is
+// written to. A fresh review takes this session's pending changes plus the named paths; a follow-up (`chain`) takes
+// the chain's files except escalated ones, which wait for a paired review, with their last reviewed versions as
+// baselines. Returns { files, admittedAt, rev } or { refused }.
+function admit(root, { attempt, session, named = [], chain = null }) {
   const result = state.update(state.files.project(root), data => {
     const s = withMaps(data);
-    for (const [key, mark] of Object.entries(s.running)) if (!state.alive(mark.pid)) delete s.running[key];
+    dropDeadMarks(s);
     const files = {};
-    for (const [key, change] of Object.entries(s.changes)) if (session && change.session === session) files[key] = { path: change.path };
-    for (const n of named) files[n.key] = files[n.key] || { path: n.path };
+    const c = chain && s.chains[chain];
+    if (chain) {
+      if (!c || c.closed) return { refused: `chain ${chain} is ${c ? 'closed' : 'unknown'}` };
+      for (const [key, p] of Object.entries(c.files)) if (!s.escalations[key]) files[key] = { path: p };
+    } else {
+      for (const [key, change] of Object.entries(s.changes)) if (session && change.session === session) files[key] = { path: change.path };
+      for (const n of named) files[n.key] = files[n.key] || { path: n.path };
+    }
     const keys = Object.keys(files);
     const list = ks => ks.map(k => files[k].path).join(', ');
-    if (!keys.length) return { refused: 'nothing to review: this session has no pending changes and no file was named' };
+    if (!keys.length) return { refused: chain ? 'every file of the chain is escalated: they need a paired review (step 3)' : 'nothing to review: this session has no pending changes and no file was named' };
     const busy = keys.filter(k => s.running[k]);
     if (busy.length) return { refused: `already in a running review: ${list(busy)}` };
     const risky = keys.filter(k => RISKY_FILE.test(k) || s.escalations[k]);
@@ -107,11 +126,11 @@ function admit(root, { attempt, session, named }) {
     for (const key of keys) {
       const change = s.changes[key];
       // (without a change record, the baseline is the last reviewed version, if any; freeze falls back to HEAD)
-      const acked = s.acks[key] === DELETED ? null : s.acks[key];
-      Object.assign(files[key], change ? { at: change.at, session: change.session, baseline: change.baseline } : { at: null, baseline: acked });
+      const baseline = c ? asBaseline(c.frozen[key]) : change ? change.baseline : s.acks[key] === undefined ? undefined : asBaseline(s.acks[key]);
+      Object.assign(files[key], change ? { at: change.at, session: change.session } : { at: null }, { baseline });
       s.running[key] = { attempt, pid: process.pid };
     }
-    return { files, admittedAt: Date.now() };
+    return { files, admittedAt: Date.now(), rev: c ? c.rev : null, chain: c ? { ...JSON.parse(JSON.stringify(c)), id: chain } : null };
   });
   return result.ok ? result.value : { refused: result.why };
 }
@@ -137,16 +156,17 @@ function diffOf(root, before, after) {
   }
 }
 
-// What GPT reads about one file: its diff from its baseline, or the whole file when there is no diff to show.
-function material(root, f, full) {
+// What GPT reads about one file: its diff from its baseline, or the whole file when there is no diff to show. In a
+// narrow round (past the round limit) an unchanged file shows no code, only that it didn't change.
+function material(root, f, { full = false, narrow = false } = {}) {
   if (f.frozen === DELETED) {
     return `### ${f.path} (deleted)\n${f.baseline ? `Its last version:\n${fence(snapText(root, f.baseline))}` : 'No earlier version is known.'}`;
   }
   const text = snapText(root, f.frozen);
   if (!f.baseline) return `### ${f.path} (new file, whole)\n${fence(text)}`;
   const diff = full ? '' : diffOf(root, f.baseline, f.frozen);
-  if (!diff) return `### ${f.path} (whole file)\n${fence(text)}`;
-  return `### ${f.path} (diff from its last reviewed version)\n${fence(diff)}`;
+  if (diff) return `### ${f.path} (diff from its last reviewed version)\n${fence(diff)}`;
+  return narrow ? `### ${f.path} (unchanged since the last round)` : `### ${f.path} (whole file)\n${fence(text)}`;
 }
 
 const RULES = `You review a code change for the project in the current folder, which you may read (read-only) for context.
@@ -161,14 +181,30 @@ class: none (no behavior change), normal, or risky (money and payments, deleting
 coverage: one line on what you checked, what doesn't apply (n/a) and what you didn't examine.
 verdict: ISSUES_FOUND when there is a finding or an unmet requirement, else NO_ISSUES.`;
 
+const FOLLOWUP_RULES = `This is a follow-up round of your review of the project in the current folder (read-only). Claude answered the open findings below and changed code; the diff shows what changed since the last round.
+The reviewed files may change while you work: read a reviewed file only from its frozen copy, listed under "Frozen copies".
+Answer every open finding once, by id: RESOLVED (the code now fixes it), MAINTAIN (it still stands) or CONCEDE (it was never real), with your reason.
+Report a new finding only for a real problem in the changed lines or the code that calls them, of MEDIUM severity or above (a LOW one is recorded as a gap). Its fields and labels are those of a review: BUG when it can really happen in normal use and cause real harm (in money or trading code, an unlikely trigger with a big possible loss too), else GAP; location: one of the reviewed paths exactly, optionally with :line or :line-line, or "-" for the task as a whole; test required for CRITICAL and HIGH.
+Rate only the requirements under "Changed requirements" (none: no rows). A finding may name any requirement of the task.
+class: none, normal or risky for the changed code, with its files and why. coverage: one line.
+verdict: ISSUES_REMAIN when a finding is maintained, a new finding is reported or a rated requirement is unmet, else RESOLVED.`;
+const NARROW = `
+The round limit is reached, so this round checks only the fixed lines. Report no unrelated finding, but do report any bug that a fix itself caused, with its real severity and label.`;
+
+// The open findings, as a follow-up lists them.
+const openList = findings => Object.entries(findings).filter(([, f]) => f.status === 'open')
+  .map(([id, f]) => `- ${id} [${f.severity} ${f.label}] ${f.title} (${f.location}): ${f.trigger}. Fix: ${f.fix}${f.reason ? `. Last answer: ${f.reason}` : ''}`).join('\n');
+
 // Freezes an attempt into its bundle: snapshots of the files and the task, the prompt built only from them, and
-// the manifest the answer is applied from. The fallback reviewer gets the same bundle.
-function freeze(root, { attempt, session, names, files, admittedAt, taskFile, evidenceFile, full }) {
+// the manifest the answer is applied from. The fallback reviewer gets the same bundle. A follow-up (`chain`, the
+// chain as admitted) gets the open findings, Claude's `response` and only the requirements that changed.
+function freeze(root, { attempt, session, names = [], files, admittedAt, rev, taskFile, evidenceFile, full, chain = null, response = '' }) {
   const taskBytes = bytesOf(taskFile);
   if (taskBytes === null) return { why: `the task file ${taskFile} doesn't exist` };
   const task = taskOf(textOf(taskBytes));
   if (!task) return { why: `the task file ${taskFile} has no "## Requirements" section` };
   snapshot(root, taskBytes);
+  const narrow = !!chain && chain.rounds.length >= 3;
   const code = [];
   for (const f of Object.values(files)) {
     f.frozen = snapshot(root, bytesOf(path.join(root, f.path)));
@@ -176,7 +212,7 @@ function freeze(root, { attempt, session, names, files, admittedAt, taskFile, ev
       const head = git(root, ['show', `HEAD:${f.path}`]);
       f.baseline = head.status === 0 ? snapshot(root, head.stdout) : null;
     }
-    code.push(material(root, f, full));
+    code.push(material(root, f, { full, narrow }));
   }
   let evidence = 'None was supplied.';
   if (evidenceFile) {
@@ -188,25 +224,56 @@ function freeze(root, { attempt, session, names, files, admittedAt, taskFile, ev
   }
   const lessons = gaps.lessons(root).trim() || 'None.';
   const copies = Object.values(files).map(f => `- ${f.path}: ${f.frozen === DELETED ? '(deleted)' : snapFile(root, f.frozen)}`).join('\n');
-  const prompt = `${RULES}\n\n## Task requirements (the authority on what the work must do)\n${task.requirements}\n\n`
-    + `## Project lessons (confirmed past mistakes)\n${lessons}\n\n## Reviewed files\n${code.join('\n\n')}\n\n`
+  const tail = `## Project lessons (confirmed past mistakes)\n${lessons}\n\n## Reviewed files\n${code.join('\n\n')}\n\n`
     + `## Frozen copies (the reviewed versions, whole)\n${copies}\n\n## Evidence\n${evidence}\n`;
-  const manifest = { attempt, kind: 'review', root, session, names, admittedAt, files,
-    task: { path: taskFile, title: task.title, sha: sha(taskBytes), rowIds: task.ids, linkIds: task.ids } };
+  const rowIds = chain ? task.ids.filter(id => (chain.task.reqs || {})[id] !== task.reqs[id]) : task.ids;
+  const prompt = chain
+    ? `${FOLLOWUP_RULES}${narrow ? NARROW : ''}\n\n## Open findings\n${openList(chain.findings) || 'None.'}\n\n## Claude's response\n${response.trim() || '-'}\n\n`
+      + `## Changed requirements\n${rowIds.map(id => task.reqs[id]).join('\n') || 'None.'}\n\n${tail}`
+    : `${RULES}\n\n## Task requirements (the authority on what the work must do)\n${task.requirements}\n\n${tail}`;
+  const manifest = { attempt, kind: chain ? 'followup' : 'review', root, session, names, admittedAt, files, chain: chain ? chain.id : null, rev,
+    openIds: chain ? Object.keys(chain.findings).filter(id => chain.findings[id].status === 'open') : [],
+    task: { path: taskFile, title: task.title, sha: sha(taskBytes), rowIds, linkIds: task.ids, reqs: task.reqs } };
   fs.mkdirSync(bundleDir(root, attempt), { recursive: true });
   fs.writeFileSync(path.join(bundleDir(root, attempt), 'manifest.json'), JSON.stringify(manifest, null, 2));
   fs.writeFileSync(path.join(bundleDir(root, attempt), 'prompt.md'), prompt);
   return { manifest, prompt };
 }
 
-// Runs GPT on the bundle's prompt, with one repair in the same session. Each turn is saved in the bundle.
-async function run(root, manifest, prompt) {
-  const asked = { rowIds: manifest.task.rowIds, linkIds: manifest.task.linkIds, files: Object.values(manifest.files).map(f => f.path), openIds: manifest.openIds || [] };
+const askedOf = manifest => ({ rowIds: manifest.task.rowIds, linkIds: manifest.task.linkIds,
+  files: Object.values(manifest.files).map(f => f.path), openIds: manifest.openIds || [] });
+const NO_ANSWER = '# Answer\n\n(no answer:';
+
+// The chain's accepted rounds as GPT saw and answered them, in order: what a fresh session needs to go on.
+function historyOf(root, chain) {
+  const turns = chain.rounds.flatMap((attempt, i) => {
+    const dir = bundleDir(root, attempt);
+    const files = fs.existsSync(dir) ? fs.readdirSync(dir).filter(f => /^turn-/.test(f)).sort() : [];
+    return files.map(f => fs.readFileSync(path.join(dir, f), 'utf8')).filter(t => !t.includes(NO_ANSWER)).map(t => `# Round ${i + 1}\n\n${t}`);
+  });
+  return `This review continues in a new session. Its earlier rounds:\n\n${turns.join('\n\n')}`;
+}
+
+// Runs GPT on the bundle's prompt, with one repair in the same session. A follow-up resumes the chain's session
+// (`resume`), or starts a fresh one with the chain's `history` when there is none or resuming fails. Each turn is
+// saved in the bundle.
+async function run(root, manifest, prompt, { resume = null, history = '' } = {}) {
+  const asked = askedOf(manifest);
   const schema = answer.SCHEMAS[manifest.kind];
   const save = (n, text, result) => fs.writeFileSync(path.join(bundleDir(root, manifest.attempt), `turn-${n}.md`),
-    `# Prompt\n\n${text}\n\n# Answer\n\n${result.ok ? result.text : `(no answer: ${result.reason})`}\n`);
-  const first = await codex.ask({ mode: 'review', effort: 'high', persist: true, schema, prompt, cwd: root });
-  save(1, prompt, first);
+    `# Prompt\n\n${text}\n\n${result.ok ? `# Answer\n\n${result.text}` : `${NO_ANSWER} ${result.reason})`}\n`);
+  let first = null;
+  if (resume) {
+    first = await codex.ask({ mode: 'review', effort: 'high', resume, schema, prompt, cwd: root });
+    save(1, prompt, first);
+    if (first.ok) first.sessionId = first.sessionId || resume;
+  }
+  if (!first || (!first.ok && !first.unavailable)) {
+    // (a follow-up without a session to resume, e.g. after a fallback round, starts fresh with the chain's history)
+    const fresh = history ? `${history}\n\n# The current round\n\n${prompt}` : prompt;
+    first = await codex.ask({ mode: 'review', effort: 'high', persist: true, schema, prompt: fresh, cwd: root });
+    save(resume ? '1-fresh' : 1, fresh, first);
+  }
   if (!first.ok) return { status: first.unavailable ? 'GPT_UNAVAILABLE' : 'NOT_DONE', why: first.reason };
   let checked = answer.read(manifest.kind, first.text, asked);
   if (checked.problems.length) {
@@ -234,8 +301,13 @@ function findingsOf(a) {
   return found;
 }
 
-// Applies a checked answer in one locked write of the project state; its GAP findings go into KNOWN_GAPS.md
-// first, under the same lock. Returns { chain, findings, acked, pending, escalated, taskChanged } or { refused }.
+// A finding as a KNOWN_GAPS.md entry.
+const gapItem = (task, log, fid, f, why) => ({ task: task.title, where: [f.location], problem: `${fid}: ${f.title}`, trigger: f.trigger,
+  severity: f.severity, fix: f.fix, test: f.test, log, why });
+
+// Applies a checked answer in one locked write of the project state; KNOWN_GAPS.md changes first (the round's new
+// GAP findings added, resolved or conceded ones marked fixed), under the same lock. A follow-up applies only to the
+// chain revision it began from. Returns { chain, added, acked, pending, escalated, taskChanged } or { refused }.
 function apply(root, manifest, result) {
   const stateFile = state.files.project(root);
   const done = state.withLock(stateFile, write => {
@@ -246,26 +318,51 @@ function apply(root, manifest, result) {
     if (s.applied[manifest.attempt]) return { refused: 'this answer was already applied' };
     const lost = keys.filter(k => !s.running[k] || s.running[k].attempt !== manifest.attempt);
     if (lost.length) return { refused: `the reservation of ${lost.join(', ')} was lost, so nothing was applied` };
-    const id = `C${manifest.attempt}`;
-    const chain = { rev: 1, began: manifest.admittedAt, session: manifest.session, rounds: [manifest.attempt], codexSession: result.session,
-      closed: false, task: manifest.task, files: {}, frozen: {}, findings: {} };
-    findingsOf(result.answer).forEach((f, i) => { chain.findings[`F${i + 1}`] = f; });
-    const gapFindings = Object.entries(chain.findings).filter(([, f]) => f.label === 'GAP');
-    if (gapFindings.length) {
+    const id = manifest.chain || `C${manifest.attempt}`;
+    let chain = s.chains[id];
+    if (manifest.chain && (!chain || chain.closed || chain.rev !== manifest.rev)) {
+      return { refused: `chain ${id} changed or closed since this round began, so nothing was applied` };
+    }
+    if (!manifest.chain) {
+      chain = { rev: 0, began: manifest.admittedAt, session: manifest.session, rounds: [], codexSession: null, closed: false, files: {}, frozen: {}, findings: {} };
+    }
+    const narrow = chain.rounds.length >= 3;
+    const fixedGaps = [];
+    for (const row of result.answer.followups || []) {
+      const f = chain.findings[row.id];
+      f.reason = row.reason;
+      if (row.status !== 'MAINTAIN') f.status = row.status === 'RESOLVED' ? 'resolved' : 'conceded';
+      if (row.status !== 'MAINTAIN' && f.gap) fixedGaps.push(f.gap);
+    }
+    let n = Object.keys(chain.findings).length;
+    const added = [];
+    for (const f of findingsOf(result.answer)) {
+      if (manifest.kind === 'followup' && !narrow && f.severity === 'LOW') f.label = 'GAP'; // (past the limit, a regression keeps its label)
+      chain.findings[`F${++n}`] = f;
+      added.push(`F${n}`);
+    }
+    const newGaps = added.filter(fid => chain.findings[fid].label === 'GAP');
+    const gapsFile = path.join(root, gaps.NAME);
+    let gapText = null;
+    if (newGaps.length || fixedGaps.length) {
       const known = gaps.readFile(root);
       if (known.unreadable) return { refused: `KNOWN_GAPS.md can't be read (${known.unreadable}), so nothing was applied` };
-      const items = gapFindings.map(([fid, f]) => ({ task: manifest.task.title, where: [f.location], problem: `${fid}: ${f.title}`, trigger: f.trigger,
-        severity: f.severity, fix: f.fix, test: f.test, log: manifest.attempt, why: `labelled GAP by the reviewer; harm: ${f.harm}` }));
-      const composed = gaps.compose(root, known.text, items);
-      if (composed.added.length && !write(path.join(root, gaps.NAME), composed.text)) return { refused: 'the lock was taken over, so nothing was applied' };
-      gapFindings.forEach(([, f], i) => { f.gap = composed.ids[i]; });
+      const composed = gaps.compose(root, known.text, newGaps.map(fid => gapItem(manifest.task, manifest.attempt, fid, chain.findings[fid],
+        `labelled GAP by the reviewer; harm: ${chain.findings[fid].harm}`)));
+      newGaps.forEach((fid, i) => { chain.findings[fid].gap = composed.ids[i]; });
+      if (composed.added.length && !write(gapsFile, composed.text)) return { refused: 'the lock was taken over, so nothing was applied' };
+      gapText = composed.text;
     }
     const taskBytes = bytesOf(manifest.task.path);
     const taskChanged = taskBytes === null || sha(taskBytes) !== manifest.task.sha;
     const ratedRisky = result.answer.class.level === 'risky' ? result.answer.class.files.map(state.pathKey) : [];
     const acked = [], pending = [], escalated = [];
     for (const [key, f] of Object.entries(manifest.files)) {
-      if (ratedRisky.includes(key)) { s.escalations[key] = { chain: id, at: Date.now() }; escalated.push(f.path); }
+      if (ratedRisky.includes(key)) {
+        s.escalations[key] = { chain: id, at: Date.now() };
+        chain.risky = { ...chain.risky, [key]: Date.now() }; // (this chain's own record: closing it needs a paired review)
+        escalated.push(f.path);
+      }
       const record = s.changes[key];
       const sameRecord = record ? record.at === f.at && record.session === f.session : f.at === null;
       const reviewed = !taskChanged && !s.escalations[key];
@@ -283,17 +380,24 @@ function apply(root, manifest, result) {
       chain.files[key] = f.path;
       chain.frozen[key] = f.frozen;
     }
+    chain.rounds.push(manifest.attempt);
+    chain.rev += 1;
+    chain.task = manifest.task;
+    chain.codexSession = result.session || null; // (a fallback round leaves none: the next round starts fresh with the history)
     s.applied[manifest.attempt] = true;
     s.chains[id] = chain;
     if (!write(stateFile, JSON.stringify(s, null, 2))) return { refused: 'the lock was taken over, so the state was not changed' };
-    return { chain: id, findings: chain.findings, acked, pending, escalated, taskChanged };
+    // (gaps are marked fixed only once the state holds their resolution: a failed write leaves them open, never hidden)
+    const marked = fixedGaps.reduce((t, g) => gaps.composeMark(t, g, 'fixed') || t, gapText);
+    if (fixedGaps.length && marked !== gapText) write(gapsFile, marked);
+    return { chain: id, added: Object.fromEntries(added.map(fid => [fid, chain.findings[fid]])), acked, pending, escalated, taskChanged };
   });
   return done.ok === false ? { refused: done.why } : done;
 }
 
-// What Claude reads after a review: the answer with the chain's finding ids, and what was acknowledged.
+// What Claude reads after a round: the answer with the chain's ids for its new findings, and what was acknowledged.
 function summary(a, applied) {
-  const findings = Object.entries(applied.findings).map(([id, f]) => ({ ...f, id }));
+  const findings = Object.entries(applied.added).map(([id, f]) => ({ ...f, id }));
   const lines = [`chain ${applied.chain}`, answer.render({ ...a, findings })];
   if (applied.acked.length) lines.push(`acknowledged: ${applied.acked.join(', ')}`);
   if (applied.pending.length) lines.push(`still pending (changed during the review, rated risky, or the task changed): ${applied.pending.join(', ')}`);
@@ -312,7 +416,7 @@ async function review(root, { session = null, files = [], taskFile = null, evide
   if (!session && !files.length) return refused('without a session id, name the files to review');
   const resolved = resolveNamed(root, files);
   if (resolved.why) return refused(resolved.why);
-  const attempt = `${new Date().toISOString().replace(/\D/g, '').slice(0, 14)}-${crypto.randomBytes(3).toString('hex')}`;
+  const attempt = newAttempt();
   const admitted = admit(root, { attempt, session, named: resolved.named });
   if (admitted.refused) return refused(admitted.refused);
   const bundle = bundleDir(root, attempt);
@@ -329,6 +433,110 @@ async function review(root, { session = null, files = [], taskFile = null, evide
   }
 }
 
+// The next round of a chain: its open findings by id, Claude's response (`responseFile`) and the code changed since
+// the last round. Returns the same shape as `review`.
+async function followup(root, { chain: id, responseFile, evidenceFile = null }) {
+  const refused = why => ({ status: 'REFUSED', text: `REFUSED: ${why}` });
+  const response = responseFile ? bytesOf(responseFile) : null;
+  if (response === null) return refused('a follow-up needs Claude\'s response file');
+  const attempt = newAttempt();
+  const admitted = admit(root, { attempt, chain: id });
+  if (admitted.refused) return refused(admitted.refused);
+  const bundle = bundleDir(root, attempt);
+  try {
+    const { chain } = admitted;
+    const frozen = freeze(root, { attempt, session: chain.session, ...admitted, taskFile: chain.task.path, evidenceFile, response: textOf(response) });
+    if (frozen.why) return refused(frozen.why);
+    const result = await run(root, frozen.manifest, frozen.prompt, { resume: chain.codexSession, history: historyOf(root, chain) });
+    if (result.status !== 'OK') return { status: result.status, text: `${result.status}: ${result.why}`, bundle };
+    const applied = apply(root, frozen.manifest, result);
+    if (applied.refused) return { status: 'NOT_DONE', text: `NOT_DONE: ${applied.refused}`, bundle };
+    return { status: 'DONE', chain: id, text: summary(result.answer, applied), bundle };
+  } finally {
+    release(root, attempt, Object.keys(admitted.files));
+  }
+}
+
+const ROUND_LIMIT = /\bround(s)?\b.*\blimit\b|\blimit\b.*\bround/i;
+
+// Closes a chain. Every open BUG needs a disposition in `notes`: "gap: <why it is left unfixed>" ({ F3: 'gap: ...' }),
+// which relabels it a GAP. A fix counts only once a follow-up resolved it, so nothing else is accepted, and the
+// round limit is never a reason. A file rated risky in this chain needs a paired review recorded after the chain
+// began. The relabelled BUGs go into KNOWN_GAPS.md first, under the same lock. `rev` is the revision the caller saw.
+function close(root, { chain: id, notes = {}, rev }) {
+  const stateFile = state.files.project(root);
+  const done = state.withLock(stateFile, write => {
+    const current = state.read(stateFile);
+    if (current.unreadable) return { refused: `the state can't be read (${current.unreadable})` };
+    const s = withMaps(current.data);
+    const c = s.chains[id];
+    if (!c || c.closed) return { refused: `chain ${id} is ${c ? 'already closed' : 'unknown'}` };
+    if (c.rev !== rev) return { refused: `chain ${id} is at revision ${c.rev}, not ${rev}: read it again before closing it` };
+    const problems = [];
+    const relabel = [];
+    for (const [fid, f] of Object.entries(c.findings)) {
+      if (f.label !== 'BUG' || f.status !== 'open') continue;
+      const why = ((String(notes[fid] || '').trim().match(/^gap:\s*([\s\S]+)$/i) || [])[1] || '').trim();
+      if (!why) problems.push(`${fid} is an open BUG: close it only with "gap: <why it is left unfixed>" (a fix counts once a follow-up resolves it)`);
+      else if (ROUND_LIMIT.test(why)) problems.push(`${fid}: the round limit is never a reason`);
+      else relabel.push([fid, f, why]);
+    }
+    for (const key of Object.keys(c.risky || {})) {
+      if (!((s.riskyReviews || {})[key] > c.began)) problems.push(`${c.files[key]} was rated risky in this chain: it needs a paired review recorded after the chain began`);
+    }
+    if (problems.length) return { refused: problems.join('; ') };
+    if (relabel.length) {
+      const known = gaps.readFile(root);
+      if (known.unreadable) return { refused: `KNOWN_GAPS.md can't be read (${known.unreadable}), so nothing was closed` };
+      const composed = gaps.compose(root, known.text, relabel.map(([fid, f, why]) => gapItem(c.task, c.rounds[c.rounds.length - 1], fid, f, why)));
+      if (composed.added.length && !write(path.join(root, gaps.NAME), composed.text)) return { refused: 'the lock was taken over, so nothing was closed' };
+      relabel.forEach(([, f, why], i) => Object.assign(f, { label: 'GAP', status: 'closed', reason: why, gap: composed.ids[i] }));
+    }
+    c.closed = true;
+    c.rev += 1;
+    if (!write(stateFile, JSON.stringify(s, null, 2))) return { refused: 'the lock was taken over, so the state was not changed' };
+    return { chain: id, relabelled: relabel.map(([fid, f]) => `${fid} (${f.gap})`) };
+  });
+  if (done.ok === false || done.refused) return { status: 'REFUSED', text: `REFUSED: ${done.why || done.refused}` };
+  return { status: 'DONE', text: `closed chain ${id}${done.relabelled.length ? `; recorded as gaps: ${done.relabelled.join(', ')}` : ''}` };
+}
+
+// Applies a fallback reviewer's answer (`answerFile`) to a bundle GPT couldn't finish: checked against the bundle's
+// own manifest, with its files reserved again, applied once and only to the frozen versions.
+function fallback(root, { bundle, answerFile }) {
+  const refused = why => ({ status: 'REFUSED', text: `REFUSED: ${why}` });
+  let manifest;
+  try {
+    manifest = JSON.parse(fs.readFileSync(path.join(bundle, 'manifest.json'), 'utf8'));
+  } catch (e) {
+    return refused(`${bundle} has no readable manifest (${e.message})`);
+  }
+  if (state.projectDir(manifest.root) !== state.projectDir(root)) return refused(`${bundle} belongs to another project (${manifest.root})`);
+  const given = answerFile ? bytesOf(answerFile) : null;
+  if (given === null) return refused('the fallback answer file is missing');
+  const checked = answer.read(manifest.kind, textOf(given), askedOf(manifest));
+  if (checked.problems.length) return refused(`the answer has problems: ${checked.problems.join('; ')}`);
+  const keys = Object.keys(manifest.files);
+  const reserved = state.update(state.files.project(root), data => {
+    const s = withMaps(data);
+    dropDeadMarks(s);
+    if (s.applied[manifest.attempt]) return 'this bundle\'s answer was already applied';
+    const busy = keys.filter(k => s.running[k]);
+    if (busy.length) return `already in a running review: ${busy.map(k => manifest.files[k].path).join(', ')}`;
+    for (const key of keys) s.running[key] = { attempt: manifest.attempt, pid: process.pid };
+    return null;
+  });
+  if (!reserved.ok || reserved.value) return refused(reserved.why || reserved.value);
+  try {
+    fs.writeFileSync(path.join(bundle, 'turn-fallback.md'), `# Prompt\n\n${fs.readFileSync(path.join(bundle, 'prompt.md'), 'utf8')}\n\n# Answer\n\n${textOf(given)}\n`);
+    const applied = apply(root, manifest, { answer: checked.answer, session: null });
+    if (applied.refused) return { status: 'NOT_DONE', text: `NOT_DONE: ${applied.refused}`, bundle };
+    return { status: 'DONE', chain: applied.chain, text: summary(checked.answer, applied), bundle };
+  } finally {
+    release(root, manifest.attempt, keys);
+  }
+}
+
 // ---- Queries for the hooks and the CLI (they throw when the state can't be read) ----
 
 function stateOf(root) {
@@ -341,4 +549,4 @@ const openChains = root => Object.entries(stateOf(root).chains).filter(([, c]) =
 const openBugs = root => Object.entries(stateOf(root).chains).filter(([, c]) => !c.closed)
   .flatMap(([chain, c]) => Object.entries(c.findings).filter(([, f]) => f.label === 'BUG' && f.status === 'open').map(([id, f]) => ({ chain, id, ...f })));
 
-module.exports = { review, pending, openChains, openBugs, DELETED };
+module.exports = { review, followup, close, fallback, pending, openChains, openBugs, DELETED };

@@ -56,6 +56,15 @@ Recorded overruns:
   - Projects already hold `KNOWN_GAPS.md` files that the old setup wrote, some with Windows line endings. New entries are appended so that every existing byte stays, and a status change rewrites only that entry's header.
   - The project and home folders and e-mail addresses are taken out of every field, because the file is committed to public repositories.
   - A file that can't be read is never taken as empty.
+- `review.js`, about 545 lines: what the three plan-review rounds of step 2b required, so that only reviewed versions are ever acknowledged:
+  - choosing and reserving the files in one state transaction, with dead reservations reclaimed;
+  - a bundle per attempt (frozen copies, prompt, manifest), so the fallback reviewer judges the same material and an answer applies only once;
+  - chain revisions, so a stale follow-up, close or fallback changes nothing;
+  - change generations, so an edit made during a review stays pending;
+  - baselines from the last reviewed version or from git for shell changes and deletions;
+  - each round's turns saved, so a fresh GPT session can continue a chain;
+  - gap entries written under the state lock.
+- Tests, about 1,140 lines: the review paths above are each covered by the at most five cases of their test plan, and those cases need real processes and git projects.
 
 ## 4. Commands
 
