@@ -62,40 +62,53 @@ function list(root) {
   return current.unreadable ? { ok: false, why: `${NAME} can't be read (${current.unreadable})` } : { ok: true, entries: parse(current.text) };
 }
 
-// Adds findings left unfixed: [{ task, where: [places], problem, trigger, severity, fix, test, log, why }].
-// The same finding (log, problem and place) is recorded once. Returns { ok, ids } or { ok: false, why }.
+// The file's text, or { unreadable }, for a caller that holds the project lock and writes the file itself.
+const readFile = root => readText(fileOf(root));
+
+// `text` with findings left unfixed appended: [{ task, where: [places], problem, trigger, severity, fix, test,
+// log, why }]. The same finding (log, problem and place) is recorded once. Returns { text, ids, added }: `ids`
+// gives each item's entry (the existing one for a finding already recorded), `added` the new ones. Pure: the
+// caller holds the project lock and writes the text.
+function compose(root, text, items) {
+  const have = parse(text);
+  const keyOf = fields => `${fields.Log}|${fields.Problem}|${fields.Where}`;
+  const known = new Map(have.map(e => [keyOf(e.fields), e.id]));
+  let n = have.reduce((top, e) => Math.max(top, Number(e.id.slice(1))), 0);
+  const eol = text.includes('\r\n') ? '\r\n' : '\n';
+  const date = new Date().toISOString().slice(0, 10);
+  const ids = [];
+  const added = [];
+  let more = '';
+  for (const item of items) {
+    const fields = {
+      Task: clean(root, item.task),
+      Where: (item.where || []).map(w => place(root, w)).join('; ') || '-',
+      Problem: clean(root, item.problem),
+      Trigger: clean(root, item.trigger),
+      Fix: clean(root, item.fix) + (item.test ? ` — test: ${clean(root, item.test)}` : ''),
+      Log: clean(root, path.basename(String(item.log || '-'))),
+      'Why skipped': clean(root, item.why),
+    };
+    if (!known.has(keyOf(fields))) {
+      const severity = clean(root, item.severity || 'UNKNOWN').toUpperCase().replace(/\W+/g, '_');
+      known.set(keyOf(fields), `G${++n}`);
+      added.push(`G${n}`);
+      more += [``, `## G${n} · open · ${date} · ${severity}`, ...Object.entries(fields).map(([k, v]) => `- ${k}: ${v}`), ``].join(eol);
+    }
+    ids.push(known.get(keyOf(fields)));
+  }
+  return { text: added.length ? (text || HEAD.replace(/\n/g, eol)) + more : text, ids, added };
+}
+
+// Adds findings left unfixed (see compose). Returns { ok, ids } (the new entries) or { ok: false, why }.
 function add(root, items) {
   return state.withLock(state.files.project(root), write => {
-    const current = readText(fileOf(root));
+    const current = readFile(root);
     if (current.unreadable) return { ok: false, why: `${NAME} can't be read (${current.unreadable}), so nothing was added` };
-    const have = parse(current.text);
-    const keyOf = fields => `${fields.Log}|${fields.Problem}|${fields.Where}`;
-    const seen = new Set(have.map(e => keyOf(e.fields)));
-    let n = have.reduce((top, e) => Math.max(top, Number(e.id.slice(1))), 0);
-    const eol = current.text.includes('\r\n') ? '\r\n' : '\n';
-    const date = new Date().toISOString().slice(0, 10);
-    const ids = [];
-    let added = '';
-    for (const item of items) {
-      const fields = {
-        Task: clean(root, item.task),
-        Where: (item.where || []).map(w => place(root, w)).join('; ') || '-',
-        Problem: clean(root, item.problem),
-        Trigger: clean(root, item.trigger),
-        Fix: clean(root, item.fix) + (item.test ? ` — test: ${clean(root, item.test)}` : ''),
-        Log: clean(root, path.basename(String(item.log || '-'))),
-        'Why skipped': clean(root, item.why),
-      };
-      if (seen.has(keyOf(fields))) continue;
-      seen.add(keyOf(fields));
-      const severity = clean(root, item.severity || 'UNKNOWN').toUpperCase().replace(/\W+/g, '_');
-      ids.push(`G${++n}`);
-      added += [``, `## G${n} · open · ${date} · ${severity}`, ...Object.entries(fields).map(([k, v]) => `- ${k}: ${v}`), ``].join(eol);
-    }
-    if (!ids.length) return { ok: true, ids };
-    const base = current.text || HEAD.replace(/\n/g, eol);
-    if (!write(fileOf(root), base + added)) return { ok: false, why: `another process took over the lock, so nothing was added to ${NAME}` };
-    return { ok: true, ids };
+    const result = compose(root, current.text, items);
+    if (!result.added.length) return { ok: true, ids: [] };
+    if (!write(fileOf(root), result.text)) return { ok: false, why: `another process took over the lock, so nothing was added to ${NAME}` };
+    return { ok: true, ids: result.added };
   });
 }
 
@@ -137,4 +150,4 @@ function addLesson(root, lesson) {
   });
 }
 
-module.exports = { NAME, STATUSES, list, add, mark, openFor, lessons, addLesson };
+module.exports = { NAME, STATUSES, list, readFile, compose, add, mark, openFor, lessons, addLesson };

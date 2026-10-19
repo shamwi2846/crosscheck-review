@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert');
 const answer = require('../src/answer');
 
-const asked = { requirementIds: ['R1', 'R2'], files: ['src/a.js'], openIds: ['F1', 'F2'] };
+const asked = { rowIds: ['R1', 'R2'], linkIds: ['R1', 'R2'], files: ['src/a.js'], openIds: ['F1', 'F2'] };
 const finding = { severity: 'HIGH', title: 'sum is wrong', location: 'src/a.js:3', trigger: 'add(1, 2)', harm: 'wrong total',
   failure: 'returns -1', fix: 'use +', test: 'add(1, 2) === 3', label: 'BUG', reqs: ['R1'] };
 const good = () => ({
@@ -27,6 +27,7 @@ test('answers with missing or duplicate requirement ids, an unknown follow-up id
     ['a missing follow-up id', a => { a.followups.pop(); }, /finding F2 appears 0 times/],
     ['a clean verdict next to a maintained BUG', a => { a.verdict = 'RESOLVED'; a.findings = []; a.requirements[0].status = 'MET'; }, /verdict RESOLVED sits next to/],
     ['a risky class naming a file that was not reviewed', a => { a.class.files = ['src/other.js']; }, /names src\/other\.js, which wasn't reviewed/],
+    ['a finding located in a file that was not reviewed', a => { a.findings[0].location = 'src/a.js.bak:3'; }, /located at src\/a\.js\.bak:3/],
     ['a field outside the schema (a fallback answer)', a => { a.extra = 1; }, /answer\.extra isn't part of the answer/],
   ];
   for (const [name, change, expected] of cases) {

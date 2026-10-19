@@ -2,6 +2,7 @@
 // It never imitates Codex's behavior; each answer is pinned in the test (FAKE_CODEX_SPEC, FAKE_CODEX_LOG).
 'use strict';
 const fs = require('fs');
+const path = require('path');
 const { spawn } = require('child_process');
 
 const args = process.argv.slice(2);
@@ -34,12 +35,12 @@ if (args[0] === '--role') {
   const kind = args[0] === 'exec' ? 'exec' : `${args[0]} ${args[1]}`; // 'exec', 'plugin list', 'mcp list', 'features list'
   const earlier = fs.existsSync(log) ? fs.readFileSync(log, 'utf8').split('\n').filter(Boolean).map(JSON.parse) : [];
   const index = earlier.filter(call => call.kind === kind).length;
-  fs.appendFileSync(log, JSON.stringify({ kind, args }) + '\n');
   const answers = spec[kind] || [];
   const answer = answers[Math.min(index, answers.length - 1)] || {};
   const outFile = args[args.indexOf('-o') + 1];
 
   if (kind !== 'exec') {
+    fs.appendFileSync(log, JSON.stringify({ kind, args }) + '\n');
     process.stdout.write(answer.out || '');
     process.exit(answer.code || 0);
   }
@@ -47,6 +48,7 @@ if (args[0] === '--role') {
   let prompt = '';
   process.stdin.on('data', d => { prompt += d; });
   process.stdin.on('end', () => {
+    fs.appendFileSync(log, JSON.stringify({ kind, args, prompt }) + '\n'); // (with the prompt it was sent)
     if (answer.hang) {
       // a tree that lives forever, under this launcher, which waits forever too
       startRole('tree', [answer.hang, 'ignore'], { stdio: 'ignore' });
@@ -68,10 +70,19 @@ if (args[0] === '--role') {
       process.stderr.write(answer.fail);
       process.exit(answer.code || 1);
     } else {
-      fs.writeFileSync(outFile, answer.text || 'answer');
+      const reply = () => {
+        fs.writeFileSync(outFile, answer.text || 'answer');
+        sessionStarted();
+        event({ type: 'item.completed', item: { id: 'item_0', type: 'agent_message', text: answer.text || 'answer' } });
+        event({ type: 'turn.completed' });
+      };
+      if (!answer.hold) return reply();
+      // `hold`: a folder where it marks `started` and waits for `go` before answering, so a test can act meanwhile
       sessionStarted();
-      event({ type: 'item.completed', item: { id: 'item_0', type: 'agent_message', text: answer.text || 'answer' } });
-      event({ type: 'turn.completed' });
+      fs.writeFileSync(path.join(answer.hold, 'started'), '');
+      const wait = setInterval(() => {
+        if (fs.existsSync(path.join(answer.hold, 'go'))) { clearInterval(wait); reply(); }
+      }, 20);
     }
   });
 }

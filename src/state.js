@@ -165,6 +165,14 @@ function update(file, fn) {
   });
 }
 
+// A project file's identity in state: its project-relative path with forward slashes, lowercased on Windows,
+// where two spellings of one path name the same file.
+function pathKey(rel) {
+  const p = String(rel).replace(/\\/g, '/').replace(/^(\.\/)+/, '');
+  return process.platform === 'win32' ? p.toLowerCase() : p;
+}
+const fileKey = (root, file) => pathKey(path.relative(root, path.resolve(root, file)));
+
 // The project a folder belongs to: the top folder of its git repository, or null outside git.
 function projectRoot(dir) {
   const r = spawnSync('git', ['rev-parse', '--show-toplevel'], { cwd: dir, encoding: 'utf8', windowsHide: true });
@@ -196,4 +204,4 @@ function config() {
   return { ...DEFAULT_CONFIG, ...(read(files.config()).data || {}) };
 }
 
-module.exports = { HOME, read, update, withLock, projectRoot, projectDir, files, config };
+module.exports = { HOME, read, update, withLock, alive, pathKey, fileKey, projectRoot, projectDir, files, config };

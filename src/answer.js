@@ -1,6 +1,7 @@
 // answer.js: the shape of GPT's answers, as JSON Schemas that Codex enforces (--output-schema), and the checks of
 // their meaning that a schema can't express. Nothing GPT writes is parsed out of free text or rewritten.
 'use strict';
+const { pathKey } = require('./state');
 
 const text = { type: 'string' };
 const oneOf = (...values) => ({ type: 'string', enum: values });
@@ -60,10 +61,12 @@ function mismatch(schema, value, where = 'answer') {
   return null;
 }
 
-const samePath = p => p.replace(/\\/g, '/').replace(/^\.\//, '').toLowerCase();
+// The reviewed file a finding's location names ("path", "path:12" or "path:12-30"), as a key; '-' is the task.
+const locationKey = location => (location === '-' ? '-' : pathKey(location.replace(/:\d+(-\d+)?$/, '')));
 
-// Reads an answer of `kind` ('review' or 'followup'). `asked` says what GPT was asked about: { requirementIds,
-// files, openIds (follow-ups) }. Returns { answer, problems }: every problem found, for GPT's one repair.
+// Reads an answer of `kind` ('review' or 'followup'). `asked` says what GPT was asked about: { rowIds (the
+// requirements to rate), linkIds (every requirement a finding may name), files (the reviewed paths), openIds
+// (follow-ups) }. Returns { answer, problems }: every problem found, for GPT's one repair.
 function read(kind, answerText, asked) {
   let answer;
   try {
@@ -81,15 +84,18 @@ function read(kind, answerText, asked) {
     }
     for (const id of new Set(ids)) if (!expected.includes(id)) problems.push(`${what} ${id} wasn't asked about`);
   };
-  exactlyOnce(answer.requirements.map(r => r.id), asked.requirementIds, 'requirement');
+  exactlyOnce(answer.requirements.map(r => r.id), asked.rowIds, 'requirement');
   if (kind === 'followup') exactlyOnce(answer.followups.map(f => f.id), asked.openIds, 'finding');
+  const reviewed = asked.files.map(pathKey);
   for (const f of answer.findings) {
-    for (const id of f.reqs) if (!asked.requirementIds.includes(id)) problems.push(`finding "${f.title}" names requirement ${id}, which doesn't exist`);
+    for (const id of f.reqs) if (!asked.linkIds.includes(id)) problems.push(`finding "${f.title}" names requirement ${id}, which doesn't exist`);
     if ((f.severity === 'CRITICAL' || f.severity === 'HIGH') && !(f.test || '').trim()) problems.push(`finding "${f.title}" is ${f.severity} but has no test`);
+    if (locationKey(f.location) !== '-' && !reviewed.includes(locationKey(f.location))) {
+      problems.push(`finding "${f.title}" is located at ${f.location}: a location must be one of the reviewed paths (optionally with :line), or - for the task as a whole`);
+    }
   }
   if (answer.class.level === 'risky' && !answer.class.files.length) problems.push('a risky class must name the files it applies to');
-  const reviewed = asked.files.map(samePath);
-  for (const file of answer.class.files) if (!reviewed.includes(samePath(file))) problems.push(`the class names ${file}, which wasn't reviewed`);
+  for (const file of answer.class.files) if (!reviewed.includes(pathKey(file))) problems.push(`the class names ${file}, which wasn't reviewed`);
   const issues = answer.findings.length > 0
     || answer.requirements.some(r => r.status === 'NOT_MET' || r.status === 'PARTIAL')
     || (kind === 'followup' && answer.followups.some(f => f.status === 'MAINTAIN'));
@@ -113,4 +119,4 @@ function render(answer) {
   return lines.join('\n');
 }
 
-module.exports = { SCHEMAS, read, render };
+module.exports = { SCHEMAS, read, render, locationKey };
