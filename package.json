@@ -1,0 +1,12 @@
+{
+  "name": "crosscheck",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Claude writes the code, GPT checks it.",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test"
+  }
+}
