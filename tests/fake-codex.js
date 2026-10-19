@@ -6,12 +6,14 @@ const { spawn } = require('child_process');
 
 const args = process.argv.slice(2);
 const forever = () => setInterval(() => {}, 1000);
+const event = e => process.stdout.write(`${JSON.stringify(e)}\n`); // (Codex's --json events, as seen live)
+const sessionStarted = () => event({ type: 'thread.started', thread_id: '0123abcd-0000-4000-8000-00000000c0de' });
 const startRole = (role, roleArgs, options) => spawn(process.execPath, [__filename, '--role', role, ...roleArgs], options);
 
 if (args[0] === '--role') {
   // Helper processes for the process-tree cases, not calls. `tree`: a process and its child that live forever,
-  // writing [parent, own, child] ids. `native`: like the native Codex under its launcher, it prints a header,
-  // starts a detached tree that keeps the output pipes open, answers, prints more after 2 s and exits after 6 s.
+  // writing [parent, own, child] ids. `native`: like the native Codex under its launcher, it starts a session,
+  // starts a detached tree that keeps the output pipes open, answers, reports more after 2 s and exits after 6 s.
   const [, role, pidFile, stdio, outFile, text] = args;
   if (role === 'idle') forever();
   if (role === 'tree') {
@@ -20,10 +22,10 @@ if (args[0] === '--role') {
     forever();
   }
   if (role === 'native') {
-    process.stderr.write('OpenAI Codex (stub)\n');
+    sessionStarted();
     startRole('tree', [pidFile, 'inherit'], { stdio: 'inherit', detached: true });
     fs.writeFileSync(outFile, text);
-    setTimeout(() => process.stderr.write('working\n'), 2000);
+    setTimeout(() => event({ type: 'turn.started' }), 2000);
     setTimeout(() => process.exit(0), 6000);
   }
 } else {
@@ -53,12 +55,22 @@ if (args[0] === '--role') {
       // like Codex's launcher: it runs the native process and exits when that exits, leaving the tree behind
       const native = startRole('native', [answer.orphan, 'inherit', outFile, answer.text || 'answer'], { stdio: 'inherit' });
       native.on('exit', code => process.exit(code));
+    } else if (answer.fail && answer.gpt) {
+      // a failure during a session in which GPT already wrote `gpt`
+      sessionStarted();
+      event({ type: 'item.completed', item: { id: 'item_0', type: 'agent_message', text: answer.gpt } });
+      event({ type: 'error', message: answer.fail });
+      event({ type: 'turn.failed', error: { message: answer.fail } });
+      process.exit(answer.code || 1);
     } else if (answer.fail) {
+      // a failure before any session starts: plain text
       process.stderr.write(answer.fail);
       process.exit(answer.code || 1);
     } else {
       fs.writeFileSync(outFile, answer.text || 'answer');
-      process.stdout.write('session id: 0123abcd-0000-4000-8000-00000000c0de\n');
+      sessionStarted();
+      event({ type: 'item.completed', item: { id: 'item_0', type: 'agent_message', text: answer.text || 'answer' } });
+      event({ type: 'turn.completed' });
     }
   });
 }

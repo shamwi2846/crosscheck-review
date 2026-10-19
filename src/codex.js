@@ -44,7 +44,8 @@ function buildArgs({ mode, effort, cwd, outFile, schemaFile, resume, persist, do
   const args = [cfg.codexJs, 'exec'];
   if (resume) args.push('resume');
   if (mode !== 'computer') args.push('--ignore-user-config');
-  args.push('-m', cfg.model, ...configPairs([`model_reasoning_effort=${effort}`, `windows.sandbox=${cfg.windowsSandbox}`]));
+  // (--json: Codex reports in JSON events, so its own errors can't be confused with the text GPT writes)
+  args.push('--json', '-m', cfg.model, ...configPairs([`model_reasoning_effort=${effort}`, `windows.sandbox=${cfg.windowsSandbox}`]));
   if (mode === 'computer') {
     args.push(...lockdown);
   } else {
@@ -200,27 +201,27 @@ for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) {
   if (os.constants.signals[signal]) process.on(signal, () => process.exit(130)); // (exit stops the runs)
 }
 
-// Starts Codex with the prompt on stdin. Resolves { output, failure } (failure: null, 'TIMEOUT' or a reason)
-// once everything the run started has been stopped. If processes Codex leaves behind hold its output open, the
-// run ends CLOSE_GRACE_MS after Codex exits, so they can't hang it.
+// Starts Codex with the prompt on stdin. Resolves { stdout, stderr, failure } (failure: null, 'TIMEOUT' or a
+// reason) once everything the run started has been stopped. If processes Codex leaves behind hold its output
+// open, the run ends CLOSE_GRACE_MS after Codex exits, so they can't hang it.
 function spawnCodex(args, prompt, timeoutMs, onSpawn) {
   return new Promise(resolve => {
     const child = spawn(process.execPath, args, { windowsHide: true, detached: process.platform !== 'win32' });
     const run = { child, since: Date.now(), known: [[child.pid, null]] };
     running.add(run);
     if (onSpawn) onSpawn(child);
-    let output = '';
+    const output = { stdout: '', stderr: '' };
     let noteTries = process.platform === 'win32' ? 3 : 0;
     let timedOut = false;
     let settled = false;
     let grace;
     const timer = setTimeout(() => { timedOut = true; stopRun(run); }, timeoutMs);
-    const collect = d => {
-      output += d;
+    const collect = stream => d => {
+      output[stream] += d;
       if (noteTries > 0) noteTries = noteProcesses(run) ? 0 : noteTries - 1;
     };
-    child.stdout.on('data', collect);
-    child.stderr.on('data', collect);
+    child.stdout.on('data', collect('stdout'));
+    child.stderr.on('data', collect('stderr'));
     const failureFor = code => (timedOut ? 'TIMEOUT' : code === 0 ? null : `Codex exited with ${code}`);
     const settle = failure => {
       if (settled) return;
@@ -229,7 +230,7 @@ function spawnCodex(args, prompt, timeoutMs, onSpawn) {
       clearTimeout(grace);
       stopRun(run);
       running.delete(run);
-      resolve({ output, failure });
+      resolve({ ...output, failure });
     };
     child.on('error', e => settle(`Codex could not start (${e.message})`));
     child.on('exit', code => {
@@ -245,7 +246,25 @@ function spawnCodex(args, prompt, timeoutMs, onSpawn) {
   });
 }
 
-const lastLines = text => text.trim().split(/\r?\n/).slice(-5).join(' | ');
+// What Codex itself reported: its session id and its errors. With --json it prints one JSON event per line on
+// stdout, and GPT's messages only ever appear inside events. So Codex's errors are its "error" and
+// "turn.failed" events, plus anything it printed that isn't an event (a failure before the session starts);
+// text GPT writes, which may well quote words like "rate limit", never counts.
+function codexReport(stdout, stderr) {
+  let sessionId = null;
+  const errors = [];
+  for (const line of `${stdout}\n${stderr}`.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    let event = null;
+    try { event = JSON.parse(line); } catch {}
+    if (!event && line.trim().startsWith('{')) continue; // (an event cut off when Codex died: it may hold GPT's text)
+    if (!event || typeof event !== 'object') errors.push(line.trim());
+    else if (event.type === 'thread.started') sessionId = event.thread_id || null;
+    else if (event.type === 'error') errors.push(String(event.message));
+    else if (event.type === 'turn.failed') errors.push(String((event.error || {}).message));
+  }
+  return { sessionId, errors: errors.join('\n') };
+}
 
 async function runOnce(request) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'crosscheck-'));
@@ -258,19 +277,21 @@ async function runOnce(request) {
     }
     const args = buildArgs({ ...request, outFile, schemaFile, cwd: request.cwd || process.cwd() });
     const timeoutMs = request.timeoutMs || (TIMEOUT_MINUTES[request.effort] || 30) * 60000;
-    const { output, failure } = await spawnCodex(args, request.prompt, timeoutMs, request.onSpawn);
+    const { stdout, stderr, failure } = await spawnCodex(args, request.prompt, timeoutMs, request.onSpawn);
     let text = '';
     try { text = fs.readFileSync(outFile, 'utf8'); } catch {}
     const problem = failure || (text.trim() ? null : 'GPT returned no answer');
+    const { sessionId, errors } = codexReport(stdout, stderr);
+    // (only a failed run counts, and not a timeout: a killed run's last words are no outage)
+    const outage = !!failure && failure !== 'TIMEOUT';
     return {
       ok: !problem,
       text,
-      sessionId: (output.match(/session id:\s*([0-9a-f-]{36})/i) || [])[1] || null,
-      reason: problem ? `${problem}${output.trim() ? ` — ${lastLines(output)}` : ''}` : null,
+      sessionId,
+      reason: problem ? `${problem}${errors ? ` — ${errors.split('\n').slice(-3).join(' | ').slice(0, 600)}` : ''}` : null,
       timedOut: failure === 'TIMEOUT',
-      // (only a failed run's output counts: an answer that merely mentions a limit is no outage)
-      limit: !!failure && LIMIT_ERROR.test(output),
-      login: !!failure && LOGIN_ERROR.test(output),
+      limit: outage && LIMIT_ERROR.test(errors),
+      login: outage && LOGIN_ERROR.test(errors),
     };
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });

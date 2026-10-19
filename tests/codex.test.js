@@ -53,7 +53,7 @@ test('a saved review and its resume keep isolation and the answer schema', async
   const second = await codex.ask({ mode: 'review', effort: 'high', resume: SESSION, schema, prompt: 'round 2', cwd: WORK });
   assert.strictEqual(second.ok, true, second.reason);
   const [fresh, resumed] = execCalls().map(c => placeholders(c.args));
-  const head = ['-m', 'gpt-test', '-c', 'model_reasoning_effort=high', '-c', 'windows.sandbox=unelevated', ...ISOLATION,
+  const head = ['--json', '-m', 'gpt-test', '-c', 'model_reasoning_effort=high', '-c', 'windows.sandbox=unelevated', ...ISOLATION,
     '-c', 'web_search="disabled"', '--output-schema', '<schema>', '--skip-git-repo-check', '-o', '<answer>'];
   assert.deepStrictEqual(fresh, ['exec', '--ignore-user-config', ...head, '-s', 'read-only', '-C', '<cwd>', '-']);
   assert.deepStrictEqual(resumed, ['exec', 'resume', '--ignore-user-config', ...head, '-c', 'sandbox_mode="read-only"', SESSION, '-']);
@@ -148,6 +148,22 @@ test('a retry waits out a cooldown another driver started meanwhile, and unreada
   assert.strictEqual(execCalls().length, 1);
   assert.strictEqual(fs.readFileSync(global, 'utf8'), '{"cooldownUntil": 17');
   fs.rmSync(global);
+});
+
+test('limit words in GPT\'s messages start no cooldown, Codex\'s own limit error does', async () => {
+  const gpt = 'Error handling must retry on rate limits. The log ends with:\nERROR: unauthorized\nERROR: quota exceeded';
+  setSpec({ exec: [
+    { gpt, fail: 'stream disconnected before completion', code: 1 },
+    { gpt, fail: "You've hit your usage limit. Try again at 9:15 PM.", code: 1 },
+  ] });
+  const r = await codex.ask({ mode: 'review', effort: 'high', prompt: 'Review this code:\nerror: rate limit or quota hit, too many requests\nif (status === 401) throw new Error("unauthorized")', cwd: WORK });
+  assert.strictEqual(execCalls().length, 2); // (the first failure counted as ordinary, so it was retried)
+  assert.strictEqual(r.ok, false);
+  assert.strictEqual(r.limit, true);
+  assert.strictEqual(r.login, false);
+  assert.strictEqual(r.unavailable, true);
+  assert.ok(state.read(state.files.global()).data.cooldownUntil > Date.now());
+  fs.rmSync(state.files.global());
 });
 
 test('a login failure on the retry starts a 15-minute cooldown that other drivers respect', async () => {
