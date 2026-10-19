@@ -116,13 +116,14 @@ function unlock(file, token) {
   if (holds(file, token)) fs.rmSync(lockDir(file), { recursive: true, force: true });
 }
 
-// Replaces the file while this process still holds its lock. Returns false, writing nothing, if it doesn't.
-function writeAtomic(file, data, token) {
+// Replaces `file` with `text` while this process still holds the lock of `lockFile`. Returns false, writing
+// nothing, if it doesn't.
+function writeAtomic(file, text, lockFile, token) {
   const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
+  fs.writeFileSync(tmp, text);
   try {
     for (let attempt = 1; ; attempt++) {
-      if (!holds(file, token)) return false;
+      if (!holds(lockFile, token)) return false;
       try {
         fs.renameSync(tmp, file);
         return true;
@@ -136,22 +137,32 @@ function writeAtomic(file, data, token) {
   }
 }
 
-// Changes a file under its lock. `fn` gets the current data, changes it in place and may return a value.
+// Runs `fn(write)` under the lock of `lockFile`; the other files of a project (KNOWN_GAPS.md, lessons) share the
+// lock of its state file. `write(file, text)` replaces a file atomically while the lock is still held, and returns
+// false, writing nothing, if another process took the lock over. Returns what `fn` returns, or { ok: false, why }
+// when the lock is busy. If `fn` throws, the lock is released and the error passes on.
+function withLock(lockFile, fn) {
+  fs.mkdirSync(path.dirname(lockFile), { recursive: true });
+  const token = lock(lockFile);
+  // (if a crashed owner's process id went to a new process, the lock stays until the folder is deleted)
+  if (!token) return { ok: false, why: `${lockFile} is locked by another process (if no crosscheck command is running, delete ${lockDir(lockFile)})` };
+  try {
+    return fn((file, text) => writeAtomic(file, text, lockFile, token));
+  } finally {
+    unlock(lockFile, token);
+  }
+}
+
+// Changes a JSON file under its lock. `fn` gets the current data, changes it in place and may return a value.
 // Returns { ok: true, value } or { ok: false, why }. If `fn` throws, nothing is written.
 function update(file, fn) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const token = lock(file);
-  // (if a crashed owner's process id went to a new process, the lock stays until the folder is deleted)
-  if (!token) return { ok: false, why: `${file} is locked by another process (if no crosscheck command is running, delete ${lockDir(file)})` };
-  try {
+  return withLock(file, write => {
     const current = read(file);
     if (current.unreadable) return { ok: false, why: `${file} can't be read (${current.unreadable}), so it was left as it is` };
     const value = fn(current.data);
-    if (!writeAtomic(file, current.data, token)) return { ok: false, why: `another process took over ${file}'s lock, so nothing was written` };
+    if (!write(file, JSON.stringify(current.data, null, 2))) return { ok: false, why: `another process took over ${file}'s lock, so nothing was written` };
     return { ok: true, value };
-  } finally {
-    unlock(file, token);
-  }
+  });
 }
 
 // The project a folder belongs to: the top folder of its git repository, or null outside git.
@@ -185,4 +196,4 @@ function config() {
   return { ...DEFAULT_CONFIG, ...(read(files.config()).data || {}) };
 }
 
-module.exports = { HOME, read, update, projectRoot, projectDir, files, config };
+module.exports = { HOME, read, update, withLock, projectRoot, projectDir, files, config };

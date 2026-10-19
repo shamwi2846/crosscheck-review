@@ -48,8 +48,14 @@ Status: design only, nothing implemented yet. The old setup keeps running, and i
 Total: about 1,670 lines of code, install included, and 700 of tests, against about 7,900 and 7,600 today. These are ceilings, not targets: Fable's estimate for this scope is 1,200 to 1,500. Going over a budget needs a reason written into this file.
 
 Recorded overruns:
-- `state.js`, about 190 lines: lock ownership. A lock names its owner process and is reclaimed only once that process has ended, under a serialized reclaim guard. A write happens only while the lock is still held. Step 1's review found that age-based reclaim lets a stalled holder and a new holder overwrite each other.
-- `codex.js`, about 315 lines: process cleanup on Windows. Codex's launcher runs the native `codex.exe`, and what Codex starts hangs off that process, outside every job object. So the run notes its processes at the first output and stops everything descended from them, even after they exit. Step 1's review found that killing only the launcher's tree left those processes running and could hang the run.
+- `state.js`, about 200 lines: lock ownership. A lock names its owner process and is reclaimed only once that process has ended, under a serialized reclaim guard. A write happens only while the lock is still held. Step 1's review found that age-based reclaim lets a stalled holder and a new holder overwrite each other.
+- `codex.js`, about 345 lines:
+  - Process cleanup on Windows. Codex's launcher runs the native `codex.exe`, and what Codex starts hangs off that process, outside every job object. So the run notes its processes at the first output and stops everything descended from them, even after they exit. Step 1's review found that killing only the launcher's tree left those processes running and could hang the run.
+  - Reading Codex's `--json` events. Its plain output repeats the prompt and GPT's text, which falsely triggered the usage cooldown (found in PR 1).
+- `gaps.js`, about 140 lines: compatibility and privacy.
+  - Projects already hold `KNOWN_GAPS.md` files that the old setup wrote, some with Windows line endings. New entries are appended so that every existing byte stays, and a status change rewrites only that entry's header.
+  - The project and home folders and e-mail addresses are taken out of every field, because the file is committed to public repositories.
+  - A file that can't be read is never taken as empty.
 
 ## 4. Commands
 
