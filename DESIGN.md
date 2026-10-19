@@ -47,6 +47,10 @@ Status: design only, nothing implemented yet. The old setup keeps running, and i
 
 Total: about 1,670 lines of code, install included, and 700 of tests, against about 7,900 and 7,600 today. These are ceilings, not targets: Fable's estimate for this scope is 1,200 to 1,500. Going over a budget needs a reason written into this file.
 
+Recorded overruns:
+- `state.js`, about 190 lines: lock ownership. A lock names its owner process and is reclaimed only once that process has ended, under a serialized reclaim guard. A write happens only while the lock is still held. Step 1's review found that age-based reclaim lets a stalled holder and a new holder overwrite each other.
+- `codex.js`, about 315 lines: process cleanup on Windows. Codex's launcher runs the native `codex.exe`, and what Codex starts hangs off that process, outside every job object. So the run notes its processes at the first output and stops everything descended from them, even after they exit. Step 1's review found that killing only the launcher's tree left those processes running and could hang the run.
+
 ## 4. Commands
 
 - `review [--files a,b] [--risky] [--full] [--evidence-file out.log]`: the task's one review. Without `--files`, it covers this session's pending changes. Other sessions' changes are reviewed only when named explicitly. Shell-made changes are added with `--files`, and the commit guard catches anything left out. Big reviews can be split into parallel runs over different files. A relative path is looked up from the project's root. A path that matches nothing, or matches two different files, is refused before GPT is asked, unless it is a deletion git knows about. A whole-file audit of unchanged code is `review --full` (this happens automatically when nothing changed), not `digest`.
