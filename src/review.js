@@ -219,8 +219,12 @@ function freeze(root, { attempt, session, names = [], files, admittedAt, rev, ta
     const bytes = bytesOf(evidenceFile);
     if (bytes === null) return { why: `the evidence file ${evidenceFile} doesn't exist` };
     const mtime = file => (fs.existsSync(file) ? fs.statSync(file).mtimeMs : 0);
-    const stale = mtime(evidenceFile) < Math.max(...Object.values(files).map(f => mtime(path.join(root, f.path))));
-    evidence = `Supplied by Claude and unverified${stale ? '; STALE: it is older than the last change to a reviewed file' : ''}.\n${fence(textOf(bytes))}`;
+    // (a deletion leaves no time to compare with, so evidence next to one counts as stale)
+    const deleted = Object.values(files).some(f => f.frozen === DELETED);
+    const older = mtime(evidenceFile) < Math.max(...Object.values(files).map(f => mtime(path.join(root, f.path))));
+    const stale = deleted ? '; STALE: a reviewed file was deleted at an unknown time, so it may predate that change'
+      : older ? '; STALE: it is older than the last change to a reviewed file' : '';
+    evidence = `Supplied by Claude and unverified${stale}.\n${fence(textOf(bytes))}`;
   }
   const lessons = gaps.lessons(root).trim() || 'None.';
   const copies = Object.values(files).map(f => `- ${f.path}: ${f.frozen === DELETED ? '(deleted)' : snapFile(root, f.frozen)}`).join('\n');

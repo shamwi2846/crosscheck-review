@@ -62,10 +62,8 @@ test('a fresh review selects at admission and records frozen results after durab
   });
   fs.writeFileSync(path.join(root, gaps.NAME), '# Known gaps\n\n## G4 · open · 2026-10-01 · LOW\n- Where: src/x.js\n- Problem: old\n');
   assert.ok(gaps.addLesson(root, 'LESSON-SENTINEL').ok);
-  const evidence = path.join(HOME, 't1-evidence.txt');
+  const evidence = path.join(HOME, 't1-evidence.txt'); // (newer than every file still there, but a file was deleted)
   fs.writeFileSync(evidence, 'tests passed');
-  const old = new Date(Date.now() - 3600000);
-  fs.utimesSync(evidence, old, old);
   setSpec({ exec: [{ text: answerOf({ verdict: 'ISSUES_FOUND', findings: [gapFinding],
     requirements: [{ id: 'R1', status: 'MET', evidence: 'src/a.js:1' }, { id: 'R2', status: 'PARTIAL', evidence: 'no sum check' }] }) }] });
   // another driver holds the state lock and hands src/b.js to session B while this review waits to be admitted
@@ -100,7 +98,7 @@ test('a fresh review selects at admission and records frozen results after durab
   assert.match(call.prompt, /R2\. Keeps the sum\./);
   assert.ok(!call.prompt.includes('NOTES-SENTINEL'));
   assert.match(call.prompt, /LESSON-SENTINEL/);
-  assert.match(call.prompt, /Supplied by Claude and unverified; STALE/);
+  assert.match(call.prompt, /Supplied by Claude and unverified; STALE: a reviewed file was deleted/);
   assert.match(call.prompt, /-v1 uncommitted baseline\n\+v2 current/);
   assert.ok(!call.prompt.includes('v0 committed'));
   assert.match(call.prompt, /### src\/dé\.js \(deleted\)\nIts last version:\n```\ndeleted text/);
@@ -244,11 +242,16 @@ test('named files without a hook record stay pending when edited, and are next d
   assert.deepStrictEqual(s.changes[key('src/n.js')] && [s.changes[key('src/n.js')].session, s.changes[key('src/n.js')].baseline], [null, sha('n1\n')]);
   assert.strictEqual(s.acks[key('src/p.js')], sha(reviewedP));
   // a shell edit reverts the reviewed fix (back to HEAD's line) and changes a distant line
+  const evidence = path.join(HOME, 't6-evidence.txt');
+  fs.writeFileSync(evidence, 'tests passed');
+  const old = new Date(Date.now() - 3600000);
+  fs.utimesSync(evidence, old, old);
   fs.writeFileSync(path.join(root, 'src/p.js'), `top\nOLD\n${'mid\n'.repeat(20)}far2\n`);
-  assert.strictEqual((await review.review(root, { files: ['src/p.js'], taskFile })).status, 'DONE');
+  assert.strictEqual((await review.review(root, { files: ['src/p.js'], taskFile, evidenceFile: evidence })).status, 'DONE');
   const prompt = execCalls()[1].prompt;
   assert.match(prompt, /-FIX\n\+OLD/);
   assert.match(prompt, /-far\n\+far2/);
+  assert.match(prompt, /Supplied by Claude and unverified; STALE: it is older than the last change to a reviewed file/);
 });
 
 test.after(() => fs.rmSync(HOME, { recursive: true, force: true }));
