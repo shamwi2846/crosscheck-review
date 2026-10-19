@@ -220,6 +220,8 @@ function spawnCodex(args, prompt, timeoutMs, onSpawn) {
       output[stream] += d;
       if (noteTries > 0) noteTries = noteProcesses(run) ? 0 : noteTries - 1;
     };
+    child.stdout.setEncoding('utf8'); // (so a character split across two chunks stays whole)
+    child.stderr.setEncoding('utf8');
     child.stdout.on('data', collect('stdout'));
     child.stderr.on('data', collect('stderr'));
     const failureFor = code => (timedOut ? 'TIMEOUT' : code === 0 ? null : `Codex exited with ${code}`);
@@ -248,22 +250,31 @@ function spawnCodex(args, prompt, timeoutMs, onSpawn) {
 
 // What Codex itself reported: its session id and its errors. With --json it prints one JSON event per line on
 // stdout, and GPT's messages only ever appear inside events. So Codex's errors are its "error" and
-// "turn.failed" events, plus anything it printed that isn't an event (a failure before the session starts);
-// text GPT writes, which may well quote words like "rate limit", never counts.
+// "turn.failed" events. Text that isn't an event counts only when no session started (a failure before it,
+// such as a login error); after that it may be a log line quoting what GPT wrote. Text GPT writes, which may
+// well quote words like "rate limit", never counts.
 function codexReport(stdout, stderr) {
+  let started = false;
   let sessionId = null;
   const errors = [];
+  const plain = [];
   for (const line of `${stdout}\n${stderr}`.split(/\r?\n/)) {
     if (!line.trim()) continue;
     let event = null;
     try { event = JSON.parse(line); } catch {}
     if (!event && line.trim().startsWith('{')) continue; // (an event cut off when Codex died: it may hold GPT's text)
-    if (!event || typeof event !== 'object') errors.push(line.trim());
-    else if (event.type === 'thread.started') sessionId = event.thread_id || null;
-    else if (event.type === 'error') errors.push(String(event.message));
-    else if (event.type === 'turn.failed') errors.push(String((event.error || {}).message));
+    if (!event || typeof event !== 'object') {
+      plain.push(line.trim());
+    } else if (event.type === 'thread.started') {
+      started = true;
+      sessionId = event.thread_id || null;
+    } else if (event.type === 'error') {
+      errors.push(String(event.message));
+    } else if (event.type === 'turn.failed') {
+      errors.push(String((event.error || {}).message));
+    }
   }
-  return { sessionId, errors: errors.join('\n') };
+  return { sessionId, errors: [...errors, ...(started ? [] : plain)].join('\n') };
 }
 
 async function runOnce(request) {

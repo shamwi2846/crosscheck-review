@@ -150,10 +150,10 @@ test('a retry waits out a cooldown another driver started meanwhile, and unreada
   fs.rmSync(global);
 });
 
-test('limit words in GPT\'s messages start no cooldown, Codex\'s own limit error does', async () => {
+test('limit words in GPT\'s messages or in session logs start no cooldown, Codex\'s own limit error does', async () => {
   const gpt = 'Error handling must retry on rate limits. The log ends with:\nERROR: unauthorized\nERROR: quota exceeded';
   setSpec({ exec: [
-    { gpt, fail: 'stream disconnected before completion', code: 1 },
+    { gpt, log: 'WARN exec: the command GPT ran printed "401 Unauthorized: usage limit"', fail: 'stream disconnected before completion', code: 1 },
     { gpt, fail: "You've hit your usage limit. Try again at 9:15 PM.", code: 1 },
   ] });
   const r = await codex.ask({ mode: 'review', effort: 'high', prompt: 'Review this code:\nerror: rate limit or quota hit, too many requests\nif (status === 401) throw new Error("unauthorized")', cwd: WORK });

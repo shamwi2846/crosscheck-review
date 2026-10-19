@@ -56,9 +56,10 @@ if (args[0] === '--role') {
       const native = startRole('native', [answer.orphan, 'inherit', outFile, answer.text || 'answer'], { stdio: 'inherit' });
       native.on('exit', code => process.exit(code));
     } else if (answer.fail && answer.gpt) {
-      // a failure during a session in which GPT already wrote `gpt`
+      // a failure during a session in which GPT already wrote `gpt` (and Codex logged `log` on stderr)
       sessionStarted();
       event({ type: 'item.completed', item: { id: 'item_0', type: 'agent_message', text: answer.gpt } });
+      if (answer.log) process.stderr.write(`${answer.log}\n`);
       event({ type: 'error', message: answer.fail });
       event({ type: 'turn.failed', error: { message: answer.fail } });
       process.exit(answer.code || 1);
