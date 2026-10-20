@@ -157,4 +157,7 @@ function addLesson(root, lesson) {
   });
 }
 
-module.exports = { NAME, STATUSES, list, readFile, compose, composeMark, add, mark, openFor, lessons, addLesson };
+// The lessons file as read: { text } or { unreadable }, for a caller that reports a file it can't read.
+const readLessons = root => readText(lessonsFile(root));
+
+module.exports = { NAME, STATUSES, list, readFile, compose, composeMark, add, mark, openFor, lessons, readLessons, addLesson };

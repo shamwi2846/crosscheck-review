@@ -98,6 +98,16 @@ function taskOf(text) {
   return { title: (text.match(/^#\s+(.+)$/m) || [, '-'])[1].trim(), requirements, reqHash: sha(requirements), ids: Object.keys(reqs), reqs };
 }
 
+// The session's task file and the identity plans and skips are bound to (its id and requirements hash, as a review
+// freezes them), or null when the session has none with a Requirements section.
+function sessionTask(root, session) {
+  if (!session) return null;
+  const file = state.files.task(root, session);
+  const bytes = bytesOf(file);
+  const task = bytes && taskOf(textOf(bytes));
+  return task ? { file, id: state.pathKey(path.resolve(file)), reqHash: task.reqHash } : null;
+}
+
 const dropDeadMarks = s => { for (const [key, mark] of Object.entries(s.running)) if (!state.alive(mark.pid)) delete s.running[key]; };
 const asBaseline = version => (version === DELETED ? null : version); // (a missing file's successor is a new file)
 
@@ -633,7 +643,10 @@ function stateOf(root) {
 }
 const pending = (root, session) => Object.values(stateOf(root).changes).filter(c => !session || c.session === session);
 const openChains = root => Object.entries(stateOf(root).chains).filter(([, c]) => !c.closed).map(([id]) => id);
-const openBugs = root => Object.entries(stateOf(root).chains).filter(([, c]) => !c.closed)
-  .flatMap(([chain, c]) => Object.entries(c.findings).filter(([, f]) => f.label === 'BUG' && f.status === 'open').map(([id, f]) => ({ chain, id, ...f })));
+// (in a state already read: the hooks check it in the same read as the changes)
+const bugsIn = s => Object.entries(s.chains).filter(([, c]) => !c.closed)
+  .flatMap(([chain, c]) => Object.entries(c.findings || {}).filter(([, f]) => f.label === 'BUG' && f.status === 'open').map(([id, f]) => ({ chain, id, ...f })));
+const openBugs = root => bugsIn(stateOf(root));
 
-module.exports = { review, followup, close, fallback, pending, openChains, openBugs, DELETED };
+module.exports = { review, followup, close, fallback, pending, openChains, openBugs, bugsIn, DELETED,
+  RISKY_FILE, sessionTask, stateOf, withMaps, bytesOf, textOf, snapshot, snapFile, versionOf, asBaseline };

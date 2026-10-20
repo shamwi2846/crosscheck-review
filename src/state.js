@@ -179,6 +179,16 @@ function projectRoot(dir) {
   return r.status === 0 ? path.resolve(r.stdout.trim()) : null;
 }
 
+// The same, found without git (for the hooks, which run on every edit): the nearest folder above `file` holding a
+// .git folder or file, as { root: its real spelling, the project's identity; dir: as `file` spells it, so a path
+// through a linked folder stays inside it }, or null.
+function repoOf(file) {
+  for (let dir = path.dirname(path.resolve(file)); ; dir = path.dirname(dir)) {
+    if (fs.existsSync(path.join(dir, '.git'))) return { root: fs.realpathSync.native(dir), dir };
+    if (path.dirname(dir) === dir) return null;
+  }
+}
+
 // A project's state folder: its name plus a short hash of its full path, so two projects never share one.
 function projectDir(root) {
   const full = path.resolve(root);
@@ -191,6 +201,7 @@ const files = {
   global: () => path.join(HOME, 'global.json'),
   config: () => path.join(HOME, 'config.json'),
   project: root => path.join(projectDir(root), 'state.json'),
+  task: (root, session) => path.join(projectDir(root), 'tasks', `${String(session).replace(/[^\w-]+/g, '_')}.md`),
 };
 
 const DEFAULT_CONFIG = {
@@ -204,4 +215,4 @@ function config() {
   return { ...DEFAULT_CONFIG, ...(read(files.config()).data || {}) };
 }
 
-module.exports = { HOME, read, update, withLock, alive, pathKey, fileKey, projectRoot, projectDir, files, config };
+module.exports = { HOME, read, update, withLock, alive, pathKey, fileKey, projectRoot, repoOf, projectDir, files, config };
