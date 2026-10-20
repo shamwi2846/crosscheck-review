@@ -177,15 +177,7 @@ function plan(inp) {
 
 // ---- The screen ----
 
-// Whether a process may still run: only "no such process" counts as ended, so a check that fails keeps the desktop owned.
-function mayRun(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (e) {
-    return e.code !== 'ESRCH';
-  }
-}
+const { mayRun } = state;
 
 // Before a computer-use tool (fails closed). GPT owns the desktop while its driver or any of its workers runs
 // (`desktop`: { pid, workers, project }, written by the computer command). Claude's own screen tools work only inside

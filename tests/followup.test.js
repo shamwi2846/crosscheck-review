@@ -165,7 +165,7 @@ test('narrow rounds keep a regression a fix caused, and a file rated risky mid-c
   assert.match(p4, /### src\/a\.js \(diff from its last reviewed version\)/);
   assert.ok(!p4.includes('line 30'));
   assert.match(p4, /### src\/b\.js \(unchanged since the last round\)\n/);
-  assert.ok(!p4.includes('b1'));
+  assert.doesNotMatch(p4, /^b1$/m); // (b.js's content line; the snapshot hashes the prompt lists may contain "b1")
   let s = stateOf(root);
   assert.deepStrictEqual(['label', 'severity', 'status'].map(k => s.chains[chain].findings.F2[k]), ['BUG', 'LOW', 'open']);
   assert.strictEqual(s.escalations[key('src/a.js')].chain, chain);

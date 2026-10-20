@@ -26,6 +26,8 @@ const USAGE = `Usage: crosscheck <command>
   plan --file plan.md [--risky] | plan --skip --why "..." --file plan.md
   idea --file draft.md | research --question "..." | write --brief brief.md
   digest --files a,b --question "..." | digest --dir <folder> --question "..."
+  computer --task "..."                            (GPT operates the screen; never retried)
+  allow-screen --why "..."                         (a 30-minute window for your own screen tools)
 Outside a Claude Code session, add --task <task.md> and name the files.`;
 const FLAGS = new Set(['risky', 'full', 'skip', 'fixed', 'real-bug', 'add', 'live']);
 
@@ -167,10 +169,17 @@ function lessonCommand(args) {
   return done(gaps.addLesson(where(args).root, args.text), 'lesson saved');
 }
 
+// (off also closes any screen window, so switching back on never revives one)
 function switchCommand(args) {
   const off = args._[0] === 'off';
-  return done(state.update(state.files.global(), g => { g.off = off; }), off ? 'crosscheck is OFF: the hooks check nothing until `crosscheck on`' : 'crosscheck is on');
+  return done(state.update(state.files.global(), g => { g.off = off; if (off) delete g.screen; }),
+    off ? 'crosscheck is OFF: the hooks check nothing until `crosscheck on`' : 'crosscheck is on');
 }
+
+async function computerCommand(args) {
+  return reported(await modes.computer(where(args).root, { task: args.task }), false);
+}
+const allowScreenCommand = args => reported(modes.allowScreen({ session: process.env.CLAUDE_CODE_SESSION_ID || null, why: args.why }), false);
 
 // ---- GPT's other jobs (modes.js) ----
 
@@ -222,14 +231,15 @@ async function simpleCommand(args) {
 }
 
 const COMMANDS = { review: reviewCommand, close: closeCommand, status: statusCommand, gap: gapCommand, lesson: lessonCommand, on: switchCommand, off: switchCommand,
-  testplan: testplanCommand, skip: skipCommand, plan: planCommand, idea: simpleCommand, digest: simpleCommand, research: simpleCommand, write: simpleCommand };
+  testplan: testplanCommand, skip: skipCommand, plan: planCommand, idea: simpleCommand, digest: simpleCommand, research: simpleCommand, write: simpleCommand,
+  computer: computerCommand, 'allow-screen': allowScreenCommand };
 // The options each command takes; any other is wrong usage, so a typo never silently changes what runs.
 const OPTIONS = {
   review: ['files', 'risky', 'full', 'evidence-file', 'followup', 'file', 'fallback', 'answer', 'skip', 'why', 'task'],
   close: ['note', 'task'], status: ['task'], lesson: ['text', 'task'], on: [], off: [],
   gap: ['fixed', 'real-bug', 'add', 'where', 'problem', 'why', 'severity', 'trigger', 'fix', 'log', 'task'],
   testplan: ['files', 'context', 'task'], skip: ['files', 'why', 'task'], plan: ['file', 'risky', 'skip', 'why', 'task'],
-  idea: ['file'], digest: ['files', 'dir', 'question'], research: ['question'], write: ['brief'],
+  idea: ['file'], digest: ['files', 'dir', 'question'], research: ['question'], write: ['brief'], computer: ['task'], 'allow-screen': ['why'],
 };
 
 // Runs one command line. Returns { code, text }; it never throws.

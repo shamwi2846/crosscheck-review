@@ -203,8 +203,9 @@ for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) {
 
 // Starts Codex with the prompt on stdin. Resolves { stdout, stderr, failure } (failure: null, 'TIMEOUT' or a
 // reason) once everything the run started has been stopped. If processes Codex leaves behind hold its output
-// open, the run ends CLOSE_GRACE_MS after Codex exits, so they can't hang it.
-function spawnCodex(args, prompt, timeoutMs, onSpawn) {
+// open, the run ends CLOSE_GRACE_MS after Codex exits, so they can't hang it. `onProcesses(pids)` hears the run's
+// processes once they are noted (a computer run's desktop record keeps them).
+function spawnCodex(args, prompt, timeoutMs, onSpawn, onProcesses) {
   return new Promise(resolve => {
     const child = spawn(process.execPath, args, { windowsHide: true, detached: process.platform !== 'win32' });
     const run = { child, since: Date.now(), known: [[child.pid, null]] };
@@ -218,7 +219,10 @@ function spawnCodex(args, prompt, timeoutMs, onSpawn) {
     const timer = setTimeout(() => { timedOut = true; stopRun(run); }, timeoutMs);
     const collect = stream => d => {
       output[stream] += d;
-      if (noteTries > 0) noteTries = noteProcesses(run) ? 0 : noteTries - 1;
+      if (noteTries > 0) {
+        noteTries = noteProcesses(run) ? 0 : noteTries - 1;
+        if (noteTries === 0 && onProcesses) onProcesses(run.known.map(([pid]) => pid));
+      }
     };
     child.stdout.setEncoding('utf8'); // (so a character split across two chunks stays whole)
     child.stderr.setEncoding('utf8');
@@ -288,7 +292,7 @@ async function runOnce(request) {
     }
     const args = buildArgs({ ...request, outFile, schemaFile, cwd: request.cwd || process.cwd() });
     const timeoutMs = request.timeoutMs || (TIMEOUT_MINUTES[request.effort] || 30) * 60000;
-    const { stdout, stderr, failure } = await spawnCodex(args, request.prompt, timeoutMs, request.onSpawn);
+    const { stdout, stderr, failure } = await spawnCodex(args, request.prompt, timeoutMs, request.onSpawn, request.onProcesses);
     let text = '';
     try { text = fs.readFileSync(outFile, 'utf8'); } catch {}
     const problem = failure || (text.trim() ? null : 'GPT returned no answer');
