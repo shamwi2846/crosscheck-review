@@ -23,22 +23,24 @@ function npmRoot() {
   return root && path.isAbsolute(root) ? root : null;
 }
 
-// Claude Code's version, from `command` (config.json's, as install found it) or else the `claude` command or, where
-// npm installed it (a .cmd shim on Windows), its cli.js through Node. Returns { version, text, command } or { why }.
+// Claude Code's version: from `command` (config.json's, as install found it), else, when that fails (Node moved, say),
+// the `claude` command, else, where npm installed it (a .cmd shim on Windows), its cli.js through Node. Returns
+// { version, text, command } from the first that works, or { why } from the last tried.
 function claudeVersion(command = null) {
-  const tries = command ? [command] : [['claude']];
-  let r = run(tries[0][0], [...tries[0].slice(1), '--version']);
-  let used = tries[0];
-  if (!command && (r.error || r.status !== 0)) {
-    const root = npmRoot();
-    const cli = root && path.join(root, '@anthropic-ai', 'claude-code', 'cli.js');
-    if (cli && fs.existsSync(cli)) {
-      used = [process.execPath, cli];
-      r = run(process.execPath, [cli, '--version']);
+  const tries = [...(command ? [command] : []), ['claude']];
+  let r = null;
+  for (let i = 0; ; i++) {
+    if (i === tries.length) { // (npm is asked only when nothing before worked)
+      const npm = npmRoot();
+      const cli = npm && path.join(npm, '@anthropic-ai', 'claude-code', 'cli.js');
+      // (the same cli.js through this Node is still worth a try after a saved command whose Node moved)
+      if (!cli || !fs.existsSync(cli) || tries.some(t => t[0] === process.execPath && t[1] === cli)) break;
+      tries.push([process.execPath, cli]);
     }
+    r = run(tries[i][0], [...tries[i].slice(1), '--version']);
+    const v = r.status === 0 && String(r.stdout || '').match(/(\d+)\.(\d+)\.(\d+)/);
+    if (v) return { version: v.slice(1).map(Number), text: v[0], command: tries[i] };
   }
-  const v = r.status === 0 && String(r.stdout || '').match(/(\d+)\.(\d+)\.(\d+)/);
-  if (v) return { version: v.slice(1).map(Number), text: v[0], command: used };
   return { why: r.error ? `${r.error.code || 'it could not start'}: ${r.error.message}` : `exit ${r.status}, no version printed${String(r.stderr || '').trim() ? `: ${String(r.stderr).trim().slice(0, 300)}` : ''}` };
 }
 
