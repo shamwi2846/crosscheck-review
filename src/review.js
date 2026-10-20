@@ -136,7 +136,8 @@ function admit(root, { attempt, session, named = [], chain = null, risky = false
     if (!keys.length) return { refused: chain ? 'every file of the chain is escalated: each needs its own paired review first' : 'nothing to review: this session has no pending changes and no file was named' };
     const busy = keys.filter(k => s.running[k]);
     if (busy.length) return { refused: `already in a running review: ${list(busy)}` };
-    const riskyKeys = c ? keys.filter(k => (c.riskyKeys || []).includes(k)) : keys.filter(k => risky || RISKY_FILE.test(k) || s.escalations[k]);
+    // (a follow-up's risky files: those of the chain's reviews and those GPT rated risky in the chain since)
+    const riskyKeys = c ? keys.filter(k => (c.riskyKeys || []).includes(k) || (c.risky || {})[k]) : keys.filter(k => risky || RISKY_FILE.test(k) || s.escalations[k]);
     for (const key of keys) {
       const change = s.changes[key];
       // (without a change record, the baseline is the last reviewed version, if any; freeze falls back to HEAD)
@@ -330,14 +331,16 @@ async function run(root, manifest, prompt, { resume = null, history = '', strict
     first = await codex.ask({ mode: 'review', effort, persist: true, schema, prompt: fresh, cwd: root });
     save(resume ? '1-fresh' : 1, fresh, first);
   }
-  if (!first.ok) return { status: first.unavailable ? 'GPT_UNAVAILABLE' : 'NOT_DONE', why: first.reason };
+  // (a run Codex couldn't complete even after its retry means GPT is unavailable, so the fallback takes the bundle;
+  // only a pair's cross-check, a strict resume, runs again instead)
+  if (!first.ok) return { status: first.unavailable || !(resume && strict) ? 'GPT_UNAVAILABLE' : 'NOT_DONE', why: first.reason };
   let checked = answer.read(kind, first.text, asked);
   if (checked.problems.length) {
     if (!first.sessionId) return { status: 'NOT_DONE', why: `the answer has problems and its session can't be resumed: ${checked.problems.join('; ')}` };
     const repair = `Your answer has these problems. Answer again, in full, without them:\n- ${checked.problems.join('\n- ')}`;
     const second = await codex.ask({ mode: 'review', effort, resume: first.sessionId, schema, prompt: repair, cwd: root });
     save(2, repair, second);
-    if (!second.ok) return { status: second.unavailable ? 'GPT_UNAVAILABLE' : 'NOT_DONE', why: second.reason };
+    if (!second.ok) return { status: second.unavailable || !strict ? 'GPT_UNAVAILABLE' : 'NOT_DONE', why: second.reason }; // (as above)
     checked = answer.read(kind, second.text, asked);
     if (checked.problems.length) return { status: 'NOT_DONE', why: `the answer still has problems after its repair: ${checked.problems.join('; ')}` };
   }
@@ -541,7 +544,7 @@ async function followup(root, { chain: id, responseFile, evidenceFile = null }) 
     const frozen = freeze(root, { attempt, session: chain.session, ...admitted, taskFile: chain.task.path, evidenceFile, response: textOf(response) });
     if (frozen.why) return refused(frozen.why);
     // (a paired chain's follow-ups are one GPT at xhigh, resuming reviewer A; so are a fallback chain's with risky files)
-    const effort = chain.paired || (chain.riskyKeys || []).length ? 'xhigh' : 'high';
+    const effort = chain.paired || admitted.riskyKeys.length ? 'xhigh' : 'high';
     const result = await run(root, frozen.manifest, frozen.prompt, { resume: chain.codexSession, history: historyOf(root, chain), effort });
     if (result.status !== 'OK') return { status: result.status, text: `${result.status}: ${result.why}`, bundle };
     const applied = apply(root, frozen.manifest, result);
@@ -634,6 +637,46 @@ function fallback(root, { bundle, answerFile }) {
   }
 }
 
+// Acknowledges a task's changes without GPT (`review --skip`), for a task that touches nothing but comments,
+// formatting or docs: this session's pending changes plus the named files, at their current versions. Everything is
+// chosen and checked in the same locked state write that acknowledges it. Refused without a reason, for any risky
+// file (a trading file, an escalated one, one GPT rated risky for any task, one with a test plan, one in an open
+// chain's risky list) and for a file under review. The reason is kept with the versions, apart from test-plan skips.
+function skip(root, { session = null, files = [], why = '' }) {
+  const refused = text => ({ status: 'REFUSED', text: `REFUSED: ${text}` });
+  const reason = String(why).trim();
+  if (!reason) return refused('a review skip needs its reason (--why "...")');
+  if (!session && !files.length) return refused('without a session id, name the files to skip');
+  const resolved = resolveNamed(root, files);
+  if (resolved.why) return refused(resolved.why);
+  const done = state.update(state.files.project(root), data => {
+    const s = withMaps(data);
+    dropDeadMarks(s);
+    const chosen = {};
+    for (const [key, change] of Object.entries(s.changes)) if (session && change.session === session) chosen[key] = change.path;
+    for (const n of resolved.named) chosen[n.key] = chosen[n.key] || n.path;
+    const keys = Object.keys(chosen);
+    const list = ks => ks.map(k => chosen[k]).join(', ');
+    if (!keys.length) return { refused: 'nothing to skip: this session has no pending changes and no file was named' };
+    const chainRisky = new Set(Object.values(s.chains).filter(c => !c.closed).flatMap(c => [...(c.riskyKeys || []), ...Object.keys(c.risky || {})]));
+    const risky = keys.filter(k => RISKY_FILE.test(k) || s.escalations[k] || [].concat(s.needsPlan[k] || []).length || s.plans[k] || chainRisky.has(k));
+    if (risky.length) return { refused: `a review skip is only for comments, formatting or docs, never for risky files: ${list(risky)}` };
+    const busy = keys.filter(k => s.running[k]);
+    if (busy.length) return { refused: `already in a running review: ${list(busy)}` };
+    const versions = {};
+    for (const key of keys) {
+      versions[key] = snapshot(root, bytesOf(path.join(root, chosen[key])));
+      s.acks[key] = versions[key];
+      delete s.changes[key];
+    }
+    s.reviewSkips = [...(s.reviewSkips || []), { at: Date.now(), session, why: reason, versions }];
+    return { acked: keys.map(k => chosen[k]) };
+  });
+  if (!done.ok) return refused(done.why);
+  if (done.value.refused) return refused(done.value.refused);
+  return { status: 'DONE', text: `acknowledged without GPT (${reason}): ${done.value.acked.join(', ')}` };
+}
+
 // ---- Queries for the hooks and the CLI (they throw when the state can't be read) ----
 
 function stateOf(root) {
@@ -648,5 +691,5 @@ const bugsIn = s => Object.entries(s.chains).filter(([, c]) => !c.closed)
   .flatMap(([chain, c]) => Object.entries(c.findings || {}).filter(([, f]) => f.label === 'BUG' && f.status === 'open').map(([id, f]) => ({ chain, id, ...f })));
 const openBugs = root => bugsIn(stateOf(root));
 
-module.exports = { review, followup, close, fallback, pending, openChains, openBugs, bugsIn, DELETED,
+module.exports = { review, followup, close, fallback, skip, pending, openChains, openBugs, bugsIn, DELETED,
   RISKY_FILE, sessionTask, stateOf, withMaps, bytesOf, textOf, snapshot, snapFile, versionOf, asBaseline };
