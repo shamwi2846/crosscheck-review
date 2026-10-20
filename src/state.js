@@ -43,6 +43,17 @@ const alive = pid => {
   }
 };
 
+// Whether a process may still run, for the desktop's owner: only "no such process" counts as ended, so a check that
+// fails keeps the desktop owned (unlike `alive`, which errs toward ended, to reclaim locks).
+function mayRun(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e.code !== 'ESRCH';
+  }
+}
+
 // Whether a lock was left by a process that ended. A lock names its owner process, which keeps it however long
 // it takes, even across a system sleep. A lock with no readable owner (just made, or the reclaim guard) counts
 // as left by a crash after LOCK_UNOWNED_MS.
@@ -215,4 +226,4 @@ function config() {
   return { ...DEFAULT_CONFIG, ...(read(files.config()).data || {}) };
 }
 
-module.exports = { HOME, read, update, withLock, alive, pathKey, fileKey, projectRoot, repoOf, projectDir, files, config };
+module.exports = { HOME, read, update, withLock, alive, mayRun, pathKey, fileKey, projectRoot, repoOf, projectDir, files, config };

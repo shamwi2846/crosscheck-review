@@ -52,6 +52,7 @@ const SCHEMAS = {
     scope: text, confidence: oneOf('proven', 'hypothesis') }),
   research: object({ answer: text, sources: list(object({ url: text, claim: text })), confidence: oneOf('proven', 'hypothesis') }),
   write: object({ title: text, text: text }),
+  computer: object({ outcome: oneOf('DONE', 'PARTIAL', 'FAILED'), report: text }),
 };
 
 // The first place where a value doesn't fit a schema built above, or null. Codex enforces the schema for its

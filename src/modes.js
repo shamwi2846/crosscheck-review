@@ -4,7 +4,9 @@
 'use strict';
 const fs = require('fs');
 const path = require('path');
+const { spawnSync } = require('child_process');
 const state = require('./state');
+const codex = require('./codex');
 const answer = require('./answer');
 const review = require('./review');
 const gaps = require('./gaps');
@@ -168,4 +170,98 @@ async function simple(root, kind, input) {
   return { status: 'DONE', text: `draft saved, not applied: ${draft}\nRead it and apply what is right with Edit.` };
 }
 
-module.exports = { testplan, skip, plan, simple };
+// ---- Screen control (DESIGN.md section 9): one operator at a time ----
+
+const SCREEN_MS = 30 * 60000;
+
+// Whether GPT holds the desktop: a computer run while its driver or any of its noted Codex processes may still run.
+// A malformed record holds it too, as in the hook. Returns who holds it, or null.
+function gptHolds(g) {
+  const o = g.desktop;
+  if (!o) return null;
+  const pids = [o.pid, ...(Array.isArray(o.workers) ? o.workers : [null])];
+  if (!pids.every(pid => Number.isInteger(pid) && pid > 0)) return 'a malformed desktop record';
+  return pids.some(state.mayRun) ? `GPT's computer run for ${o.project || 'another project'}` : null;
+}
+const openWindow = g => (g.screen && typeof g.screen.until === 'number' && g.screen.until > Date.now() ? g.screen : null);
+
+const COMPUTER_RULES = `You operate this computer's screen for Claude. Do the task below, then answer in the JSON shape asked.
+Never trade, move money, enter credentials or passwords, accept terms or agreements, or send messages: stop at that point and report instead.
+outcome: DONE, PARTIAL or FAILED. report: what you did and what you saw, with anything Claude must check.`;
+
+// The project's git status, or why it couldn't be read.
+function gitStatus(root) {
+  const r = spawnSync('git', ['status', '--porcelain'], { cwd: root, encoding: 'utf8', windowsHide: true });
+  return r.status === 0 ? r.stdout.trim() || '(clean)' : `(git status failed: ${String(r.stderr || r.error || '').trim()})`;
+}
+
+// Adds a computer run's processes to this driver's desktop record (only real process ids: a launch that failed has
+// none). Returns null, or why they couldn't be recorded, a thrown error included.
+function recordWorkers(pids) {
+  const real = pids.filter(pid => Number.isInteger(pid) && pid > 0);
+  if (!real.length) return null;
+  try {
+    const saved = state.update(state.files.global(), g => {
+      if (g.desktop && g.desktop.pid === process.pid) g.desktop.workers = [...new Set([...g.desktop.workers, ...real])];
+    });
+    return saved.ok ? null : saved.why;
+  } catch (e) {
+    return e.message;
+  }
+}
+
+// One computer run by GPT: the desktop taken in one locked step, the verified lockdown, one Codex run (never retried).
+// Every process the run starts is added to the desktop record, which stays after the run, so a worker that outlives
+// this driver keeps the desktop owned until it ends.
+async function computer(root, { task }) {
+  if (!String(task || '').trim()) return refused('computer needs --task "..."');
+  const taken = state.update(state.files.global(), g => {
+    const who = gptHolds(g) || (openWindow(g) && `Claude's screen window (session ${g.screen.session})`);
+    if (who) return `BUSY: ${who} holds the desktop; wait until it ends`;
+    g.desktop = { pid: process.pid, workers: [], project: root, at: Date.now() };
+    return null;
+  });
+  if (!taken.ok || taken.value) return refused(taken.why || taken.value);
+  const mine = g => g.desktop && g.desktop.pid === process.pid;
+  // (a process that can't be recorded mustn't run unrecorded: the driver stops, and its exit stops Codex's processes)
+  const note = pids => {
+    const why = recordWorkers(pids);
+    if (!why) return;
+    process.stdout.write(`REFUSED: GPT's processes couldn't be recorded as the desktop's owner (${why}), so the run was stopped\n`);
+    process.exit(1);
+  };
+  const lockdown = codex.computerLockdown();
+  if (lockdown.problem) {
+    state.update(state.files.global(), g => { if (mine(g)) delete g.desktop; });
+    return refused(`the computer lockdown couldn't be established, so GPT doesn't get the screen: ${lockdown.problem}`);
+  }
+  const before = gitStatus(root);
+  const r = await codex.ask({ mode: 'computer', effort: 'high', lockdown: lockdown.args, schema: answer.SCHEMAS.computer, cwd: root,
+    prompt: `${COMPUTER_RULES}\n\n## Task\n${task}\n`, onSpawn: child => note([child.pid]), onProcesses: note });
+  const after = gitStatus(root);
+  const files = before === after ? `git status is as before the run (a file already changed before it may still have changed): ${after}`
+    : `git status before the run:\n${before}\nafter it:\n${after}`;
+  if (!r.ok) return { status: 'GPT_UNAVAILABLE', text: `GPT_UNAVAILABLE: ${r.reason} (a computer run is never retried)\n${files}` };
+  const checked = answer.read('computer', r.text, {});
+  if (checked.problems.length) return { status: 'NOT_DONE', text: `NOT_DONE: the answer doesn't fit its shape (${checked.problems.join('; ')})\n${files}` };
+  return { status: checked.answer.outcome === 'DONE' ? 'DONE' : 'NOT_DONE', text: `${checked.answer.outcome}: ${checked.answer.report}\n${files}` };
+}
+
+// Opens Claude's own 30-minute screen window for this session, in one locked step: refused while GPT holds the desktop
+// or another session's window is open.
+function allowScreen({ session, why }) {
+  if (!session) return refused('allow-screen needs a Claude Code session (CLAUDE_CODE_SESSION_ID)');
+  if (!String(why || '').trim()) return refused('allow-screen needs its reason (--why "...")');
+  const done = state.update(state.files.global(), g => {
+    const gpt = gptHolds(g);
+    if (gpt) return `${gpt} holds the desktop; wait until it ends`;
+    const window = openWindow(g);
+    if (window && window.session !== session) return `another Claude session's screen window is open until ${new Date(window.until).toLocaleTimeString()}`;
+    g.screen = { session, until: Date.now() + SCREEN_MS, why: String(why).trim() };
+    return null;
+  });
+  if (!done.ok || done.value) return refused(done.why || done.value);
+  return { status: 'DONE', text: 'your own screen tools are allowed for this session for 30 minutes' };
+}
+
+module.exports = { testplan, skip, plan, simple, computer, allowScreen, recordWorkers };
