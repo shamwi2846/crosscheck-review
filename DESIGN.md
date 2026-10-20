@@ -71,6 +71,9 @@ Recorded overruns:
   - bundle cleanup runs under the project lock and keeps open chains' rounds and reserved attempts.
 
   The refusal texts name the exact next command, so Claude doesn't have to guess.
+- `crosscheck.js` and a new `modes.js`, about 250 and 160 lines. GPT's other jobs (test plans and skips, plan reviews, ideas, digests, research, writing) live in `modes.js`, since the CLI's 250 lines can't also hold them.
+  - The CLI checks each command's options. A typo or a missing value is wrong usage, never a silently different run, because a review skip bypasses GPT.
+  - The jobs reuse review.js's runner, so their isolation, schema, repair and bundles are a review's.
 - Tests, about 1,520 lines: the review and pair paths above are each covered by the at most five cases of their test plan, and those cases need real processes and git projects.
 
 ## 4. Commands

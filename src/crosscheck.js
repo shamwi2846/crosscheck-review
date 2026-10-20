@@ -8,6 +8,7 @@ const state = require('./state');
 const review = require('./review');
 const gaps = require('./gaps');
 const pair = require('./pair');
+const modes = require('./modes');
 
 const CLI = `node "${__filename}"`;
 const USAGE = `Usage: crosscheck <command>
@@ -20,6 +21,11 @@ const USAGE = `Usage: crosscheck <command>
   gap [list] | gap <id> --fixed [--real-bug] | gap --add --where <file[:line]> --problem "..." --why "..." [--severity LOW]
   lesson --text "..."
   on | off                                         (only when the user asks)
+  testplan --files a,b [--context c,d]             (at most 5 cases, stored as the files' plan for this task)
+  skip --files a,b --why "..."                     (no test plan needed for these files in this task)
+  plan --file plan.md [--risky] | plan --skip --why "..." --file plan.md
+  idea --file draft.md | research --question "..." | write --brief brief.md
+  digest --files a,b --question "..." | digest --dir <folder> --question "..."
 Outside a Claude Code session, add --task <task.md> and name the files.`;
 const FLAGS = new Set(['risky', 'full', 'skip', 'fixed', 'real-bug', 'add', 'live']);
 
@@ -40,21 +46,24 @@ function parse(argv) {
   return args;
 }
 const listOf = value => String(value || '').split(',').map(s => s.trim()).filter(Boolean);
-const absolute = file => (file ? path.resolve(file) : null);
 
-// The project (the git repository around the current folder), the session and its task file.
+// The project (the git repository around the current folder), the session and its task file. `at` resolves a path
+// option from the project's root, as every path is (DESIGN.md section 14, fact 20).
 function where(args) {
   const root = state.projectRoot(process.cwd());
   if (!root) throw new Usage(`${process.cwd()} isn't inside a git repository: run crosscheck from the project's folder`);
+  const at = p => (p ? path.resolve(root, p) : null);
   const session = process.env.CLAUDE_CODE_SESSION_ID || null;
-  const taskFile = args.task ? path.resolve(args.task) : session ? state.files.task(root, session) : null;
-  return { root, session, taskFile };
+  const taskFile = args.task ? at(args.task) : session ? state.files.task(root, session) : null;
+  return { root, session, taskFile, at };
 }
 
 // A review result as an exit code and text. When GPT was unavailable (a pair included), the text starts with
 // GPT_UNAVAILABLE and hands the frozen bundle to the fallback reviewer.
-function reported(result) {
+// (`handoff`: only a review has a fallback reviewer; another job GPT can't do just says so)
+function reported(result, handoff = true) {
   if (result.status === 'DONE') return { code: 0, text: result.text };
+  if (!handoff && (result.unavailable || result.status === 'GPT_UNAVAILABLE')) return { code: 3, text: `GPT_UNAVAILABLE: ${result.text.replace(/^GPT_UNAVAILABLE: /, '')}` };
   if (!(result.unavailable || result.status === 'GPT_UNAVAILABLE') || !result.bundle) {
     const again = result.status === 'PAIR_INCOMPLETE' ? '\nNothing was recorded: run the review again.' : '';
     return { code: 1, text: `${result.text}${again}` };
@@ -80,10 +89,10 @@ async function reviewCommand(args) {
   if (other.length) throw new Usage(`review${modes[0] ? ` --${modes[0]}` : ''} doesn't take ${other.map(k => `--${k}`).join(', ')}`);
   if (args.followup && !args.file) throw new Usage('review --followup needs --file <response.md>');
   if (args.fallback && !args.answer) throw new Usage('review --fallback needs --answer <answer.json>');
-  const { root, session, taskFile } = where(args);
-  const evidenceFile = absolute(args['evidence-file']);
-  if (args.fallback) return reported(review.fallback(root, { bundle: path.resolve(args.fallback), answerFile: absolute(args.answer) }));
-  if (args.followup) return reported(await review.followup(root, { chain: args.followup, responseFile: absolute(args.file), evidenceFile }));
+  const { root, session, taskFile, at } = where(args);
+  const evidenceFile = at(args['evidence-file']);
+  if (args.fallback) return reported(review.fallback(root, { bundle: at(args.fallback), answerFile: at(args.answer) }));
+  if (args.followup) return reported(await review.followup(root, { chain: args.followup, responseFile: at(args.file), evidenceFile }));
   if (args.skip) return reported(review.skip(root, { session, files: listOf(args.files), why: args.why }));
   if (taskFile && !fs.existsSync(taskFile)) {
     return { code: 1, text: `REFUSED: the task file ${taskFile} doesn't exist yet: write it ("# <title>", then "## Requirements" with R1., R2. ..., then "## Notes") and run the review again.` };
@@ -163,12 +172,62 @@ function switchCommand(args) {
   return done(state.update(state.files.global(), g => { g.off = off; }), off ? 'crosscheck is OFF: the hooks check nothing until `crosscheck on`' : 'crosscheck is on');
 }
 
-const COMMANDS = { review: reviewCommand, close: closeCommand, status: statusCommand, gap: gapCommand, lesson: lessonCommand, on: switchCommand, off: switchCommand };
+// ---- GPT's other jobs (modes.js) ----
+
+async function testplanCommand(args) {
+  const { root, taskFile } = where(args);
+  return reported(await modes.testplan(root, { taskFile, files: listOf(args.files), context: listOf(args.context) }), false);
+}
+
+function skipCommand(args) {
+  const { root, taskFile } = where(args);
+  return reported(modes.skip(root, { taskFile, files: listOf(args.files), why: args.why }), false);
+}
+
+async function planCommand(args) {
+  if (!args.file) throw new Usage('plan needs --file <plan.md>');
+  if (args.skip ? args.risky : args.why) throw new Usage('plan takes --risky for a review, or --skip with --why, not both');
+  const { root, taskFile, at } = where(args);
+  // (a review without requirements only when no task was named and the session hasn't written one)
+  const task = args.task || (taskFile && fs.existsSync(taskFile)) ? taskFile : null;
+  if (task && !review.taskInfo(task)) return { code: 1, text: `REFUSED: the task file ${task} doesn't exist or has no "## Requirements" section` };
+  return reported(await modes.plan(root, { file: at(args.file), taskFile: task, risky: !!args.risky, skipWhy: args.skip ? args.why || '' : undefined }), false);
+}
+
+// idea, digest, research and write: the job's input text, read from the files named.
+async function simpleCommand(args) {
+  const kind = args._[0];
+  const { root, at } = where(args);
+  const fileOption = { idea: 'file', write: 'brief' }[kind];
+  let input;
+  if (fileOption) {
+    if (!args[fileOption]) throw new Usage(`${kind} needs --${fileOption} <file>`);
+    const bytes = review.bytesOf(at(args[fileOption]));
+    if (bytes === null) return { code: 1, text: `REFUSED: ${args[fileOption]} doesn't exist` };
+    input = `## ${kind === 'idea' ? 'Proposal' : 'Brief'}\n${review.textOf(bytes)}`;
+  } else {
+    if (!String(args.question || '').trim()) throw new Usage(`${kind} needs --question "..."`);
+    input = `## Question\n${args.question}`;
+    if (kind === 'digest') {
+      if (!args.files === !args.dir) throw new Usage('digest takes --files a,b or --dir <folder>: one of them');
+      const material = args.dir ? [at(args.dir)] : listOf(args.files).map(at);
+      const missing = material.filter(p => !fs.existsSync(p));
+      if (missing.length) return { code: 1, text: `REFUSED: these don't exist: ${missing.join(', ')}` };
+      input += `\n\n## Material (read it yourself)\n${material.map(p => `- ${p}`).join('\n')}`;
+    }
+  }
+  return reported(await modes.simple(root, kind, input), false);
+}
+
+const COMMANDS = { review: reviewCommand, close: closeCommand, status: statusCommand, gap: gapCommand, lesson: lessonCommand, on: switchCommand, off: switchCommand,
+  testplan: testplanCommand, skip: skipCommand, plan: planCommand, idea: simpleCommand, digest: simpleCommand, research: simpleCommand, write: simpleCommand };
 // The options each command takes; any other is wrong usage, so a typo never silently changes what runs.
 const OPTIONS = {
   review: ['files', 'risky', 'full', 'evidence-file', 'followup', 'file', 'fallback', 'answer', 'skip', 'why', 'task'],
   close: ['note', 'task'], status: ['task'], lesson: ['text', 'task'], on: [], off: [],
   gap: ['fixed', 'real-bug', 'add', 'where', 'problem', 'why', 'severity', 'trigger', 'fix', 'log', 'task'],
+  testplan: ['files', 'context', 'task'], skip: ['files', 'why', 'task'], plan: ['file', 'risky', 'skip', 'why', 'task'],
+  idea: ['file'], digest: ['files', 'dir', 'question'], research: ['question'], write: ['brief'],
 };
 
 // Runs one command line. Returns { code, text }; it never throws.
