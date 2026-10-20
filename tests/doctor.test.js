@@ -1,6 +1,7 @@
-// Tests for doctor.js, step 6b (test plan P1): doctor --live fails, and verifies no Codex version, when a read-only
-// run (fresh or resumed) could write; the hooks check fails for a screen hook that doesn't fail closed or an old-setup
-// hook left; and a clean install passes and is verified. They run the real CLI with the recording Codex stub.
+// Tests for doctor.js (test plan P1 of step 6b, then of the old setup's retirement): doctor --live fails, and verifies
+// no Codex version, when a read-only run (fresh or resumed) could write; the hooks check fails for a screen hook that
+// doesn't fail closed or hooks switched off, and takes the retired setup's hook for any other hook; an unreadable state
+// is reported, never changed; and a clean install passes and is verified. They run the real CLI with the Codex stub.
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert');
@@ -41,10 +42,23 @@ const setSpec = exec => {
 const doctor = (live, cli = path.join(__dirname, '..', 'src', 'crosscheck.js')) => spawnSync(process.execPath, [cli, 'doctor', ...(live ? ['--live'] : [])], { cwd: HOME, encoding: 'utf8' });
 const line = (out, name) => out.split('\n').find(l => l.slice(8).startsWith(`${name}:`)) || '';
 const settingsFile = path.join(PROFILE, 'settings.json');
+const tree = dir => (fs.existsSync(dir) ? fs.readdirSync(dir, { recursive: true }).sort().map(f => path.join(dir, f)).filter(f => fs.statSync(f).isFile()).map(f => [f, fs.readFileSync(f, 'base64')]) : []);
+// the settings, the retired folder and the live state (config.json aside, where doctor --live records its verdict)
+const untouched = () => JSON.stringify([fs.readFileSync(settingsFile, 'base64'), tree(path.join(PROFILE, 'gpt')), tree(state.HOME).filter(([f]) => f !== state.files.config())]);
+
+// The retired setup's hook beside crosscheck's edit hook, with an unrelated one, and the retired folder left in place.
+function keepRetired() {
+  const s = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
+  s.hooks.PreToolUse.find(g => g.matcher === 'Edit|Write|MultiEdit|NotebookEdit').hooks.push(
+    { type: 'command', command: `node "${path.join(PROFILE, 'gpt', 'gate.js').replace(/\\/g, '/')}" pre-edit` }, { type: 'command', command: 'prettier --check' });
+  fs.writeFileSync(settingsFile, JSON.stringify(s));
+  fs.mkdirSync(path.join(PROFILE, 'gpt', 'state'), { recursive: true });
+  fs.writeFileSync(path.join(PROFILE, 'gpt', 'gate.js'), '// the retired gate\n');
+  return s;
+}
 
 async function freshInstall(over = {}) {
   fs.rmSync(PROFILE, { recursive: true, force: true });
-  fs.rmSync(path.join(state.HOME, 'backup'), { recursive: true, force: true });
   fs.mkdirSync(PROFILE, { recursive: true });
   config(over);
   assert.strictEqual((await installer.install({ yes: true, checks: false, say: () => {} })).code, 0);
@@ -57,17 +71,23 @@ test('doctor --live fails on a read-only run that could write, and takes away th
   assert.strictEqual(r.status, 1, r.stdout);
   assert.match(line(r.stdout, 'Read-only'), /^PROBLEM .*could write probe\.txt/);
   assert.strictEqual(configNow().codexVerified, undefined, 'a proven write leaves no version verified');
-  // cancelled while the resumed probe runs: the record is gone already
+  // while the resumed probe runs, the record is gone already; that probe's refused write doesn't bring it back
   await freshInstall({ codexVerified: '0.162.1' });
+  const { codexVerified, ...rest } = configNow();
   const hold = fs.mkdtempSync(path.join(HOME, 'hold-'));
   setSpec([{ touch: 'probe.txt', ...probe('probe.txt') }, { hold, ...probe('probe-resumed.txt') }]);
-  const running = spawn(process.execPath, [path.join(__dirname, '..', 'src', 'crosscheck.js'), 'doctor', '--live'], { cwd: HOME, stdio: 'ignore' });
+  const running = spawn(process.execPath, [path.join(__dirname, '..', 'src', 'crosscheck.js'), 'doctor', '--live'], { cwd: HOME, stdio: ['ignore', 'pipe', 'ignore'] });
+  let out = '';
+  running.stdout.on('data', d => { out += d; });
   const closed = new Promise(resolve => running.on('close', resolve));
   await waitFor(path.join(hold, 'started'));
   assert.strictEqual(configNow().codexVerified, undefined, 'taken away before the next probe');
-  running.kill();
-  await closed;
-  assert.strictEqual(configNow().codexVerified, undefined);
+  fs.writeFileSync(path.join(hold, 'go'), '');
+  assert.strictEqual(await closed, 1, 'the run still fails');
+  assert.match(line(out, 'Read-only'), /^PROBLEM .*could write probe\.txt/);
+  assert.deepStrictEqual([codexVerified, configNow()], ['0.162.1', rest], 'only the verified version went');
+  const execs = calls().filter(c => c.kind === 'exec');
+  assert.ok(!fs.existsSync(execs[0].args[execs[0].args.indexOf('-C') + 1]), 'the probe folder is removed');
   assert.match(line(doctor(false).stdout, 'Codex verified'), /^PROBLEM /);
 });
 
@@ -109,30 +129,46 @@ test('the hooks check fails for a screen hook that doesn\'t fail closed', async 
     assert.match(line(viaNpm.stdout, 'Claude Code'), /^ok .*2\.1\.299/);
   }
   fs.writeFileSync(state.files.config(), JSON.stringify(saved));
-  const s = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
+  const s = keepRetired(); // (the retired gate's hook hides nothing)
   delete s.hooks.PreToolUse.find(g => g.matcher.startsWith('mcp__computer-use__')).hooks[0].onFailure;
   fs.writeFileSync(settingsFile, JSON.stringify(s));
+  const before = untouched();
+  fs.rmSync(LOG, { force: true });
   const r = doctor(false);
   assert.strictEqual(r.status, 1, r.stdout);
   assert.match(line(r.stdout, 'Hooks'), /^PROBLEM .*screen is registered 0 times, not once as installed \(failing closed\)/);
+  for (const name of ['Codex', 'Codex verified', 'Claude Code', 'State']) assert.match(line(r.stdout, name), /^ok /, name);
+  assert.ok(!calls().some(c => c.kind === 'exec'), 'no GPT run');
+  assert.strictEqual(untouched(), before);
 });
 
-test('the hooks check fails while a hook of the old setup is still registered', async () => {
+test('doctor reports another project\'s unreadable state without changing it, and still runs every other check', async () => {
+  await freshInstall({ codexVerified: '0.162.1' });
+  setSpec([]);
+  keepRetired();
+  const broken = path.join(state.HOME, 'other project-1a2b3c4d', 'state.json');
+  fs.mkdirSync(path.dirname(broken), { recursive: true });
+  fs.writeFileSync(broken, '{"chains": {"C1": ');
+  const before = untouched();
+  const r = doctor(false);
+  assert.strictEqual(r.status, 1, r.stdout);
+  assert.match(line(r.stdout, 'State'), /^PROBLEM .*can't be read: .*other project-1a2b3c4d/);
+  for (const name of ['Codex', 'Codex verified', 'Hooks', 'Claude Code', 'MQL5 docs', 'Hook problems']) assert.match(line(r.stdout, name), /^ok /, name);
+  assert.strictEqual(untouched(), before, 'nothing is overwritten or deleted');
+  fs.rmSync(path.dirname(broken), { recursive: true, force: true });
+});
+
+test('the hooks check fails while hooks are switched off altogether, and live checks without a temporary folder say so', async () => {
   await freshInstall({ codexVerified: '0.162.1' });
   setSpec([]);
   const s = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
-  s.hooks.UserPromptSubmit = [{ hooks: [{ type: 'command', command: `node "${path.join(PROFILE, 'gpt', 'gate.js').replace(/\\/g, '/')}" prompt` }] }];
-  fs.writeFileSync(settingsFile, JSON.stringify(s));
-  const r = doctor(false);
-  assert.strictEqual(r.status, 1, r.stdout);
-  assert.match(line(r.stdout, 'Hooks'), /^PROBLEM .*1 hook\(s\) of the old setup are still registered/);
-  // a hook that only syntax-checks gate.js is the user's own, as install.js keeps it
-  s.hooks.UserPromptSubmit[0].hooks[0].command = `node --check "${path.join(PROFILE, 'gpt', 'gate.js').replace(/\\/g, '/')}"`;
-  fs.writeFileSync(settingsFile, JSON.stringify(s));
-  assert.match(line(doctor(false).stdout, 'Hooks'), /^ok /);
-  // hooks switched off altogether
   fs.writeFileSync(settingsFile, JSON.stringify({ ...s, disableAllHooks: true }));
-  assert.match(line(doctor(false).stdout, 'Hooks'), /^PROBLEM .*disableAllHooks/);
+  const before = untouched();
+  const off = doctor(false);
+  assert.strictEqual(off.status, 1, off.stdout);
+  assert.match(line(off.stdout, 'Hooks'), /^PROBLEM .*disableAllHooks/);
+  for (const name of ['Codex', 'Codex verified', 'Claude Code', 'State']) assert.match(line(off.stdout, name), /^ok /, name);
+  assert.strictEqual(untouched(), before);
   // no temporary folder for the live checks: they say so, and every other check is still shown
   fs.writeFileSync(settingsFile, JSON.stringify(s));
   const blocked = path.join(HOME, 'not-a-folder.txt');
@@ -156,9 +192,19 @@ test('a clean install passes doctor --live, run from the installed copy, and its
   assert.match(line(unproved.stdout, 'Read-only'), /^PROBLEM .*inconclusive/);
   assert.strictEqual(configNow().codexVerified, undefined);
   setSpec([probe('probe.txt'), probe('probe-resumed.txt')]);
+  keepRetired(); // (the retired gate's hook is any other hook now)
+  const backup = path.join(state.HOME, 'backup'); // (a former first-install backup, left as it is)
+  fs.mkdirSync(backup, { recursive: true });
+  fs.writeFileSync(path.join(backup, 'done.json'), '{"at": "2026-10-20"}');
+  const rest = configNow();
+  delete rest.codexVerified;
+  const before = untouched();
   const r = doctor(true, path.join(PROFILE, 'crosscheck', 'crosscheck.js'));
   assert.strictEqual(r.status, 0, r.stdout);
-  assert.strictEqual(configNow().codexVerified, '0.162.1');
+  assert.doesNotMatch(r.stdout, /old setup/);
+  assert.deepStrictEqual(configNow(), { ...rest, codexVerified: '0.162.1' }, 'only the verified version is recorded');
+  assert.strictEqual(untouched(), before, 'the settings, the retired folder, the former backup and the live state are unchanged');
+  fs.rmSync(backup, { recursive: true, force: true });
   const all = calls();
   const execs = all.filter(c => c.kind === 'exec');
   const folder = execs[0].args[execs[0].args.indexOf('-C') + 1];

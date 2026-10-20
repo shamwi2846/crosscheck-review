@@ -61,7 +61,7 @@ function findable(cmd) {
 }
 
 // The hooks as installed: every hook of `registration` once, in its event and matcher, with its exact settings (the
-// screen hook failing closed), the installed hook.js present, and no hook of the old setup left. Returns problems.
+// screen hook failing closed), and the installed hook.js present. Returns problems.
 function hookProblems() {
   const hookJs = path.join(claudeDir(), 'crosscheck', 'hook.js');
   const settings = state.read(path.join(claudeDir(), 'settings.json'));
@@ -78,9 +78,6 @@ function hookProblems() {
       }
     }
   }
-  const gate = require('./hook').runsScript('gpt[\\\\/]gate\\.js'); // (as install.js tells the old setup's hooks)
-  const old = Object.values(have).flatMap(gs => [].concat(gs).flatMap(g => [].concat(g.hooks || []))).filter(h => gate.test(String(h.command || '')));
-  if (old.length) problems.push(`${old.length} hook(s) of the old setup are still registered`);
   return problems;
 }
 
