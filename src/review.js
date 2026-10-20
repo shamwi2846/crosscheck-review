@@ -415,7 +415,12 @@ function apply(root, manifest, result) {
           escalated.push(f.path);
         }
       }
-      if (pairComplete && manifest.riskyKeys.includes(key)) { // (the pair read it in full: its paired review is done)
+      const record = s.changes[key];
+      const sameRecord = record ? record.at === f.at && record.session === f.session : f.at === null;
+      const unchanged = sameRecord && versionOf(root, f.path) === f.frozen; // (still the version the reviewers read)
+      // (the pair read it in full: its paired review is done, but only for that version; a file changed since stays
+      // escalated, so its next review is paired again)
+      if (pairComplete && manifest.riskyKeys.includes(key) && unchanged && !taskChanged) {
         s.riskyReviews[key] = manifest.admittedAt;
         delete s.escalations[key];
       }
@@ -428,10 +433,8 @@ function apply(root, manifest, result) {
       const needsPlan = manifest.riskyKeys.includes(key) || ratedRisky.includes(key) || (chain.riskyKeys || []).includes(key)
         || Object.keys(chain.risky || {}).includes(key) || foundRisky;
       if (needsPlan && !planned && !skipped) unplanned.push(f.path);
-      const record = s.changes[key];
-      const sameRecord = record ? record.at === f.at && record.session === f.session : f.at === null;
       const reviewed = !taskChanged && !s.escalations[key];
-      if (reviewed && sameRecord && (!needsPlan || planned || skipped) && versionOf(root, f.path) === f.frozen) {
+      if (reviewed && unchanged && (!needsPlan || planned || skipped)) {
         s.acks[key] = f.frozen;
         delete s.changes[key];
         acked.push(f.path);

@@ -263,6 +263,31 @@ test('a complete pair grants its receipts, and its paired follow-ups keep the pl
   assert.strictEqual(review.close(p.root, { chain: r.chain, rev: s.chains[r.chain].rev, notes: {} }).status, 'DONE');
 });
 
+test('a file edited during its paired review gets no receipt and stays escalated', async () => {
+  const p = project('t7', { 'src/pay.js': 'p0\n' });
+  write(p.root, 'src/pay.js', 'p1\n');
+  const began = Date.now() - 60000;
+  seed(p.root, s => {
+    s.changes = { [key('src/pay.js')]: pending('src/pay.js') };
+    s.plans = { [key('src/pay.js')]: plan(p) };
+    s.escalations = { [key('src/pay.js')]: { chain: 'C0', at: began } };
+    s.chains = { C0: { rev: 1, began, rounds: [], closed: false, files: { [key('src/pay.js')]: 'src/pay.js' }, frozen: {}, findings: {}, risky: { [key('src/pay.js')]: began } } };
+  });
+  const hold = fs.mkdtempSync(path.join(HOME, 't7-hold-'));
+  setPair({ A: [{ hold, text: reviewAnswer() }], B: [reviewAnswer()] });
+  const running = review.review(p.root, { session: 'A', taskFile: p.taskFile });
+  await waitFor(path.join(hold, 'started'));
+  write(p.root, 'src/pay.js', 'p2 edited while the pair reviewed p1\n');
+  fs.writeFileSync(path.join(hold, 'go'), '');
+  const r = await running;
+  assert.strictEqual(r.status, 'DONE', r.text);
+  const s = stateOf(p.root);
+  assert.strictEqual(s.riskyReviews[key('src/pay.js')], undefined, 'the pair reviewed p1, not p2');
+  assert.ok(s.escalations[key('src/pay.js')], 'p2 still needs a paired review');
+  assert.ok(s.changes[key('src/pay.js')]);
+  assert.strictEqual(review.close(p.root, { chain: 'C0', rev: 1, notes: {} }).status, 'REFUSED');
+});
+
 test('parallel risky reviewers share the whole code, decoded callers and frozen plan tests', async () => {
   const lines = Array.from({ length: 30 }, (_, i) => `engine line ${i + 1}`);
   const callers = Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`src/c${String(i + 1).padStart(2, '0')}.js`, `uses engine ${i}\n`]));
