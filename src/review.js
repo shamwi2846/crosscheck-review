@@ -163,16 +163,17 @@ function diffOf(root, before, after) {
 }
 
 // What GPT reads about one file: its diff from its baseline, or the whole file when there is no diff to show. In a
-// narrow round (past the round limit) an unchanged file shows no code, only that it didn't change.
+// narrow round (past the round limit) an unchanged file shows no code, only that it didn't change. Returns
+// { text, whole }: whether the frozen file was shown in full.
 function material(root, f, { full = false, narrow = false } = {}) {
   if (f.frozen === DELETED) {
-    return `### ${f.path} (deleted)\n${f.baseline ? `Its last version:\n${fence(snapText(root, f.baseline))}` : 'No earlier version is known.'}`;
+    return { text: `### ${f.path} (deleted)\n${f.baseline ? `Its last version:\n${fence(snapText(root, f.baseline))}` : 'No earlier version is known.'}`, whole: false };
   }
   const text = snapText(root, f.frozen);
-  if (!f.baseline) return `### ${f.path} (new file, whole)\n${fence(text)}`;
+  if (!f.baseline) return { text: `### ${f.path} (new file, whole)\n${fence(text)}`, whole: true };
   const diff = full ? '' : diffOf(root, f.baseline, f.frozen);
-  if (diff) return `### ${f.path} (diff from its last reviewed version)\n${fence(diff)}`;
-  return narrow ? `### ${f.path} (unchanged since the last round)` : `### ${f.path} (whole file)\n${fence(text)}`;
+  if (diff) return { text: `### ${f.path} (diff from its last reviewed version)\n${fence(diff)}`, whole: false };
+  return narrow ? { text: `### ${f.path} (unchanged since the last round)`, whole: false } : { text: `### ${f.path} (whole file)\n${fence(text)}`, whole: true };
 }
 
 // The project files that mention a risky file's name, sorted: candidate callers from a plain search of their
@@ -230,6 +231,7 @@ function freeze(root, { attempt, session, names = [], files, admittedAt, rev, ta
   const taskId = state.pathKey(path.resolve(taskFile));
   const narrow = !!chain && chain.rounds.length >= 3;
   const code = [];
+  const wholeKeys = []; // (in a paired attempt, the files the reviewers read in full: these get its receipt)
   for (const [key, f] of Object.entries(files)) {
     f.frozen = snapshot(root, bytesOf(path.join(root, f.path)));
     if (f.baseline === undefined) { // (no change record: the version git has, if any)
@@ -237,9 +239,11 @@ function freeze(root, { attempt, session, names = [], files, admittedAt, rev, ta
       f.baseline = head.status === 0 ? snapshot(root, head.stdout) : null;
     }
     const shown = material(root, f, { full, narrow });
-    code.push(shown);
+    code.push(shown.text);
     // (a paired review reads a risky file in full, beside its diff)
-    if (paired && riskyKeys.includes(key) && shown.includes('(diff from')) code.push(`### ${f.path} (whole file, read in full)\n${fence(snapText(root, f.frozen))}`);
+    const addWhole = paired && riskyKeys.includes(key) && f.frozen !== DELETED && !shown.whole;
+    if (addWhole) code.push(`### ${f.path} (whole file, read in full)\n${fence(snapText(root, f.frozen))}`);
+    if (paired && (riskyKeys.includes(key) || shown.whole)) wholeKeys.push(key);
   }
   // A plan counts only for this task and its current requirements; the cases and the frozen tests go to GPT.
   const current = Object.fromEntries(Object.entries(plans).filter(([, p]) => p.task === taskId && p.reqHash === task.reqHash));
@@ -274,7 +278,7 @@ function freeze(root, { attempt, session, names = [], files, admittedAt, rev, ta
     : `${RULES}\n\n## Task requirements (the authority on what the work must do)\n${task.requirements}\n\n${tail}`;
   const manifest = { attempt, kind: chain ? 'followup' : 'review', root, session, names, admittedAt, files, chain: chain ? chain.id : null, rev,
     openIds: chain ? Object.keys(chain.findings).filter(id => chain.findings[id].status === 'open') : [],
-    paired, riskyKeys, plans: Object.fromEntries(Object.entries(current).map(([key, p]) => [key, sha(JSON.stringify(p))])),
+    paired, riskyKeys, wholeKeys, plans: Object.fromEntries(Object.entries(current).map(([key, p]) => [key, sha(JSON.stringify(p))])),
     task: { path: taskFile, id: taskId, title: task.title, sha: sha(taskBytes), reqHash: task.reqHash, rowIds, linkIds: task.ids, reqs: task.reqs } };
   fs.mkdirSync(bundleDir(root, attempt), { recursive: true });
   fs.writeFileSync(path.join(bundleDir(root, attempt), 'manifest.json'), JSON.stringify(manifest, null, 2));
@@ -405,24 +409,27 @@ function apply(root, manifest, result) {
     const forThisTask = r => !!r && r.task === taskId && r.reqHash === reqHash;
     const acked = [], pending = [], escalated = [], unplanned = [];
     for (const [key, f] of Object.entries(manifest.files)) {
-      if (ratedRisky.includes(key)) {
-        // (from now on only a real test plan counts for it in this task, never a skip; each task keeps its own record)
-        const records = [].concat(s.needsPlan[key] || []).filter(r => !forThisTask(r));
-        s.needsPlan[key] = [...records, { task: taskId, reqHash }];
-        if (!chain.paired) { // (a paired chain is already reviewed by two: its risky files need a plan, not another pair)
-          s.escalations[key] = { chain: id, at: Date.now() };
-          chain.risky = { ...chain.risky, [key]: Date.now() }; // (this chain's own record: closing it needs a paired review)
-          escalated.push(f.path);
-        }
-      }
       const record = s.changes[key];
       const sameRecord = record ? record.at === f.at && record.session === f.session : f.at === null;
       const unchanged = sameRecord && versionOf(root, f.path) === f.frozen; // (still the version the reviewers read)
       // (the pair read it in full: its paired review is done, but only for that version; a file changed since stays
       // escalated, so its next review is paired again)
-      if (pairComplete && manifest.riskyKeys.includes(key) && unchanged && !taskChanged) {
+      if (pairComplete && manifest.wholeKeys.includes(key) && unchanged && !taskChanged) {
         s.riskyReviews[key] = manifest.admittedAt;
         delete s.escalations[key];
+        chain.wholeKeys = [...new Set([...(chain.wholeKeys || []), key])];
+      }
+      if (ratedRisky.includes(key)) {
+        // (from now on only a real test plan counts for it in this task, never a skip; each task keeps its own record)
+        const records = [].concat(s.needsPlan[key] || []).filter(r => !forThisTask(r));
+        s.needsPlan[key] = [...records, { task: taskId, reqHash }];
+        // (a file this chain's pair read in full needs a plan, not another pair; any other file that turns risky gets
+        // its own paired review, as in a chain that isn't paired)
+        if (!(chain.wholeKeys || []).includes(key)) {
+          s.escalations[key] = { chain: id, at: Date.now() };
+          chain.risky = { ...chain.risky, [key]: Date.now() }; // (this chain's own record: closing it needs a paired review)
+          escalated.push(f.path);
+        }
       }
       // A risky file is acknowledged only with the test plan the reviewers saw, still current for this task; a
       // trading file may have a skip instead, unless GPT ever rated it risky for this task.
@@ -557,7 +564,9 @@ function close(root, { chain: id, notes = {}, rev }) {
       else relabel.push([fid, f, why]);
     }
     for (const key of Object.keys(c.risky || {})) {
-      if (!((s.riskyReviews || {})[key] > c.began)) problems.push(`${c.files[key]} was rated risky in this chain: it needs a paired review recorded after the chain began`);
+      // (the receipt must be newer than the file's latest risky rating in this chain, so an older pair of an older
+      // version never counts for a later one)
+      if (!((s.riskyReviews || {})[key] > c.risky[key])) problems.push(`${c.files[key]} was rated risky in this chain: it needs a paired review recorded after that`);
     }
     if (problems.length) return { refused: problems.join('; ') };
     if (relabel.length) {

@@ -148,7 +148,7 @@ test('plan authorization stays bound to the task, its requirements and the froze
 
 test('one merge keeps severity, row provenance and dispute evidence', () => {
   const twinA = finding('lot rounding', 'src/a.js:3', { severity: 'MEDIUM', title: 'A view', test: null });
-  const twinB = finding('lot rounding', 'src/a.js:3', { severity: 'HIGH', title: 'B view', test: 'lot 0.015 -> 0.01' });
+  const twinB = finding('lot rounding', 'src/a.js:3', { severity: 'HIGH', title: 'B view', test: 'lot 0.015 -> 0.01', label: 'GAP' }); // (mixed labels: a BUG)
   const a = { verdict: 'ISSUES_FOUND', findings: [], requirements: rows('NOT_MET', 'NOT_MET'), possibly_missing: ['pa'], class: { level: 'normal', files: ['src/helper.js'], why: 'wa' }, coverage: 'ca' };
   const b = { verdict: 'ISSUES_FOUND', findings: [], requirements: rows('MET', 'PARTIAL'), possibly_missing: ['pb'], class: { level: 'risky', files: ['src/other.js'], why: 'wb' }, coverage: 'cb' };
   const found = {
@@ -209,57 +209,80 @@ test('another task\'s paired review of a file keeps this task\'s plan requiremen
   assert.match(again.text, /not acknowledged until they have a current test plan[^\n]*src\/helper\.js/);
 });
 
-test('a complete pair grants its receipts, and its paired follow-ups keep the plan gate', async () => {
-  const p = project('t4', { 'src/trade.mq5': 't0\n', 'src/pay.js': 'p0\n', 'src/helper.js': 'h0\n' });
-  for (const rel of ['src/trade.mq5', 'src/pay.js', 'src/helper.js']) write(p.root, rel, `${rel} v1\n`);
+test('new risky files need their own pair, during a paired review and its follow-ups', async () => {
+  const body = Array.from({ length: 30 }, (_, i) => `line ${i + 1}`).join('\n');
+  const p = project('t4', { 'src/EA.mq5': 'e0\n', 'src/h1.js': `${body}\n`, 'src/h2.js': `${body}\n` });
+  write(p.root, 'src/EA.mq5', 'e1\n');
+  write(p.root, 'src/new.js', 'a new helper; its text says (diff from x)\n'); // (new: shown in full, whatever it says)
+  write(p.root, 'src/h1.js', `H1\n${body.split('\n').slice(1).join('\n')}\n`); // (diffs only)
+  write(p.root, 'src/h2.js', `H2\n${body.split('\n').slice(1).join('\n')}\n`);
+  const all = ['src/EA.mq5', 'src/new.js', 'src/h1.js', 'src/h2.js'];
   const began = Date.now() - 60000;
+  const committed = snapshotOf(p.root, `${body}\n`); // (h1 and h2 existed: their baseline is the committed text)
   seed(p.root, s => {
-    s.changes = { [key('src/trade.mq5')]: pending('src/trade.mq5'), [key('src/pay.js')]: pending('src/pay.js'), [key('src/helper.js')]: pending('src/helper.js') };
-    s.plans = { [key('src/trade.mq5')]: plan(p), [key('src/pay.js')]: plan(p) };
-    s.escalations = { [key('src/pay.js')]: { chain: 'C0', at: began } };
-    s.chains = { C0: { rev: 1, began, rounds: [], closed: false, files: { [key('src/pay.js')]: 'src/pay.js' }, frozen: {}, findings: {}, risky: { [key('src/pay.js')]: began } } };
+    s.changes = Object.fromEntries(all.map(rel => [key(rel), { ...pending(rel), baseline: /h\d/.test(rel) ? committed : null }]));
+    s.plans = Object.fromEntries(all.map(rel => [key(rel), plan(p)]));
+    s.escalations = { [key('src/EA.mq5')]: { chain: 'C0', at: began } };
+    s.chains = { C0: { rev: 1, began, rounds: [], closed: false, files: { [key('src/EA.mq5')]: 'src/EA.mq5' }, frozen: {}, findings: {}, risky: { [key('src/EA.mq5')]: began } } };
   });
-  const helperRisky = { level: 'risky', files: ['src/helper.js'], why: 'it now sizes lots' };
+  const riskyOf = files => ({ level: 'risky', files, why: 'it sizes lots' });
   const maintainGap = { id: 'F2', status: 'MAINTAIN', reason: 'still disputed' };
   // A also rates R2 NOT MET without a finding: that row becomes its own finding A2, which B disputes
-  setPair({ A: [reviewAnswer([finding('no stop loss', 'src/trade.mq5:1')], { reqs: rows('MET', 'NOT_MET') })], B: [reviewAnswer()], xA: [marks([])],
-    xB: [marks([['A1', 'CONFIRM'], ['A2', 'DISPUTE', null, 'R2 is enforced at src/pay.js:1']])],
-    follow: [followAnswer([{ id: 'F1', status: 'RESOLVED', reason: 'stop added' }, maintainGap], helperRisky), followAnswer([maintainGap]), followAnswer([maintainGap])] });
+  // (B reports the same bug, rated higher, and each marks the other's as SAME_AS)
+  const twinB = finding('no stop loss either', 'src/EA.mq5:1', { severity: 'HIGH', test: 'an order without a stop loss is refused' });
+  setPair({ A: [reviewAnswer([finding('no stop loss', 'src/EA.mq5:1')], { reqs: rows('MET', 'NOT_MET') }), reviewAnswer(), reviewAnswer()],
+    B: [reviewAnswer([twinB], { cls: riskyOf(['src/h1.js']) }), reviewAnswer(), reviewAnswer()], xA: [marks([['B1', 'SAME_AS', 'A1']])],
+    xB: [marks([['A1', 'SAME_AS', 'B1'], ['A2', 'DISPUTE', null, 'R2 is enforced at src/h2.js:1']])],
+    follow: [followAnswer([{ id: 'F1', status: 'RESOLVED', reason: 'stop added' }, maintainGap], riskyOf(['src/h2.js', 'src/EA.mq5', 'src/new.js'])),
+      followAnswer([maintainGap]), followAnswer([maintainGap], riskyOf(['src/h1.js']))] });
   const r = await review.review(p.root, { session: 'A', taskFile: p.taskFile });
   assert.strictEqual(r.status, 'DONE', r.text);
   let s = stateOf(p.root);
-  const c = s.chains[r.chain];
   const manifest = JSON.parse(fs.readFileSync(path.join(r.bundle, 'manifest.json'), 'utf8'));
-  assert.deepStrictEqual([c.paired, c.rounds.length, c.risky], [true, 1, undefined]);
-  assert.deepStrictEqual(s.riskyReviews, { [key('src/trade.mq5')]: manifest.admittedAt, [key('src/pay.js')]: manifest.admittedAt });
-  assert.deepStrictEqual(s.escalations, {});
-  assert.deepStrictEqual(Object.values(c.findings).map(f => [f.title, f.label, f.agreement]),
-    [['no stop loss', 'BUG', 'confirmed by B'], ['R2 is NOT MET', 'GAP', 'disputed by B: R2 is enforced at src/pay.js:1']]);
-  assert.match(fs.readFileSync(path.join(p.root, gaps.NAME), 'utf8'), /- Problem: F2: R2 is NOT MET\n[^#]*- Why skipped: pair: disputed by B: R2 is enforced at src\/pay\.js:1/);
+  assert.deepStrictEqual([s.chains[r.chain].paired, s.chains[r.chain].rounds.length], [true, 1]);
+  assert.deepStrictEqual(s.riskyReviews, { [key('src/EA.mq5')]: manifest.admittedAt, [key('src/new.js')]: manifest.admittedAt }, 'the files it read in full');
+  assert.deepStrictEqual(Object.keys(s.escalations), [key('src/h1.js')], 'B rated the diff-only h1 risky: it needs its own pair');
+  assert.deepStrictEqual(Object.keys(s.chains[r.chain].risky), [key('src/h1.js')]);
+  assert.deepStrictEqual(Object.keys(s.changes), [key('src/h1.js')]);
+  assert.deepStrictEqual(Object.values(s.chains[r.chain].findings).map(f => [f.title, f.severity, f.test, f.label, f.agreement]),
+    [['no stop loss either', 'HIGH', 'an order without a stop loss is refused', 'BUG', 'both'], ['R2 is NOT MET', 'MEDIUM', null, 'GAP', 'disputed by B: R2 is enforced at src/h2.js:1']]);
+  assert.match(fs.readFileSync(path.join(p.root, gaps.NAME), 'utf8'), /- Problem: F2: R2 is NOT MET\n[^#]*- Why skipped: pair: disputed by B: R2 is enforced at src\/h2\.js:1/);
   const turns = fs.readdirSync(r.bundle).filter(f => f.startsWith('turn-')).sort();
   assert.deepStrictEqual(turns, ['turn-1-A-1.md', 'turn-1-B-1.md', 'turn-2-A-1.md', 'turn-2-B-1.md']);
   assert.match(fs.readFileSync(path.join(r.bundle, 'turn-2-B-1.md'), 'utf8'),
-    /## Your findings\nNone\.\n\n## Reviewer A's findings\n- A1 \[MEDIUM BUG\] no stop loss[^\n]*\n- A2 \[MEDIUM BUG\] R2 is NOT MET/);
-  assert.strictEqual(review.close(p.root, { chain: 'C0', rev: 1, notes: {} }).status, 'DONE');
-  write(p.root, 'src/trade.mq5', 'src/trade.mq5 v2 with a stop\n');
+    /## Your findings\n- B1 \[HIGH BUG\] no stop loss either[^\n]*\n\n## Reviewer A's findings\n- A1 \[MEDIUM BUG\] no stop loss[^\n]*\n- A2 \[MEDIUM BUG\] R2 is NOT MET/);
+  assert.strictEqual(review.close(p.root, { chain: 'C0', rev: 1, notes: {} }).status, 'DONE', 'its pair read EA.mq5 in full');
+  write(p.root, 'src/EA.mq5', 'e2 with a stop\n');
+  write(p.root, 'src/h2.js', `H2 again\n${body.split('\n').slice(1).join('\n')}\n`);
   const f1 = await review.followup(p.root, { chain: r.chain, responseFile: response('stop added') });
   assert.strictEqual(f1.status, 'DONE', f1.text);
   const call = execCalls().slice(-1)[0];
   assert.deepStrictEqual([call.args[1], call.args.includes('sess-A'), call.args.includes('model_reasoning_effort=xhigh')], ['resume', true, true]);
   s = stateOf(p.root);
-  assert.ok(s.changes[key('src/helper.js')], 'the newly risky helper waits for its plan');
-  assert.deepStrictEqual([s.escalations, s.chains[r.chain].risky, s.riskyReviews[key('src/helper.js')]], [{}, undefined, undefined]);
-  const normalAgain = await review.followup(p.root, { chain: r.chain, responseFile: response('rated normal now') });
-  assert.strictEqual(normalAgain.status, 'DONE', normalAgain.text);
+  assert.deepStrictEqual(Object.keys(s.escalations).sort(), [key('src/h1.js'), key('src/h2.js')].sort(), 'h2 newly risky: its own pair; EA.mq5 and new.js were read in full');
+  assert.deepStrictEqual(Object.keys(s.changes).sort(), [key('src/h1.js'), key('src/h2.js')].sort(), 'EA.mq5 and new.js have current plans');
+  assert.strictEqual((await review.followup(p.root, { chain: r.chain, responseFile: response('all normal now') })).status, 'DONE');
   s = stateOf(p.root);
-  assert.ok(s.changes[key('src/helper.js')], 'a later normal rating doesn\'t lift its plan requirement');
-  assert.deepStrictEqual([s.escalations, s.riskyReviews[key('src/helper.js')]], [{}, undefined]);
-  seed(p.root, x => { x.plans[key('src/helper.js')] = plan(p); });
-  const f2 = await review.followup(p.root, { chain: r.chain, responseFile: response('plan written') });
-  assert.strictEqual(f2.status, 'DONE', f2.text);
+  assert.deepStrictEqual(Object.keys(s.escalations).sort(), [key('src/h1.js'), key('src/h2.js')].sort(), 'a normal rating lifts no escalation');
+  const refused = review.close(p.root, { chain: r.chain, rev: s.chains[r.chain].rev, notes: {} });
+  assert.strictEqual(refused.status, 'REFUSED');
+  assert.match(refused.text, /src\/h1\.js was rated risky in this chain[\s\S]*src\/h2\.js was rated risky in this chain/);
+  // (h1 and h2: escalated, so a pair; h2's pending record has no session, since no hook saw its edit, so it is named)
+  const ownPair = await review.review(p.root, { session: 'A', files: ['src/h2.js'], taskFile: p.taskFile });
+  assert.strictEqual(ownPair.status, 'DONE', ownPair.text);
   s = stateOf(p.root);
-  assert.ok(!s.changes[key('src/helper.js')]);
-  assert.strictEqual(s.riskyReviews[key('src/helper.js')], undefined);
+  assert.ok(s.riskyReviews[key('src/h1.js')] > s.chains[r.chain].began && s.riskyReviews[key('src/h2.js')] > s.chains[r.chain].began,
+    JSON.stringify({ riskyReviews: s.riskyReviews, began: s.chains[r.chain].began, text: ownPair.text }));
+  assert.deepStrictEqual([s.escalations, s.changes], [{}, {}]);
+  // a later version of h1, rated risky again in the original chain, needs a pair of its own: the older receipt won't do
+  write(p.root, 'src/h1.js', `H1 v2\n${body.split('\n').slice(1).join('\n')}\n`);
+  assert.strictEqual((await review.followup(p.root, { chain: r.chain, responseFile: response('h1 changed again') })).status, 'DONE');
+  s = stateOf(p.root);
+  const stale = review.close(p.root, { chain: r.chain, rev: s.chains[r.chain].rev, notes: {} });
+  assert.strictEqual(stale.status, 'REFUSED');
+  assert.match(stale.text, /src\/h1\.js was rated risky in this chain/);
+  assert.strictEqual((await review.review(p.root, { files: ['src/h1.js'], taskFile: p.taskFile })).status, 'DONE');
+  s = stateOf(p.root);
   assert.strictEqual(review.close(p.root, { chain: r.chain, rev: s.chains[r.chain].rev, notes: {} }).status, 'DONE');
 });
 
