@@ -163,12 +163,12 @@ test('changed requirements acknowledge nothing, and a risky rating stays escalat
   assert.strictEqual(s.escalations[key('src/m.js')].chain, r.chain);
   const calls = execCalls().length;
   const again = await review.review(root, { session: 'A', files: ['src/m.js'], taskFile }); // (escalated: now always a pair)
-  assert.strictEqual(again.status, 'PAIR_INCOMPLETE'); // (the stub has no answers for a pair)
+  assert.strictEqual(again.status, 'DONE', again.text);
   const pairCalls = execCalls().slice(calls);
   assert.ok(pairCalls.some(c => c.prompt.includes('reviewer A.')) && pairCalls.some(c => c.prompt.includes('reviewer B.')));
   s = stateOf(root);
-  assert.ok(s.escalations[key('src/m.js')]);
-  assert.ok(s.changes[key('src/m.js')]);
+  assert.ok(s.riskyReviews[key('src/m.js')], 'the pair it was escalated to records its review');
+  assert.ok(s.changes[key('src/m.js')], 'still pending: it has no test plan');
 });
 
 test('a dead reservation is reclaimed, but an overlapping live review can neither take nor clear one', async () => {

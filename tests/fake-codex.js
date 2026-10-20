@@ -63,7 +63,7 @@ if (args[0] === '--role') {
   let prompt = '';
   process.stdin.on('data', d => { prompt += d; });
   process.stdin.on('end', () => {
-    if (!fs.existsSync(log)) fs.writeFileSync(log, '');
+    fs.appendFileSync(log, ''); // (creates it if needed, never empties it: a pair's two reviewers run at once)
     const picked = pick(prompt);
     if (picked.group !== null) answer = picked.answer;
     if (answer.session) session = answer.session;

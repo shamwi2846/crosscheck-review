@@ -98,6 +98,10 @@ async function runPair({ prompt, runOne, materialize }) {
   }
   const found = {};
   for (const side of ['A', 'B']) found[side] = Object.fromEntries(materialize(reviews[side].answer).map((f, i) => [`${side}${i + 1}`, f]));
+  // (with nothing to mark on either side the cross-check could change nothing: two runs saved, two failures avoided)
+  if (!Object.keys(found.A).length && !Object.keys(found.B).length) {
+    return { status: 'OK', answer: merge(reviews.A.answer, reviews.B.answer, found, { A: [], B: [] }), session: reviews.A.session, pairComplete: true };
+  }
   const checks = await Promise.all(['A', 'B'].map(side => runOne(crosscheckPrompt(side, found), {
     label: `2-${side}`, resume: reviews[side].session, strict: true, kind: 'crosscheck',
     asked: { otherIds: Object.keys(found[other(side)]), ownIds: Object.keys(found[side]) },

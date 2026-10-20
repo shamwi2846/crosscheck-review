@@ -126,6 +126,7 @@ test('plan authorization stays bound to the task, its requirements and the froze
   fs.writeFileSync(path.join(hold, 'go'), '');
   const r = await running;
   assert.strictEqual(r.status, 'DONE', r.text);
+  assert.ok(!execCalls().some(c => c.prompt.includes('Cross-check')), 'a pair with no findings on either side skips the cross-check');
   let s = stateOf(p.root);
   assert.deepStrictEqual(Object.keys(s.acks), [k['src/preset.set']]);
   assert.match(r.text, /not acknowledged until they have a current test plan[^\n]*src\/EA\.mq5/);
