@@ -86,13 +86,14 @@ function merge(a, b, found, marks) {
 // { status: 'OK', answer, session, pairComplete: true }, or { status: 'PAIR_INCOMPLETE', why, unavailable } where
 // `unavailable` says GPT itself was unavailable (a usage limit, a login problem, a timeout), for the fallback.
 async function runPair({ prompt, runOne, materialize }) {
-  const failed = (side, step, r) => ({ status: 'PAIR_INCOMPLETE', unavailable: r.status === 'GPT_UNAVAILABLE',
+  // (`unavailable` looks at both sides' runs: one side's bad answer mustn't hide that GPT was down for the other)
+  const failed = (side, step, r, runs) => ({ status: 'PAIR_INCOMPLETE', unavailable: runs.some(x => x.status === 'GPT_UNAVAILABLE'),
     why: `reviewer ${side}'s ${step} didn't complete (${r.why}), so nothing was recorded` });
   const reviews = {};
   const first = await Promise.all(['A', 'B'].map(side => runOne(`${prompt}\n\n${ROLES[side]}`, { label: `1-${side}` })));
   for (const [i, side] of ['A', 'B'].entries()) {
-    if (first[i].status !== 'OK') return failed(side, 'review', first[i]);
-    if (!first[i].session) return failed(side, 'review', { why: 'no session to resume for the cross-check' });
+    if (first[i].status !== 'OK') return failed(side, 'review', first[i], first);
+    if (!first[i].session) return failed(side, 'review', { why: 'no session to resume for the cross-check' }, first);
     reviews[side] = first[i];
   }
   const found = {};
@@ -101,7 +102,7 @@ async function runPair({ prompt, runOne, materialize }) {
     label: `2-${side}`, resume: reviews[side].session, strict: true, kind: 'crosscheck',
     asked: { otherIds: Object.keys(found[other(side)]), ownIds: Object.keys(found[side]) },
   })));
-  for (const [i, side] of ['A', 'B'].entries()) if (checks[i].status !== 'OK') return failed(side, 'cross-check', checks[i]);
+  for (const [i, side] of ['A', 'B'].entries()) if (checks[i].status !== 'OK') return failed(side, 'cross-check', checks[i], checks);
   const answer = merge(reviews.A.answer, reviews.B.answer, found, { A: checks[0].answer.marks, B: checks[1].answer.marks });
   return { status: 'OK', answer, session: reviews.A.session, pairComplete: true };
 }

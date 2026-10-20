@@ -53,7 +53,7 @@ const marks = list => JSON.stringify({ marks: list.map(([id, mark, sameAs = null
 const followAnswer = (followups = [], cls = normal) => JSON.stringify({ verdict: followups.some(f => f.status === 'MAINTAIN') ? 'ISSUES_REMAIN' : 'RESOLVED',
   followups, findings: [], requirements: [], possibly_missing: [], class: cls, coverage: 'c' });
 // The stub's answers by prompt: each reviewer's review and cross-check, and follow-ups (which resume reviewer A).
-function setPair({ A = [], B = [], xA = [], xB = [], follow = [] }) {
+function setPair({ A = [], B = [], xA = [], xB = [], follow = [], single = [] }) {
   const withSession = (list, session) => list.map(a => (typeof a === 'string' ? { text: a, session } : { session, ...a }));
   fs.writeFileSync(SPEC, JSON.stringify({ byPrompt: [
     { match: 'Cross-check (you are reviewer A)', answers: withSession(xA, 'sess-A') },
@@ -61,6 +61,7 @@ function setPair({ A = [], B = [], xA = [], xB = [], follow = [] }) {
     { match: 'reviewer A. Check', answers: withSession(A, 'sess-A') },
     { match: 'reviewer B. Attack', answers: withSession(B, 'sess-B') },
     { match: 'This is a follow-up round', answers: withSession(follow, 'sess-A') },
+    { match: 'You review a code change', answers: withSession(single, 'sess-S') }, // (a single review: last, as pairs' prompts hold it too)
   ] }));
   fs.rmSync(LOG, { force: true });
 }
@@ -128,7 +129,7 @@ test('plan authorization stays bound to the task, its requirements and the froze
   let s = stateOf(p.root);
   assert.deepStrictEqual(Object.keys(s.acks), [k['src/preset.set']]);
   assert.match(r.text, /not acknowledged until they have a current test plan[^\n]*src\/EA\.mq5/);
-  assert.deepStrictEqual(s.needsPlan[k['src/EA.mq5']], { task: p.task, reqHash: p.reqHash });
+  assert.deepStrictEqual(s.needsPlan[k['src/EA.mq5']], [{ task: p.task, reqHash: p.reqHash }]);
   assert.ok(!s.escalations[k['src/EA.mq5']]); // (the pair read it in full)
   const f1 = await review.followup(p.root, { chain: r.chain, responseFile: response('nothing changed') });
   assert.strictEqual(f1.status, 'DONE', f1.text);
@@ -175,6 +176,36 @@ test('an unavailable reviewer leaves the pair incomplete, saying GPT was unavail
     runOne: async (prompt, o) => (o.label === '1-B' ? { status: 'GPT_UNAVAILABLE', why: 'usage limit' } : ok) });
   assert.deepStrictEqual([r.status, r.unavailable], ['PAIR_INCOMPLETE', true]);
   assert.match(r.why, /reviewer B's review didn't complete \(usage limit\)/);
+  const both = await pair.runPair({ prompt: 'p', materialize: () => [], runOne: async (prompt, o) => (o.label === '1-A'
+    ? { status: 'NOT_DONE', why: 'still invalid after its repair' } : { status: 'GPT_UNAVAILABLE', why: 'timeout' }) });
+  assert.deepStrictEqual([both.status, both.unavailable], ['PAIR_INCOMPLETE', true], 'A\'s bad answer doesn\'t hide that B\'s GPT was down');
+});
+
+test('another task\'s paired review of a file keeps this task\'s plan requirement for it', async () => {
+  const p = project('t6', { 'src/helper.js': 'h0\n' });
+  write(p.root, 'src/helper.js', 'h1 sizes lots\n');
+  const otherTask = path.join(HOME, 't6-other-task.md');
+  fs.writeFileSync(otherTask, '# other\n\n## Requirements\nR1. Places the order safely.\nR2. Keeps the lot within limits.\nR3. Something else.\n');
+  const other = { task: state.pathKey(path.resolve(otherTask)), reqHash: sha('R1. Places the order safely.\nR2. Keeps the lot within limits.\nR3. Something else.') };
+  seed(p.root, s => { s.changes = { [key('src/helper.js')]: pending('src/helper.js') }; });
+  const risky = { level: 'risky', files: ['src/helper.js'], why: 'it sizes lots' };
+  const threeRows = [...rows(), { id: 'R3', status: 'MET', evidence: 'e3' }];
+  setPair({ single: [reviewAnswer([], { cls: risky })], A: [reviewAnswer([], { reqs: threeRows, cls: risky })], B: [reviewAnswer([], { reqs: threeRows })],
+    xA: [marks([])], xB: [marks([])], follow: [followAnswer()] });
+  const first = await review.review(p.root, { session: 'A', taskFile: p.taskFile }); // (task 1, a normal review that rates it risky)
+  assert.strictEqual(first.status, 'DONE', first.text);
+  seed(p.root, s => { s.plans = { [key('src/helper.js')]: plan(other) }; });
+  const paired = await review.review(p.root, { files: ['src/helper.js'], taskFile: otherTask }); // (task 2, escalated: a pair)
+  assert.strictEqual(paired.status, 'DONE', paired.text);
+  let s = stateOf(p.root);
+  assert.deepStrictEqual(s.needsPlan[key('src/helper.js')].map(r => r.task), [p.task, other.task], 'each task keeps its own record');
+  assert.ok(!s.escalations[key('src/helper.js')]);
+  write(p.root, 'src/helper.js', 'h2 changed in task 1\n');
+  const again = await review.followup(p.root, { chain: first.chain, responseFile: response('rated normal now') });
+  assert.strictEqual(again.status, 'DONE', again.text);
+  s = stateOf(p.root);
+  assert.ok(s.changes[key('src/helper.js')], 'task 1 still needs its own plan for the file it found risky');
+  assert.match(again.text, /not acknowledged until they have a current test plan[^\n]*src\/helper\.js/);
 });
 
 test('a complete pair grants its receipts, and its paired follow-ups keep the plan gate', async () => {

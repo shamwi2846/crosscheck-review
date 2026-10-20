@@ -406,7 +406,9 @@ function apply(root, manifest, result) {
     const acked = [], pending = [], escalated = [], unplanned = [];
     for (const [key, f] of Object.entries(manifest.files)) {
       if (ratedRisky.includes(key)) {
-        s.needsPlan[key] = { task: taskId, reqHash }; // (from now on only a real test plan counts for it, never a skip)
+        // (from now on only a real test plan counts for it in this task, never a skip; each task keeps its own record)
+        const records = [].concat(s.needsPlan[key] || []).filter(r => !forThisTask(r));
+        s.needsPlan[key] = [...records, { task: taskId, reqHash }];
         if (!chain.paired) { // (a paired chain is already reviewed by two: its risky files need a plan, not another pair)
           s.escalations[key] = { chain: id, at: Date.now() };
           chain.risky = { ...chain.risky, [key]: Date.now() }; // (this chain's own record: closing it needs a paired review)
@@ -420,9 +422,11 @@ function apply(root, manifest, result) {
       // A risky file is acknowledged only with the test plan the reviewers saw, still current for this task; a
       // trading file may have a skip instead, unless GPT ever rated it risky for this task.
       const planned = forThisTask(s.plans[key]) && manifest.plans[key] === sha(JSON.stringify(s.plans[key]));
-      const skipped = RISKY_FILE.test(key) && forThisTask(s.skips[key]) && !forThisTask(s.needsPlan[key]);
-      // (once a file was found risky for this task, it needs a plan however a later round rates it)
-      const needsPlan = manifest.riskyKeys.includes(key) || ratedRisky.includes(key) || (chain.riskyKeys || []).includes(key) || forThisTask(s.needsPlan[key]);
+      const foundRisky = [].concat(s.needsPlan[key] || []).some(forThisTask);
+      const skipped = RISKY_FILE.test(key) && forThisTask(s.skips[key]) && !foundRisky;
+      // (once a file was found risky for this task or in this chain, it needs a plan however a later round rates it)
+      const needsPlan = manifest.riskyKeys.includes(key) || ratedRisky.includes(key) || (chain.riskyKeys || []).includes(key)
+        || Object.keys(chain.risky || {}).includes(key) || foundRisky;
       if (needsPlan && !planned && !skipped) unplanned.push(f.path);
       const record = s.changes[key];
       const sameRecord = record ? record.at === f.at && record.session === f.session : f.at === null;
