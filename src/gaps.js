@@ -22,6 +22,7 @@ const escape = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 function clean(root, value) {
   let s = String(value === undefined || value === null ? '' : value).replace(/\s*[\r\n]+\s*/g, ' ').trim();
   for (const [folder, by] of [[path.resolve(root), '.'], [os.homedir(), '~']]) {
+    if (!folder || folder === path.parse(folder).root) continue; // (a home or project at "/" or "C:\" would eat every path)
     for (const form of new Set([folder, folder.replace(/\\/g, '/')])) s = s.replace(new RegExp(escape(form), 'gi'), by);
   }
   return s.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '<e-mail>') || '-';

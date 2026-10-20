@@ -138,4 +138,19 @@ test('new entries hold no personal details, in paths or in free text', () => {
   assert.match(entry.fields.Problem, /<e-mail> saw it in ~[\\/]other[\\/]notes\.txt/);
 });
 
+test('a home folder at the filesystem root leaves paths readable', () => {
+  const root = project('t6');
+  const tool = path.join(path.parse(HOME).root, 'tools', 'app.js'); // (outside the project; no personal detail)
+  const saved = { USERPROFILE: process.env.USERPROFILE, HOME: process.env.HOME };
+  Object.assign(process.env, { USERPROFILE: path.parse(HOME).root, HOME: path.parse(HOME).root });
+  try {
+    assert.deepStrictEqual(gaps.add(root, [finding(`breaks ${tool}`, 'src/state.js:27')]), { ok: true, ids: ['G1'] });
+  } finally {
+    Object.assign(process.env, saved);
+  }
+  assert.strictEqual(gaps.list(root).entries[0].fields.Where, 'src/state.js:27');
+  assert.strictEqual(gaps.list(root).entries[0].fields.Problem, `breaks ${tool}`);
+  assert.deepStrictEqual(gaps.openFor(root, path.join(root, 'src', 'state.js')).map(e => e.id), ['G1']);
+});
+
 test.after(() => fs.rmSync(HOME, { recursive: true, force: true }));

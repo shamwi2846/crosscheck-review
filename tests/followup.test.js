@@ -308,8 +308,10 @@ test('a failed state write never leaves a gap marked fixed, and a fallback round
   assert.deepStrictEqual({ ...stateOf(root), running: {} }, { ...JSON.parse(before.state), running: {} });
   assert.strictEqual(gapsText(root), before.gaps);
   assert.match(gapsText(root), /## G1 · open/);
-  const bundles = fs.readdirSync(path.join(state.projectDir(root), 'bundles')).sort();
-  const failedRound = path.join(state.projectDir(root), 'bundles', bundles[bundles.length - 1]);
+  // (the failed round's bundle is the one not applied: attempt names can share a second, so their order proves nothing)
+  const bundles = fs.readdirSync(path.join(state.projectDir(root), 'bundles')).filter(b => !(stateOf(root).applied || {})[b]);
+  assert.strictEqual(bundles.length, 1);
+  const failedRound = path.join(state.projectDir(root), 'bundles', bundles[0]);
   const answerFile = path.join(HOME, 't6-answer.json');
   fs.writeFileSync(answerFile, followAnswer([row('F1', 'MAINTAIN'), row('F2', 'MAINTAIN')], { findings: [finding('FALLBACK-ROUND', 'src/a.js:1')] }));
   assert.strictEqual(review.fallback(root, { bundle: failedRound, answerFile }).status, 'DONE');
