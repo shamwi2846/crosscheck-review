@@ -317,13 +317,13 @@ async function runOnce(request) {
   }
 }
 
-// Why no GPT run may start now, or null: a usage cooldown (skipped with `force`), or shared state that can't be
-// read, since then a cooldown couldn't be seen or shared.
-function blockedReason(force) {
+// Why no GPT run may start now, or null: a usage cooldown, or shared state that can't be read, since then a
+// cooldown couldn't be seen or shared.
+function blockedReason() {
   const global = state.read(state.files.global());
   if (global.unreadable) return `the shared state ${state.files.global()} can't be read (${global.unreadable}), so GPT runs wait until it is fixed`;
   const until = global.data.cooldownUntil || 0;
-  if (force || until <= Date.now()) return null;
+  if (until <= Date.now()) return null;
   return `GPT is cooling down after a usage or login failure, until ${new Date(until).toLocaleTimeString()}`;
 }
 
@@ -334,7 +334,7 @@ async function ask(request) {
   const attempts = request.mode === 'computer' ? 1 : 2;
   let result;
   for (let i = 0; i < attempts; i++) {
-    const blocked = blockedReason(request.force);
+    const blocked = blockedReason();
     if (blocked) return { ok: false, unavailable: true, reason: result ? `${result.reason}; no retry: ${blocked}` : blocked };
     result = await runOnce(request);
     if (result.ok || result.limit || result.login || result.timedOut) break;

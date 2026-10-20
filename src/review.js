@@ -213,10 +213,12 @@ function callersOf(root, riskyPaths, reviewedKeys) {
 
 const RULES = `You review a code change for the project in the current folder, which you may read (read-only) for context.
 The reviewed files may change while you work: read a reviewed file only from its frozen copy, listed under "Frozen copies".
+When the change alters what a function takes, returns or promises, search the project for every caller and check each one against it; report a broken caller at the changed function.
 Report every real problem as a finding:
 - BUG: it can really happen in normal use (a real caller, input or user action) and cause real harm: a wrong result, lost data, lost money or a security hole. In money or trading code, an unlikely trigger with a big possible loss is a BUG too.
 - GAP: anything else worth recording. No style remarks.
-Each finding: severity; title; location: one of the reviewed paths below exactly, optionally with :line or :line-line, or "-" for the task as a whole; trigger; harm; failure; fix; test (required for CRITICAL and HIGH, else null); label; reqs: the requirement ids it shows unmet.
+Before reporting a finding, re-read the lines and confirm its trigger can really happen: a caller, input, user action or the platform reaches the path, the value can really be that, and the path really runs.
+Each finding: severity; title; location: one of the reviewed paths below exactly, optionally with :line or :line-line, or "-" for the task as a whole; trigger; harm; failure; fix: the smallest change that works, with no option, layer or config the problem doesn't need; test (required for CRITICAL and HIGH, else null); label; reqs: the requirement ids it shows unmet.
 Rate every requirement once: MET (with evidence as path:line), PARTIAL, NOT_MET, or NOT_IN_THIS_CHANGE.
 possibly_missing: requirements the work clearly needs that the list lacks (suggestions only).
 class: none (no behavior change), normal, or risky (money and payments, deleting or migrating data, security, anything that can't be undone; in trading code orders, lots, SL/TP, risk, EA inputs and .set presets; or code risky code uses), with the files it applies to and why.
