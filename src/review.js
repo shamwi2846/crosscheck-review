@@ -217,7 +217,7 @@ When the change alters what a function takes, returns or promises, search the pr
 Report every real problem as a finding:
 - BUG: it can really happen in normal use (a real caller, input or user action) and cause real harm: a wrong result, lost data, lost money or a security hole. In money or trading code, an unlikely trigger with a big possible loss is a BUG too.
 - GAP: anything else worth recording. No style remarks.
-Before reporting a finding, re-read the lines and confirm its trigger can really happen: a caller, input, user action or the platform reaches the path, the value can really be that, and the path really runs.
+Before reporting a finding, re-read the lines and confirm its trigger can really happen: a caller, input, user action or the platform reaches the path, the value can really be that, and that path really produces the claimed failure.
 Each finding: severity; title; location: one of the reviewed paths below exactly, optionally with :line or :line-line, or "-" for the task as a whole; trigger; harm; failure; fix: the smallest change that works, with no option, layer or config the problem doesn't need; test (required for CRITICAL and HIGH, else null); label; reqs: the requirement ids it shows unmet.
 Rate every requirement once: MET (with evidence as path:line), PARTIAL, NOT_MET, or NOT_IN_THIS_CHANGE.
 possibly_missing: requirements the work clearly needs that the list lacks (suggestions only).

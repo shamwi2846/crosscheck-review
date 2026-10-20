@@ -254,4 +254,20 @@ test('named files without a hook record stay pending when edited, and are next d
   assert.match(prompt, /Supplied by Claude and unverified; STALE: it is older than the last change to a reviewed file/);
 });
 
+test('review instructions require proof of the claimed failure', async () => {
+  const { root, taskFile } = project('t7', { 'src/q.js': 'q0\n' });
+  fs.writeFileSync(path.join(root, 'src/q.js'), 'q1\n');
+  setSpec({ exec: [{ text: answerOf() }] });
+  const r = await review.review(root, { files: ['src/q.js'], taskFile });
+  assert.strictEqual(r.status, 'DONE', r.text);
+  // (what GPT was sent, and what the fallback reviewer would read)
+  for (const prompt of [execCalls()[0].prompt, fs.readFileSync(path.join(r.bundle, 'prompt.md'), 'utf8')]) {
+    assert.ok(prompt.startsWith('You review a code change for the project in the current folder'));
+    assert.match(prompt, /confirm its trigger can really happen: [^\n]*, and that path really produces the claimed failure\.\n/);
+    assert.doesNotMatch(prompt, /the path really runs/);
+    assert.match(prompt, /- BUG: it can really happen in normal use \(a real caller, input or user action\)/);
+    assert.doesNotMatch(prompt, /not instructions/);
+  }
+});
+
 test.after(() => fs.rmSync(HOME, { recursive: true, force: true }));
