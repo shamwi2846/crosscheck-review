@@ -83,8 +83,18 @@ test('install replaces the old setup\'s hooks, keeps every other hook and settin
   const hookJs = path.join(p.code, 'hook.js').replace(/\\/g, '/');
   const ours = event => all.filter(c => c === `node "${hookJs}" ${event}`).length;
   assert.deepStrictEqual(['session', 'edit', 'bash', 'plan', 'screen', 'stop'].map(ours), [1, 1, 1, 1, 1, 1]);
-  const screen = s.hooks.PreToolUse.find(g => g.matcher.startsWith('mcp__computer-use__')).hooks[0];
-  assert.strictEqual(screen.onFailure, 'block');
+  // each of ours under its event and complete matcher, written out here (doctor's expectations come from registration())
+  const ourPrefix = `node "${hookJs}" `;
+  const placed = Object.entries(s.hooks).flatMap(([event, groups]) => groups.flatMap(g => g.hooks
+    .filter(h => h.command.startsWith(ourPrefix)).map(h => [event, g.matcher || '', h.command.slice(ourPrefix.length), h.onFailure || ''])));
+  assert.deepStrictEqual(placed.sort(), [
+    ['SessionStart', '', 'session', ''],
+    ['PreToolUse', 'Edit|Write|MultiEdit|NotebookEdit', 'edit', ''],
+    ['PreToolUse', 'Bash|PowerShell', 'bash', ''],
+    ['PreToolUse', 'ExitPlanMode', 'plan', ''],
+    ['PreToolUse', 'mcp__computer-use__.*|mcp__remote-devices__computer.*', 'screen', 'block'],
+    ['Stop', '', 'stop', ''],
+  ].sort());
   assert.strictEqual(s.hooks.UserPromptSubmit, undefined, 'a group left empty goes');
   assert.strictEqual((await installer.install(quiet)).code, 0);
   assert.deepStrictEqual(json(p.settings), s, 'a second install changes nothing');
