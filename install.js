@@ -14,8 +14,11 @@ const state = require('./src/state');
 const DOCS_TOOLS = ['mql5_chm_status', 'mql5_chm_lookup_identifiers', 'mql5_chm_search', 'mql5_chm_read', 'mql5_chm_read_image'];
 const MIN_CLAUDE = [2, 1, 295];
 // (a hook command is ours when node runs the old setup's gate.js or crosscheck's hook.js; any other command is kept)
-const OURS = /^\s*node(\.exe)?\s+"?[^"]*[\\/](gpt[\\/]gate\.js|crosscheck[\\/]hook\.js)"?(\s|$)/i;
-const CROSSCHECK = /^\s*node(\.exe)?\s+"?[^"]*[\\/]crosscheck[\\/]hook\.js"?(\s|$)/i; // (crosscheck's own, which restore drops)
+// (the script must follow node directly: `node --check <path>` only checks a file, so it is the user's)
+const script = name => new RegExp(`^\\s*node(\\.exe)?\\s+(?:"([^"]*[\\\\/]${name})"|([^\\s"]*[\\\\/]${name}))(\\s|$)`, 'i');
+const OURS = script('(?:gpt[\\\\/]gate\\.js|crosscheck[\\\\/]hook\\.js)');
+const CROSSCHECK = script('crosscheck[\\\\/]hook\\.js'); // (crosscheck's own, which restore drops)
+const GATE = script('gpt[\\\\/]gate\\.js'); // (the old setup's, whose folder holds its state)
 const SAVED = { settings: 'settings.json', claudeMd: 'CLAUDE.md', agent: 'fallback-reviewer.md' }; // (what the backup holds)
 
 const claudeDir = () => process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
@@ -52,7 +55,8 @@ function npmRoot() {
 function findCodex() {
   const saved = state.config().codexJs;
   if (saved && fs.existsSync(saved)) return saved;
-  const found = npmRoot() && path.join(npmRoot(), '@openai', 'codex', 'bin', 'codex.js');
+  const root = npmRoot();
+  const found = root && path.join(root, '@openai', 'codex', 'bin', 'codex.js');
   return found && fs.existsSync(found) ? found : null;
 }
 
@@ -61,7 +65,8 @@ function findCodex() {
 function claudeVersion() {
   let r = run('claude', ['--version']);
   if (r.error || r.status !== 0) {
-    const cli = npmRoot() && path.join(npmRoot(), '@anthropic-ai', 'claude-code', 'cli.js');
+    const root = npmRoot();
+    const cli = root && path.join(root, '@anthropic-ai', 'claude-code', 'cli.js');
     if (cli && fs.existsSync(cli)) r = run(process.execPath, [cli, '--version']);
   }
   const v = String(r.stdout || '').match(/(\d+)\.(\d+)\.(\d+)/);
@@ -144,8 +149,8 @@ function docsServer() {
 // is): why install must wait (a live review there, or a record that can't be read), and this folder's open work there.
 function oldSetup(settings) {
   const out = { wait: null, here: null };
-  const gates = commands(settings).map(c => c.match(/^\s*node(?:\.exe)?\s+"?([^"]*[\\/]gpt[\\/]gate\.js)"?/i)).filter(Boolean);
-  const dirs = [...new Set(gates.map(m => path.join(path.dirname(m[1]), 'state')))].filter(d => fs.existsSync(d));
+  const gates = commands(settings).map(c => c.match(GATE)).filter(Boolean).map(m => m[2] || m[3]);
+  const dirs = [...new Set(gates.map(gate => path.join(path.dirname(gate), 'state')))].filter(d => fs.existsSync(d));
   const root = state.projectRoot(process.cwd());
   for (const [dir, f] of dirs.flatMap(d => fs.readdirSync(d).filter(name => name.endsWith('.json')).map(name => [d, name]))) {
     const s = state.read(path.join(dir, f));

@@ -52,7 +52,7 @@ const legacy = cmd => ({ type: 'command', command: `node "C:/Users/someone/.clau
 const oldSettings = () => ({ theme: 'dark', env: { KEEP: '1' }, hooks: {
   PreToolUse: [{ matcher: 'Edit|Write|MultiEdit|NotebookEdit', hooks: [legacy('pre-edit'), { type: 'command', command: 'prettier --check', timeout: 5 }] },
     { matcher: 'ExitPlanMode', hooks: [legacy('pre-plan')] }],
-  PostToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'echo the old crosscheck/hook.js is gone' }] }],
+  PostToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'echo the old crosscheck/hook.js is gone' }, { type: 'command', command: 'node --check /tmp/crosscheck/hook.js' }] }],
   Stop: [{ hooks: [{ type: 'command', command: 'node "C:/old/place/crosscheck/hook.js" stop', timeout: 30 }] }],
   UserPromptSubmit: [{ hooks: [legacy('prompt')] }],
 } });
@@ -77,7 +77,7 @@ test('install replaces the old setup\'s hooks, keeps every other hook and settin
   assert.deepStrictEqual([s.theme, s.env], ['dark', { KEEP: '1' }]);
   const all = commands(s);
   assert.ok(!all.some(c => /gpt\/gate\.js|old\/place/.test(c)), 'no old hook is left');
-  assert.ok(all.includes('prettier --check') && all.includes('echo the old crosscheck/hook.js is gone'), 'unrelated hooks stay');
+  assert.ok(['prettier --check', 'echo the old crosscheck/hook.js is gone', 'node --check /tmp/crosscheck/hook.js'].every(c => all.includes(c)), 'unrelated hooks stay');
   const editGroup = s.hooks.PreToolUse.find(g => g.hooks.some(h => h.command === 'prettier --check'));
   assert.strictEqual(editGroup.matcher, 'Edit|Write|MultiEdit|NotebookEdit');
   const hookJs = path.join(p.code, 'hook.js').replace(/\\/g, '/');
