@@ -262,6 +262,7 @@ function codexReport(stdout, stderr) {
   let sessionId = null;
   const errors = [];
   const plain = [];
+  const commands = []; // (the shell commands GPT ran, as Codex reports them: doctor's evidence of a refused write)
   for (const line of `${stdout}\n${stderr}`.split(/\r?\n/)) {
     if (!line.trim()) continue;
     let event = null;
@@ -276,9 +277,11 @@ function codexReport(stdout, stderr) {
       errors.push(String(event.message));
     } else if (event.type === 'turn.failed') {
       errors.push(String((event.error || {}).message));
+    } else if (event.type === 'item.completed' && event.item && event.item.type === 'command_execution') {
+      commands.push({ command: String(event.item.command || ''), output: String(event.item.aggregated_output || ''), exitCode: event.item.exit_code });
     }
   }
-  return { sessionId, errors: [...errors, ...(started ? [] : plain)].join('\n') };
+  return { sessionId, commands, errors: [...errors, ...(started ? [] : plain)].join('\n') };
 }
 
 async function runOnce(request) {
@@ -296,13 +299,14 @@ async function runOnce(request) {
     let text = '';
     try { text = fs.readFileSync(outFile, 'utf8'); } catch {}
     const problem = failure || (text.trim() ? null : 'GPT returned no answer');
-    const { sessionId, errors } = codexReport(stdout, stderr);
+    const { sessionId, commands, errors } = codexReport(stdout, stderr);
     // (only a failed run counts, and not a timeout: a killed run's last words are no outage)
     const outage = !!failure && failure !== 'TIMEOUT';
     return {
       ok: !problem,
       text,
       sessionId,
+      commands,
       reason: problem ? `${problem}${errors ? ` — ${errors.split('\n').slice(-3).join(' | ').slice(0, 600)}` : ''}` : null,
       timedOut: failure === 'TIMEOUT',
       limit: outage && LIMIT_ERROR.test(errors),

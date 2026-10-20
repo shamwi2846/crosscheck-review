@@ -286,6 +286,25 @@ function session(inp) {
 
 const EVENTS = { session, edit, bash, plan, screen, stop };
 
+// A hook command that node runs a script with, its path ending in `name` (a pattern), quoted or not. The script must
+// follow node directly: `node --check <path>` only checks a file, so such a hook is the user's own.
+const runsScript = name => new RegExp(`^\\s*node(\\.exe)?\\s+(?:"([^"]*[\\\\/]${name})"|([^\\s"]*[\\\\/]${name}))(\\s|$)`, 'i');
+
+// The hooks Claude Code runs for this file, as install.js registers them in settings.json and doctor checks them.
+function registration(hookJs) {
+  const hook = (event, timeout, extra = {}) => ({ type: 'command', command: `node "${hookJs.replace(/\\/g, '/')}" ${event}`, timeout, ...extra });
+  return {
+    SessionStart: [{ hooks: [hook('session', 30)] }],
+    PreToolUse: [
+      { matcher: 'Edit|Write|MultiEdit|NotebookEdit', hooks: [hook('edit', 15)] },
+      { matcher: 'Bash|PowerShell', hooks: [hook('bash', 30)] },
+      { matcher: 'ExitPlanMode', hooks: [hook('plan', 15)] },
+      { matcher: 'mcp__computer-use__.*|mcp__remote-devices__computer.*', hooks: [hook('screen', 15, { onFailure: 'block' })] },
+    ],
+    Stop: [{ hooks: [hook('stop', 30)] }],
+  };
+}
+
 // Runs one hook on its raw input. An error lets the tool run (and is logged), except in the screen gate, which refuses.
 function handle(name, raw) {
   event = name;
@@ -309,4 +328,4 @@ if (require.main === module) {
   if (answer) process.stdout.write(JSON.stringify(answer));
 }
 
-module.exports = { handle, planHash, planKey };
+module.exports = { handle, planHash, planKey, registration, runsScript };

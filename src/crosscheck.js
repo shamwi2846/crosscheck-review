@@ -28,6 +28,7 @@ const USAGE = `Usage: crosscheck <command>
   digest --files a,b --question "..." | digest --dir <folder> --question "..."
   computer --task "..."                            (GPT operates the screen; never retried)
   allow-screen --why "..."                         (a 30-minute window for your own screen tools)
+  doctor [--live]                                  (whether crosscheck can work here; --live also runs harmless GPT checks)
 Outside a Claude Code session, add --task <task.md> and name the files.`;
 const FLAGS = new Set(['risky', 'full', 'skip', 'fixed', 'real-bug', 'add', 'live']);
 
@@ -181,6 +182,12 @@ async function computerCommand(args) {
 }
 const allowScreenCommand = args => reported(modes.allowScreen({ session: process.env.CLAUDE_CODE_SESSION_ID || null, why: args.why }), false);
 
+async function doctorCommand(args) {
+  if (args._.length > 1) throw new Usage(`doctor takes no ${args._.slice(1).join(' ')}`);
+  const r = await require('./doctor').doctor({ live: !!args.live });
+  return { code: r.ok ? 0 : 1, text: r.text };
+}
+
 // ---- GPT's other jobs (modes.js) ----
 
 async function testplanCommand(args) {
@@ -232,14 +239,14 @@ async function simpleCommand(args) {
 
 const COMMANDS = { review: reviewCommand, close: closeCommand, status: statusCommand, gap: gapCommand, lesson: lessonCommand, on: switchCommand, off: switchCommand,
   testplan: testplanCommand, skip: skipCommand, plan: planCommand, idea: simpleCommand, digest: simpleCommand, research: simpleCommand, write: simpleCommand,
-  computer: computerCommand, 'allow-screen': allowScreenCommand };
+  computer: computerCommand, 'allow-screen': allowScreenCommand, doctor: doctorCommand };
 // The options each command takes; any other is wrong usage, so a typo never silently changes what runs.
 const OPTIONS = {
   review: ['files', 'risky', 'full', 'evidence-file', 'followup', 'file', 'fallback', 'answer', 'skip', 'why', 'task'],
   close: ['note', 'task'], status: ['task'], lesson: ['text', 'task'], on: [], off: [],
   gap: ['fixed', 'real-bug', 'add', 'where', 'problem', 'why', 'severity', 'trigger', 'fix', 'log', 'task'],
   testplan: ['files', 'context', 'task'], skip: ['files', 'why', 'task'], plan: ['file', 'risky', 'skip', 'why', 'task'],
-  idea: ['file'], digest: ['files', 'dir', 'question'], research: ['question'], write: ['brief'], computer: ['task'], 'allow-screen': ['why'],
+  idea: ['file'], digest: ['files', 'dir', 'question'], research: ['question'], write: ['brief'], computer: ['task'], 'allow-screen': ['why'], doctor: ['live'],
 };
 
 // Runs one command line. Returns { code, text }; it never throws.

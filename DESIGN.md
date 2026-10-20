@@ -83,6 +83,9 @@ Recorded overruns:
   - reading the MQL5 docs server from the Codex config only in its plain form, single-quoted strings included;
   - matching only the hook commands that run the old setup's gate or crosscheck's hook;
   - refusing while a review runs or a project's state can't be read.
+- A new `doctor.js`, about 190 lines: the CLI couldn't hold the checks. It shares with install.js the hook list (in hook.js) and the Claude Code lookup.
+  - Its live probe asks GPT to really try a write and to answer in a plain sentence, so only an enforced schema yields JSON.
+  - A proven write takes away the verified version, and the version is pinned before the probes and checked after.
 - Tests, about 1,520 lines: the review and pair paths above are each covered by the at most five cases of their test plan, and those cases need real processes and git projects.
 
 ## 4. Commands

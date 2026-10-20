@@ -68,6 +68,14 @@ if (args[0] === '--role') {
     if (picked.group !== null) answer = picked.answer;
     if (answer.session) session = answer.session;
     fs.appendFileSync(log, JSON.stringify({ kind, args, prompt, group: picked.group, session }) + '\n'); // (with the prompt it was sent)
+    if (answer.touch) {
+      // `touch`: a sandbox that let a write through creates this file in the run's folder (a resumed run is in the
+      // folder of the session it resumes, as it has no -C of its own)
+      const own = args.indexOf('-C');
+      const first = earlier.find(c => c.session === args[args.length - 2] && c.args.includes('-C'));
+      const dir = own >= 0 ? args[own + 1] : first && first.args[first.args.indexOf('-C') + 1];
+      if (dir) fs.writeFileSync(path.join(dir, answer.touch), 'probe');
+    }
     if (answer.hang) {
       // a tree that lives forever, under this launcher, which waits forever too
       startRole('tree', [answer.hang, 'ignore'], { stdio: 'ignore' });
@@ -92,6 +100,10 @@ if (args[0] === '--role') {
       const reply = () => {
         fs.writeFileSync(outFile, answer.text || 'answer');
         sessionStarted();
+        // `commands`: the shell commands GPT ran, reported as Codex 0.162.1 reports them (seen live)
+        for (const [i, c] of (answer.commands || []).entries()) {
+          event({ type: 'item.completed', item: { id: `item_c${i}`, type: 'command_execution', command: c.command, aggregated_output: c.output, exit_code: c.exit_code, status: c.exit_code ? 'failed' : 'completed' } });
+        }
         event({ type: 'item.completed', item: { id: 'item_0', type: 'agent_message', text: answer.text || 'answer' } });
         event({ type: 'turn.completed' });
       };
