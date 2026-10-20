@@ -128,10 +128,11 @@ test('a follow-up, or a repair, that GPT can\'t complete hands its bundle to the
   change(root, 'src/a.js', 'a2\n');
   seed(root, s => { s.changes = { [key('src/a.js')]: pending('src/a.js') }; });
   const bug = { severity: 'MEDIUM', title: 'off by one', location: 'src/a.js:1', trigger: 't', harm: 'wrong sum', failure: 'f', fix: 'x', test: null, label: 'BUG', reqs: [] };
-  setSpec({ exec: [{ text: answerOf({ verdict: 'ISSUES_FOUND', findings: [bug] }) }] });
+  setSpec({ exec: [{ text: answerOf({ verdict: 'ISSUES_FOUND', findings: [bug], class: { level: 'risky', files: ['src/a.js'], why: 'it moves money' } }) }] });
   const first = cli(root, ['review']);
   assert.strictEqual(first.status, 0, first.stdout);
   const chain = first.stdout.match(/^chain (\S+)/m)[1];
+  seed(root, s => { delete s.escalations[key('src/a.js')]; }); // (as its own paired review leaves it)
   const response = path.join(HOME, 't6-response.md');
   fs.writeFileSync(response, 'F1: fixed');
   const disconnected = { fail: 'error: stream disconnected', code: 1 };
@@ -139,6 +140,7 @@ test('a follow-up, or a repair, that GPT can\'t complete hands its bundle to the
   const followup = cli(root, ['review', '--followup', chain, '--file', response]);
   assert.strictEqual(followup.status, 3, followup.stdout);
   assert.match(followup.stdout, /^GPT_UNAVAILABLE: (?!GPT_UNAVAILABLE)[\s\S]*review --fallback "[^"]+" --answer/);
+  assert.match(followup.stdout, /risky files: src\/a\.js; attack them with this checklist/, 'a file GPT rated risky in the chain stays risky');
   // a repair whose Codex run fails even after its retry
   change(root, 'src/b.js', 'b2\n');
   seed(root, s => { s.changes[key('src/b.js')] = pending('src/b.js'); });
@@ -177,8 +179,12 @@ test('a review skip needs its reason, and records only the chosen files\' curren
   seed(root, s => { s.changes = { [key('docs/guide.md')]: pending('docs/guide.md'), [key('docs/other.md')]: pending('docs/other.md', 'B') }; });
   setSpec({ exec: [{ text: answerOf() }] });
   const before = fs.readFileSync(state.files.project(root), 'utf8');
-  const slipped = cli(root, ['review', '--skip', '--why', '--files', 'docs/extra.md']); // (the reason left out)
-  assert.strictEqual(slipped.status, 2, slipped.stdout);
+  // wrong usage changes nothing: the reason left out, an option written as --name=value, an option review doesn't take
+  for (const args of [['--why', '--files', 'docs/extra.md'], ['--why', '--files=docs/extra.md'], ['--why', '-files=docs/extra.md'], ['--why=docs only'],
+    ['--why', 'docs only', '--file', 'docs/extra.md']]) {
+    const wrong = cli(root, ['review', '--skip', ...args]);
+    assert.strictEqual(wrong.status, 2, `${args.join(' ')}: ${wrong.stdout}`);
+  }
   assert.strictEqual(fs.readFileSync(state.files.project(root), 'utf8'), before);
   const bare = cli(root, ['review', '--skip', '--files', 'docs/extra.md']);
   assert.strictEqual(bare.status, 1, bare.stdout);

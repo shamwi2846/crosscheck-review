@@ -136,7 +136,8 @@ function admit(root, { attempt, session, named = [], chain = null, risky = false
     if (!keys.length) return { refused: chain ? 'every file of the chain is escalated: each needs its own paired review first' : 'nothing to review: this session has no pending changes and no file was named' };
     const busy = keys.filter(k => s.running[k]);
     if (busy.length) return { refused: `already in a running review: ${list(busy)}` };
-    const riskyKeys = c ? keys.filter(k => (c.riskyKeys || []).includes(k)) : keys.filter(k => risky || RISKY_FILE.test(k) || s.escalations[k]);
+    // (a follow-up's risky files: those of the chain's reviews and those GPT rated risky in the chain since)
+    const riskyKeys = c ? keys.filter(k => (c.riskyKeys || []).includes(k) || (c.risky || {})[k]) : keys.filter(k => risky || RISKY_FILE.test(k) || s.escalations[k]);
     for (const key of keys) {
       const change = s.changes[key];
       // (without a change record, the baseline is the last reviewed version, if any; freeze falls back to HEAD)
@@ -543,7 +544,7 @@ async function followup(root, { chain: id, responseFile, evidenceFile = null }) 
     const frozen = freeze(root, { attempt, session: chain.session, ...admitted, taskFile: chain.task.path, evidenceFile, response: textOf(response) });
     if (frozen.why) return refused(frozen.why);
     // (a paired chain's follow-ups are one GPT at xhigh, resuming reviewer A; so are a fallback chain's with risky files)
-    const effort = chain.paired || (chain.riskyKeys || []).length ? 'xhigh' : 'high';
+    const effort = chain.paired || admitted.riskyKeys.length ? 'xhigh' : 'high';
     const result = await run(root, frozen.manifest, frozen.prompt, { resume: chain.codexSession, history: historyOf(root, chain), effort });
     if (result.status !== 'OK') return { status: result.status, text: `${result.status}: ${result.why}`, bundle };
     const applied = apply(root, frozen.manifest, result);

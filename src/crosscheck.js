@@ -30,10 +30,11 @@ function parse(argv) {
   const args = { _: [] };
   for (let i = 0; i < argv.length; i++) {
     const option = argv[i].match(/^--([a-z-]+)$/);
+    if (!option && argv[i].startsWith('-')) throw new Usage(`${argv[i]}: write options as --name value`);
     if (!option) args._.push(argv[i]);
     else if (FLAGS.has(option[1])) args[option[1]] = true;
     // (an option where its value should be means the value was left out, never that the option is the value)
-    else if (i + 1 < argv.length && !/^--[a-z-]+$/.test(argv[i + 1])) args[option[1]] = argv[++i];
+    else if (i + 1 < argv.length && !argv[i + 1].startsWith('-')) args[option[1]] = argv[++i];
     else throw new Usage(`--${option[1]} needs a value`);
   }
   return args;
@@ -73,6 +74,10 @@ async function reviewCommand(args) {
   // (one mode at a time: a skip bypasses GPT, so it never rides along with another mode)
   const modes = ['followup', 'fallback', 'skip'].filter(m => args[m]);
   if (modes.length > 1) throw new Usage(`review takes one of --followup, --fallback and --skip, not ${modes.join(' and ')}`);
+  const taken = { followup: ['followup', 'file', 'evidence-file'], fallback: ['fallback', 'answer'], skip: ['skip', 'why', 'files'] }[modes[0]]
+    || ['files', 'risky', 'full', 'evidence-file'];
+  const other = Object.keys(args).filter(k => k !== '_' && k !== 'task' && !taken.includes(k));
+  if (other.length) throw new Usage(`review${modes[0] ? ` --${modes[0]}` : ''} doesn't take ${other.map(k => `--${k}`).join(', ')}`);
   if (args.followup && !args.file) throw new Usage('review --followup needs --file <response.md>');
   if (args.fallback && !args.answer) throw new Usage('review --fallback needs --answer <answer.json>');
   const { root, session, taskFile } = where(args);
@@ -159,6 +164,12 @@ function switchCommand(args) {
 }
 
 const COMMANDS = { review: reviewCommand, close: closeCommand, status: statusCommand, gap: gapCommand, lesson: lessonCommand, on: switchCommand, off: switchCommand };
+// The options each command takes; any other is wrong usage, so a typo never silently changes what runs.
+const OPTIONS = {
+  review: ['files', 'risky', 'full', 'evidence-file', 'followup', 'file', 'fallback', 'answer', 'skip', 'why', 'task'],
+  close: ['note', 'task'], status: ['task'], lesson: ['text', 'task'], on: [], off: [],
+  gap: ['fixed', 'real-bug', 'add', 'where', 'problem', 'why', 'severity', 'trigger', 'fix', 'log', 'task'],
+};
 
 // Runs one command line. Returns { code, text }; it never throws.
 async function main(argv) {
@@ -166,6 +177,8 @@ async function main(argv) {
     const args = parse(argv);
     const command = COMMANDS[args._[0]];
     if (!command) throw new Usage(args._[0] ? `unknown command ${args._[0]}` : 'no command given');
+    const unknown = Object.keys(args).filter(k => k !== '_' && !OPTIONS[args._[0]].includes(k));
+    if (unknown.length) throw new Usage(`${args._[0]} doesn't take ${unknown.map(k => `--${k}`).join(', ')}`);
     return await command(args);
   } catch (e) {
     if (e instanceof Usage) return { code: 2, text: `${e.message}\n\n${USAGE}` };
