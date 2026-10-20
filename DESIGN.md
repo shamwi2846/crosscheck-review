@@ -75,6 +75,14 @@ Recorded overruns:
   - Screen control records every Codex process a computer run starts, as it is noted, so the desktop stays owned while any of them runs, even after its driver is killed.
   - The CLI checks each command's options. A typo or a missing value is wrong usage, never a silently different run, because a review skip bypasses GPT.
   - The jobs reuse review.js's runner, so their isolation, schema, repair and bundles are a review's.
+- `install.js`, about 340 lines. Step 6a's plan and code reviews required each of these, because the installer rewrites the user's global Claude Code setup:
+  - writing settings.json last, and putting back everything written (the code included) when a step fails, by moving each original aside first, so a full disk can't stop the rollback;
+  - a backup that records which files didn't exist, so restore removes them again, with its marker written last and checked;
+  - waiting while a review of either setup runs, and showing the old setup's open work in the current project;
+  - a restore that compares hooks one by one, so a hook added since is kept once and none is lost;
+  - reading the MQL5 docs server from the Codex config only in its plain form, single-quoted strings included;
+  - matching only the hook commands that run the old setup's gate or crosscheck's hook;
+  - refusing while a review runs or a project's state can't be read.
 - Tests, about 1,520 lines: the review and pair paths above are each covered by the at most five cases of their test plan, and those cases need real processes and git projects.
 
 ## 4. Commands
