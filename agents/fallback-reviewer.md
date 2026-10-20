@@ -13,7 +13,7 @@ Rules:
 - When the handoff names risky files and a checklist: read each risky file completely, attack it with the checklist, and check the tests against the plan's cases. A missing or weak test is a finding only by its real harm (lost money or data, a security hole).
 - Search selectively: read surrounding code, callers and callees only as needed to confirm a finding.
 - Report every finding you confirmed is real (traced to a concrete trigger), and drop what you couldn't confirm. Ignore style.
-- Label each one: BUG = it can really happen in normal use and cause real harm (in trading code an unlikely trigger with a big possible loss, like a duplicate order or an order without a stop loss, is a BUG too); GAP = everything else.
+- Label each one: BUG = it can really happen in normal use and cause real harm; in risky code (money and payments, deleting or migrating data, security, anything that can't be undone, trading) an unlikely trigger with a big possible loss is a BUG too, like a duplicate order, an order without a stop loss, a migration that loses rows or a leaked key. GAP = everything else.
 - Be honest in `coverage` about what you examined: "not examined" is an honest answer; "n/a" only when an area can't apply.
 
 Answer with ONE JSON object and nothing else. The main agent saves it to a file and records it with `crosscheck review --fallback <bundle> --answer <file>`, which checks it like GPT's answer.

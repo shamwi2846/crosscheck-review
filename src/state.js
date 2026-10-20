@@ -8,8 +8,10 @@ const os = require('os');
 const crypto = require('crypto');
 const { spawnSync } = require('child_process');
 
-// (in the Claude Code profile it serves: CLAUDE_CONFIG_DIR when set, so each profile keeps its own state and backup)
-const HOME = process.env.CROSSCHECK_HOME || path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'), 'crosscheck-state');
+// (in the Claude Code profile it serves, so each profile keeps its own state and backup: CLAUDE_CONFIG_DIR when set,
+// else the profile this copy is installed in (<profile>/crosscheck/), else ~/.claude for the repository's own copy)
+const PROFILE = path.basename(__dirname) === 'crosscheck' ? path.dirname(__dirname) : path.join(os.homedir(), '.claude');
+const HOME = process.env.CROSSCHECK_HOME || path.join(process.env.CLAUDE_CONFIG_DIR || PROFILE, 'crosscheck-state');
 const LOCK_WAIT_MS = 8000;     // give up waiting for a lock after this long
 const LOCK_UNOWNED_MS = 30000; // a lock with no readable owner this old was left by a crash
 const BUSY = new Set(['EPERM', 'EACCES', 'EBUSY']); // Windows: another process briefly holds the file

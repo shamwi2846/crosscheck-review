@@ -89,6 +89,12 @@ test('install replaces the old setup\'s hooks, keeps every other hook and settin
   assert.strictEqual((await installer.install(quiet)).code, 0);
   assert.deepStrictEqual(json(p.settings), s, 'a second install changes nothing');
   assert.deepStrictEqual(liveState(), before, 'live state is untouched');
+  // the installed copy keeps its state in its own profile, even where neither variable is set (its CLI run by hand)
+  const env = { ...process.env };
+  delete env.CROSSCHECK_HOME;
+  delete env.CLAUDE_CONFIG_DIR;
+  const home = spawnSync(process.execPath, ['-e', `process.stdout.write(require(${JSON.stringify(path.join(p.code, 'state.js'))}).HOME)`], { env, encoding: 'utf8' }).stdout;
+  assert.strictEqual(home, path.join(p.dir, 'crosscheck-state'));
 });
 
 test('the first backup keeps the original files, and a failed switch puts back what was written', async () => {
@@ -130,6 +136,30 @@ test('the first backup keeps the original files, and a failed switch puts back w
   const refused = await installer.install(quiet);
   assert.strictEqual(refused.code, 1, refused.text);
   assert.match(refused.text, /backup .* is incomplete/);
+  // a backup belongs to its profile: another profile sharing the state folder can't install or restore over it
+  profile('t2 one', { settings: firstSwitch, claudeMd: 'one\n' });
+  assert.strictEqual((await installer.install(quiet)).code, 0);
+  const other = path.join(HOME, 't2 two');
+  fs.mkdirSync(other, { recursive: true });
+  fs.writeFileSync(path.join(other, 'CLAUDE.md'), 'two\n');
+  process.env.CLAUDE_CONFIG_DIR = other;
+  for (const r2 of [await installer.install(quiet), await installer.restore({ yes: true })]) assert.match(r2.text, /belongs to the profile .*t2 one/);
+  assert.strictEqual(read(path.join(other, 'CLAUDE.md')), 'two\n');
+  const marker = path.join(state.HOME, 'backup', 'done.json'); // (a backup whose profile wasn't recorded counts as another's)
+  const { profile: owner, ...unowned } = json(marker);
+  fs.writeFileSync(marker, JSON.stringify(unowned));
+  const backupBytes = tree(path.join(state.HOME, 'backup'));
+  for (const r2 of [await installer.install(quiet), await installer.restore({ yes: true })]) assert.match(r2.text, /\(not recorded\)/);
+  assert.deepStrictEqual([read(path.join(other, 'CLAUDE.md')), tree(path.join(state.HOME, 'backup'))], ['two\n', backupBytes]);
+  // nor is a backup of another profile with a saved file missing written over
+  fs.writeFileSync(marker, JSON.stringify({ ...unowned, profile: owner }));
+  fs.rmSync(path.join(state.HOME, 'backup', 'CLAUDE.md'));
+  const partial = tree(path.join(state.HOME, 'backup'));
+  assert.match((await installer.install(quiet)).text, /belongs to the profile .*t2 one/);
+  assert.deepStrictEqual([read(path.join(other, 'CLAUDE.md')), tree(path.join(state.HOME, 'backup'))], ['two\n', partial]);
+  // input that ends without an answer is a no
+  const { Readable } = require('stream');
+  assert.strictEqual(await installer.confirm('Install? ', Readable.from([])), false);
 });
 
 test('restore puts the old files back, keeps a hook added since, and leaves live state alone', async () => {
@@ -144,8 +174,10 @@ test('restore puts the old files back, keeps a hook added since, and leaves live
   assert.strictEqual((await installer.restore({ yes: true })).code, 0);
   const back = json(p.settings);
   const expected = oldSettings();
+  delete expected.hooks.Stop; // (an earlier crosscheck's hook in the backup doesn't come back beside the old setup's)
   expected.hooks.PreToolUse.push({ matcher: 'Bash|PowerShell', hooks: [{ type: 'command', command: 'my-linter --strict' }] });
   assert.deepStrictEqual(back, expected, 'the old settings, plus the hook added since, once');
+  assert.ok(commands(back).some(c => /gpt\/gate\.js/.test(c)), 'the old setup\'s own hooks are back');
   assert.deepStrictEqual([read(p.claudeMd), read(p.agent)], original);
   assert.deepStrictEqual(liveState(), live);
   // two groups with the same matcher come back as they were, with no hook twice

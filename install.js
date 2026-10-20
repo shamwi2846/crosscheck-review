@@ -15,6 +15,7 @@ const DOCS_TOOLS = ['mql5_chm_status', 'mql5_chm_lookup_identifiers', 'mql5_chm_
 const MIN_CLAUDE = [2, 1, 295];
 // (a hook command is ours when node runs the old setup's gate.js or crosscheck's hook.js; any other command is kept)
 const OURS = /^\s*node(\.exe)?\s+"?[^"]*[\\/](gpt[\\/]gate\.js|crosscheck[\\/]hook\.js)"?(\s|$)/i;
+const CROSSCHECK = /^\s*node(\.exe)?\s+"?[^"]*[\\/]crosscheck[\\/]hook\.js"?(\s|$)/i; // (crosscheck's own, which restore drops)
 const SAVED = { settings: 'settings.json', claudeMd: 'CLAUDE.md', agent: 'fallback-reviewer.md' }; // (what the backup holds)
 
 const claudeDir = () => process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
@@ -39,15 +40,33 @@ const sameDir = (a, b) => path.resolve(a).toLowerCase() === path.resolve(b).toLo
 
 // ---- What install needs ----
 
-// The Codex launcher: config.json's, else the one npm installed globally (npm run through Node, without a shell).
-function findCodex() {
-  const saved = state.config().codexJs;
-  if (saved && fs.existsSync(saved)) return saved;
+// npm's global folder, or null (npm run through Node: its Windows .cmd shim can't start without a shell).
+function npmRoot() {
   const npm = path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js');
   const r = fs.existsSync(npm) ? run(process.execPath, [npm, 'root', '-g']) : run('npm', ['root', '-g']);
   const root = r.status === 0 ? String(r.stdout).trim() : '';
-  const found = root && path.isAbsolute(root) ? path.join(root, '@openai', 'codex', 'bin', 'codex.js') : null;
+  return root && path.isAbsolute(root) ? root : null;
+}
+
+// The Codex launcher: config.json's, else the one npm installed globally.
+function findCodex() {
+  const saved = state.config().codexJs;
+  if (saved && fs.existsSync(saved)) return saved;
+  const found = npmRoot() && path.join(npmRoot(), '@openai', 'codex', 'bin', 'codex.js');
   return found && fs.existsSync(found) ? found : null;
+}
+
+// Claude Code's version as [major, minor, patch], or why it couldn't be read: the `claude` command, else, where npm
+// installed it (a .cmd shim on Windows), its cli.js through Node.
+function claudeVersion() {
+  let r = run('claude', ['--version']);
+  if (r.error || r.status !== 0) {
+    const cli = npmRoot() && path.join(npmRoot(), '@anthropic-ai', 'claude-code', 'cli.js');
+    if (cli && fs.existsSync(cli)) r = run(process.execPath, [cli, '--version']);
+  }
+  const v = String(r.stdout || '').match(/(\d+)\.(\d+)\.(\d+)/);
+  if (v) return { version: v.slice(1).map(Number), text: v[0] };
+  return { why: r.error ? `${r.error.code || 'it could not start'}: ${r.error.message}` : `exit ${r.status}, no version printed${String(r.stderr || '').trim() ? `: ${String(r.stderr).trim().slice(0, 300)}` : ''}` };
 }
 
 // The prerequisites' problems (none when all hold), and the Codex launcher found.
@@ -58,8 +77,8 @@ function prerequisites() {
   const codexJs = findCodex();
   if (!codexJs) problems.push('the Codex CLI is not installed (npm install -g @openai/codex)');
   else if (run(process.execPath, [codexJs, 'login', 'status']).status !== 0) problems.push('Codex is not logged in (codex login)');
-  const version = String(run('claude', ['--version']).stdout || '').match(/(\d+)\.(\d+)\.(\d+)/);
-  if (!version || olderThan(version.slice(1).map(Number), MIN_CLAUDE)) problems.push(`Claude Code ${MIN_CLAUDE.join('.')} or newer is needed (found: ${version ? version[0] : 'none'})`);
+  const claude = claudeVersion();
+  if (!claude.version || olderThan(claude.version, MIN_CLAUDE)) problems.push(`Claude Code ${MIN_CLAUDE.join('.')} or newer is needed (${claude.text ? `found ${claude.text}` : `not found: ${claude.why}`})`);
   return { problems, codexJs };
 }
 
@@ -171,10 +190,10 @@ function ourHooks(code) {
 }
 
 // `hooks` without the old setup's and crosscheck's commands; a group left with no command goes.
-function withoutOurs(hooks = {}) {
+function withoutOurs(hooks = {}, ours = OURS) {
   const out = {};
   for (const [event, groups] of Object.entries(hooks)) {
-    const kept = groups.map(g => ({ ...g, hooks: (g.hooks || []).filter(h => !OURS.test(String(h.command || ''))) })).filter(g => g.hooks.length);
+    const kept = groups.map(g => ({ ...g, hooks: (g.hooks || []).filter(h => !ours.test(String(h.command || ''))) })).filter(g => g.hooks.length);
     if (kept.length) out[event] = kept;
   }
   return out;
@@ -216,6 +235,11 @@ function backupRecord(p) {
 // The first install's backup, once: each file's text, or that it didn't exist; the marker is written last, atomically.
 // An incomplete backup is made again, unless crosscheck is installed already (then its files are no originals).
 function backupOnce(p, installed) {
+  // (a readable marker, whole or not, whose profile isn't known or is another's: its backup is never taken for this
+  // profile's, nor written over; only a marker cut off mid-write belongs to an interrupted first install here)
+  let marker = null;
+  try { marker = JSON.parse(fs.readFileSync(markerOf(p), 'utf8')); } catch {}
+  if (marker && !(marker.profile && sameDir(marker.profile, claudeDir()))) return { why: `the backup in ${p.backup} belongs to the profile ${marker.profile || '(not recorded)'}, not ${claudeDir()}` };
   if (backupRecord(p)) return { made: false };
   if (fs.existsSync(markerOf(p)) && installed) return { why: `the backup in ${p.backup} is incomplete, and crosscheck is installed already: fix or remove the backup first` };
   fs.mkdirSync(p.backup, { recursive: true });
@@ -225,7 +249,7 @@ function backupOnce(p, installed) {
     if (text === null) absent.push(key);
     else writeAtomic(path.join(p.backup, name), text);
   }
-  writeAtomic(markerOf(p), JSON.stringify({ at: new Date().toISOString(), absent }));
+  writeAtomic(markerOf(p), JSON.stringify({ at: new Date().toISOString(), absent, profile: claudeDir() }));
   return { made: true };
 }
 
@@ -313,21 +337,28 @@ async function restore({ yes = false, ask = confirm } = {}) {
   const p = paths();
   const record = backupRecord(p);
   if (!record) return { code: 1, text: `Nothing to restore: there is no whole backup in ${p.backup}.` };
+  if (!(record.profile && sameDir(record.profile, claudeDir()))) return { code: 1, text: `Not restored: the backup in ${p.backup} belongs to the profile ${record.profile || '(not recorded)'}, not ${claudeDir()}.` };
   const saved = (key, fallback) => (record.absent.includes(key) ? fallback : readOr(path.join(p.backup, SAVED[key]), fallback));
   if (!yes && !(await ask('Restore the settings.json, CLAUDE.md and agent saved by the first install (hooks added since stay)? [y/N] '))) {
     return { code: 1, text: 'Nothing was changed.' };
   }
   const before = JSON.parse(saved('settings', '{}'));
-  const hooks = mergeAdded(before.hooks, withoutOurs(JSON.parse(readOr(p.settings, '{}')).hooks));
+  // (the old setup's hooks come back; a crosscheck hook the backup held doesn't, so the two never run side by side)
+  const hooks = mergeAdded(withoutOurs(before.hooks, CROSSCHECK), withoutOurs(JSON.parse(readOr(p.settings, '{}')).hooks));
   // (a settings.json that didn't exist stays away, unless hooks added since need it)
   const settings = record.absent.includes('settings') && !commands({ hooks }).length ? null : JSON.stringify({ ...before, hooks }, null, 2);
   writeAll([[p.agent, saved('agent', null)], [p.claudeMd, saved('claudeMd', null)], [p.settings, settings]]);
   return { code: 0, text: 'The previous setup is back. Restart Claude Code.' };
 }
 
-function confirm(question) {
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  return new Promise(resolve => rl.question(question, a => { rl.close(); resolve(/^y(es)?$/i.test(a.trim())); }));
+// Asks yes or no; input that ends without an answer is a no, never a silent success.
+function confirm(question, input = process.stdin) {
+  const rl = readline.createInterface({ input, output: process.stdout });
+  return new Promise(resolve => {
+    let answered = false;
+    rl.on('close', () => { if (!answered) resolve(false); });
+    rl.question(question, a => { answered = true; rl.close(); resolve(/^y(es)?$/i.test(a.trim())); });
+  });
 }
 
 if (require.main === module) {
@@ -339,4 +370,4 @@ if (require.main === module) {
     e => { process.stdout.write(`install failed: ${e.message}\n`); process.exitCode = 1; });
 }
 
-module.exports = { install, restore, withoutOurs, mergeAdded, docsServer };
+module.exports = { install, restore, withoutOurs, mergeAdded, docsServer, confirm };
