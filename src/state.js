@@ -8,7 +8,7 @@ const os = require('os');
 const crypto = require('crypto');
 const { spawnSync } = require('child_process');
 
-// (in the Claude Code profile it serves, so each profile keeps its own state and backup: CLAUDE_CONFIG_DIR when set,
+// (in the Claude Code profile it serves, so each profile keeps its own state: CLAUDE_CONFIG_DIR when set,
 // else the profile this copy is installed in (<profile>/crosscheck/), else ~/.claude for the repository's own copy)
 const PROFILE = path.basename(__dirname) === 'crosscheck' ? path.dirname(__dirname) : path.join(os.homedir(), '.claude');
 const HOME = process.env.CROSSCHECK_HOME || path.join(process.env.CLAUDE_CONFIG_DIR || PROFILE, 'crosscheck-state');

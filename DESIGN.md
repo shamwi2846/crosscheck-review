@@ -2,7 +2,7 @@
 
 The coding driver replaces today's Claude + GPT setup with a full rewrite. It is the daily driver for all of the user's code: Claude writes the code, GPT checks it, and the driver keeps that loop honest with as little friction and as little code as possible.
 
-Status: built in the steps of section 16 (pull requests 1 to 10) and installed on 2026-10-20, replacing the old setup, whose repository stays as it is. The code lives in this repository, `shamwi2846/crosscheck-review`.
+Status: built in the steps of section 16 (pull requests 1 to 10) and installed on 2026-10-20, replacing the old setup, which was retired the same day (section 11); its repository stays as it is. The code lives in this repository, `shamwi2846/crosscheck-review`.
 
 ## 1. Principles (they apply to the driver's own code and to every project it drives)
 
@@ -42,12 +42,12 @@ Status: built in the steps of section 16 (pull requests 1 to 10) and installed o
 | `answer.js` | read GPT's JSON answer and check it against a small schema and its meaning | 150 |
 | `state.js` | per-project and global state: atomic writes, one lock each, one transaction per review result | 120 |
 | `gaps.js` | `KNOWN_GAPS.md` and lessons | 80 |
-| `install.js` | install, register hooks, restore | 120 |
+| `install.js` | install, register hooks | 120 |
 | tests | only the paths that protect real harm (section 12) | 700 |
 
 Total: about 1,670 lines of code, install included, and 700 of tests, against about 7,900 and 7,600 today. These are ceilings, not targets: Fable's estimate for this scope is 1,200 to 1,500. Going over a budget needs a reason written into this file.
 
-Built, the code is about 3,160 lines, install included, and the tests about 2,900. Each overrun is recorded below.
+Built, the code is about 3,060 lines, install included, and the tests about 2,900. Each overrun is recorded below.
 
 Recorded overruns:
 - `state.js`, about 230 lines: lock ownership. A lock names its owner process and is reclaimed only once that process has ended, under a serialized reclaim guard. A write happens only while the lock is still held. Step 1's review found that age-based reclaim lets a stalled holder and a new holder overwrite each other. Steps 4 to 6 added finding a project without git (the hooks run on every edit), the desktop owner's process check, and the state folder of the Claude Code profile it serves.
@@ -78,14 +78,11 @@ Recorded overruns:
   - Screen control records every Codex process a computer run starts, as it is noted, so the desktop stays owned while any of them runs, even after its driver is killed.
   - The CLI checks each command's options. A typo or a missing value is wrong usage, never a silently different run, because a review skip bypasses GPT.
   - The jobs reuse review.js's runner, so their isolation, schema, repair and bundles are a review's.
-- `install.js`, about 340 lines. Step 6a's plan and code reviews required each of these, because the installer rewrites the user's global Claude Code setup:
+- `install.js`, about 240 lines (about 340 until the old setup's retirement removed restore, its backup and the old setup's checks). Step 6a's plan and code reviews required each of these, because the installer rewrites the user's global Claude Code setup:
   - writing settings.json last, and putting back everything written (the code included) when a step fails, by moving each original aside first, so a full disk can't stop the rollback;
-  - a backup that records which files didn't exist, so restore removes them again, with its marker written last and checked;
-  - waiting while a review of either setup runs, and showing the old setup's open work in the current project;
-  - a restore that compares hooks one by one, so a hook added since is kept once and none is lost;
   - reading the MQL5 docs server from the Codex config only in its plain form, single-quoted strings included;
-  - matching only the hook commands that run the old setup's gate or crosscheck's hook;
-  - refusing while a review runs or a project's state can't be read.
+  - matching only the hook commands that run crosscheck's hook;
+  - refusing while a review runs or a project's state can't be read, both before asking and after.
 - A new `doctor.js`, about 205 lines: the CLI couldn't hold the checks. It shares with install.js the hook list (in hook.js) and the Claude Code lookup, which tries again without the saved command when that fails (Node moved, say).
   - Its live probe asks GPT to really try a write and to answer in a plain sentence, so only an enforced schema yields JSON.
   - A proven write takes away the verified version, and the version is pinned before the probes and checked after.
@@ -114,7 +111,7 @@ Recorded overruns:
 - `status`: pending changes, open BUGs and open chains, in a few lines.
 - `on` / `off`: the switch, used only when the user asks.
 - `allow-screen --why "..."`: a 30-minute window for Claude's own screen tools (section 9).
-- `doctor [--live]`: checks that Codex is found, the hooks are registered and the state can be read. `--live` also makes harmless real Codex calls: a read-only run that tries to write a file and must fail, the same check through a resumed session, and the computer lockdown listing (no screen action). It records the Codex version it verified, and warns when Codex has changed since. It runs after install, restore and Codex updates.
+- `doctor [--live]`: checks that Codex is found, the hooks are registered and the state can be read. `--live` also makes harmless real Codex calls: a read-only run that tries to write a file and must fail, the same check through a resumed session, and the computer lockdown listing (no screen action). It records the Codex version it verified, and warns when Codex has changed since. It runs after install and Codex updates.
 
 Dropped commands (section 13): `task`, `done`, `score`, `run`, `triage`, `stats`, `mql5-compile`, `apply`/`discard`, `mark-reviewed`'s release modes. `allow-claude-cu` becomes the simpler `allow-screen`.
 
@@ -210,7 +207,7 @@ Not carried over:
 ```
 <repo>/            src/*.js, tests/, RULES.md, agents/fallback-reviewer.md, install.js, README.md
 ~/.claude/crosscheck/  the installed copy (what the hooks run): code only, replaced by installs
-~/.claude/crosscheck-state/   live state, never touched by install or restore
+~/.claude/crosscheck-state/   live state, never touched by install
   config.json      the GPT model name and the Codex path (found once, at install), the Codex version doctor verified
   global.json      desktop ownership, the screen window, the on/off switch, the usage cooldown, running GPT jobs
   <project>/       state.json (changes with the session that made them, chains, plans, skips, escalations)
@@ -235,7 +232,7 @@ Not carried over:
 - **A GPT run whose driver died,** for example when the session closed during a background review, applies nothing. Its running-job record has a dead process, so `status` shows it as not done, and the next start clears it.
 - **Paths.** Paths with spaces and non-ASCII letters must work everywhere, because the user's folders have both. Processes are spawned without a shell.
 
-## 11. Install, update and restore
+## 11. Install and update
 
 - **Prerequisites:**
   - Node 22 or newer;
@@ -244,11 +241,11 @@ Not carried over:
   - git.
 
   `install.js` checks them all first. It shows what it will change in settings.json and CLAUDE.md, and asks before changing anything. After install, Claude Code is restarted (a new terminal or app session).
-- **Install.** `node install.js` runs the tests, copies `src/` and the fallback agent into place, writes `RULES.md`, and registers the hooks in `~/.claude/settings.json`. Registering replaces every hook entry of the old setup (the ones that run `gpt/gate.js`) and of an earlier driver install, and keeps every unrelated hook. Before the first switch, the old setup must have no open BUG findings and no pending changes (its status shows them), or the user accepts leaving them.
-- **One backup, simple order.** The first install backs up the old setup's settings.json and CLAUDE.md once, as the rollback point. Each install waits until no GPT job is running, copies the code, writes RULES.md and CLAUDE.md, and writes settings.json last, by atomic rename. Writing settings.json is the switch itself, so a failure before that changes nothing that's in use.
+- **Install.** `node install.js` runs the tests, copies `src/` and the fallback agent into place, writes `RULES.md`, and registers the hooks in `~/.claude/settings.json`. Registering replaces every hook entry of an earlier driver install and keeps every other hook.
+- **Simple order.** Each install waits until no GPT job is running, copies the code, writes RULES.md and CLAUDE.md, and writes settings.json last, by atomic rename. Writing settings.json is the switch itself, so a failure before that changes nothing that's in use.
 - **Personal details stay out of the repository.** The user's `~/.claude/CLAUDE.md` becomes a short personal file that imports the rules (`@~/.claude/crosscheck/RULES.md`) and holds the personal lines: the MT5 standing confirmation for the user's own PC (named there, not here), and anything else that belongs only to this user. The public repository never holds secrets, account numbers or EA code.
 - **Update:** `git pull`, then `node install.js`. Going back to an earlier driver version is `git checkout <version>`, then `node install.js`.
-- **Switching back to the old setup:** `node install.js --restore` puts back the old setup's settings.json and CLAUDE.md together, so rules and hooks always match. Hooks the user added since are kept. Live state is never restored or deleted. The new driver's open findings stay in its state, and `status` lists them before a restore to the old setup. Then restart Claude Code and run `doctor`. The old setup's files stay where they are until the user deletes them.
+- **The old setup is retired** (2026-10-20): `install.js --restore` and the first install's backup that it put back are gone, and the installer no longer knows the old setup's hooks or state. Switching crosscheck off is `crosscheck off`.
 - **No more release or backup machinery.** The repository is the release.
 
 ## 12. Tests (only what protects real harm)
@@ -269,7 +266,7 @@ The tests use Node's built-in runner (`node --test`), an isolated temporary home
 12. Fallback: an edit after the fallback review isn't acknowledged by it.
 13. Atomic state: an unreadable state file is never overwritten.
 14. Fixed-lines rounds: a regression caused by a fix is reported, and the task stays unfinished.
-15. Install and restore in an isolated profile: unrelated hooks are kept, the old setup's hooks are replaced, and state is untouched.
+15. Install in an isolated profile: unrelated hooks are kept, an earlier install's hooks are replaced, and state is untouched.
 16. Session scope: a review never acknowledges another session's changes unless they are named.
 17. Review skip: refused when any file is risky, and recorded with its reason when it is allowed.
 
@@ -395,7 +392,7 @@ The personal `~/.claude/CLAUDE.md` holds only what belongs to this user and this
 4. **The switch.** It is global, since hooks and rules apply to every project; there is no technical half-switch.
    1. The old setup's open findings and pending changes are settled.
    2. Install, restart Claude Code, then `doctor --live` must pass on the installed Codex version.
-   3. The first day's work stays in one project, and `install.js --restore` switches everything back in one step if anything is wrong.
+   3. The first day's work stays in one project. (A one-step switch back to the old setup existed until the old setup was retired, section 11.)
 5. **Commits and pushes** to this repository follow on the user's OK. Building works on branches with pull requests, like the old repository: CI and CodeRabbit check every pull request, and it's merged when green.
 
 ## 17. Name

@@ -1,6 +1,7 @@
-// Tests for install.js, step 6a (test plan P1), in isolated profiles: the old setup's hooks are replaced and every
-// other hook kept, the first backup stays, restore puts the old files back with hooks added since, nothing runs
-// while a review does, live state is never touched, and no personal detail reaches the repository.
+// Tests for install.js (test plan P1 of step 6a, then of the old setup's retirement), in isolated profiles: only
+// crosscheck's own hooks are replaced and every other hook kept, --restore is wrong usage, nothing runs while a review
+// does, a failed switch puts back everything written, live state is never touched, and no personal detail reaches the
+// repository.
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert');
@@ -27,13 +28,12 @@ function tree(dir, skip = () => false) {
   if (fs.existsSync(dir)) walk(dir);
   return out;
 }
-const liveState = () => tree(state.HOME, rel => rel === 'config.json' || rel.startsWith('backup'));
+const liveState = () => tree(state.HOME, rel => rel === 'config.json');
 
-// A fresh Claude Code profile with the old setup's settings, CLAUDE.md and agent (each optional), and live state.
+// A fresh Claude Code profile with the settings, CLAUDE.md and agent it had before (each optional), and live state.
 function profile(name, { settings, claudeMd, agent } = {}) {
   const dir = path.join(HOME, name);
   process.env.CLAUDE_CONFIG_DIR = dir;
-  fs.rmSync(path.join(state.HOME, 'backup'), { recursive: true, force: true });
   fs.mkdirSync(path.join(dir, 'agents'), { recursive: true });
   if (settings) fs.writeFileSync(path.join(dir, 'settings.json'), JSON.stringify(settings, null, 2));
   if (claudeMd !== undefined) fs.writeFileSync(path.join(dir, 'CLAUDE.md'), claudeMd);
@@ -48,18 +48,33 @@ function profile(name, { settings, claudeMd, agent } = {}) {
   fs.writeFileSync(state.files.global(), JSON.stringify({ off: false, plans: {} }));
   return { dir, settings: path.join(dir, 'settings.json'), claudeMd: path.join(dir, 'CLAUDE.md'), agent: path.join(dir, 'agents', 'fallback-reviewer.md'), code: path.join(dir, 'crosscheck') };
 }
-const legacy = cmd => ({ type: 'command', command: `node "C:/Users/someone/.claude/gpt/gate.js" ${cmd}`, timeout: 15 });
+// (the retired setup's hook is now a hook like any other; an earlier crosscheck install's hooks are replaced)
+const gate = { type: 'command', command: 'node "C:/Users/someone/.claude/gpt/gate.js" pre-edit', timeout: 15 };
+const earlier = event => ({ type: 'command', command: `node "C:/old/place/crosscheck/hook.js" ${event}`, timeout: 30 });
 const oldSettings = () => ({ theme: 'dark', env: { KEEP: '1' }, hooks: {
-  PreToolUse: [{ matcher: 'Edit|Write|MultiEdit|NotebookEdit', hooks: [legacy('pre-edit'), { type: 'command', command: 'prettier --check', timeout: 5 }] },
-    { matcher: 'ExitPlanMode', hooks: [legacy('pre-plan')] }],
+  PreToolUse: [{ matcher: 'Edit|Write|MultiEdit|NotebookEdit', hooks: [earlier('edit'), gate, { type: 'command', command: 'prettier --check', timeout: 5 }] },
+    { matcher: 'ExitPlanMode', hooks: [earlier('plan')] }],
   PostToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'echo the old crosscheck/hook.js is gone' }, { type: 'command', command: 'node --check /tmp/crosscheck/hook.js' }] }],
-  Stop: [{ hooks: [{ type: 'command', command: 'node "C:/old/place/crosscheck/hook.js" stop', timeout: 30 }] }],
-  UserPromptSubmit: [{ hooks: [legacy('prompt')] }],
+  Stop: [{ hooks: [earlier('stop')] }],
+  UserPromptSubmit: [{ hooks: [earlier('prompt')] }],
 } });
+// The retired setup's folder with a live review's record, and a former first-install backup of another profile.
+function retired(dir) {
+  fs.mkdirSync(path.join(dir, 'gpt', 'state'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'gpt', 'gate.js'), '// the retired gate\n');
+  fs.writeFileSync(path.join(dir, 'gpt', 'state', 'aa.json'), JSON.stringify({ root: process.cwd(), running: { [process.pid]: { files: [] } } }));
+  const backup = path.join(state.HOME, 'backup');
+  fs.mkdirSync(backup, { recursive: true });
+  for (const [f, text] of [['settings.json', '{"hooks": {}}'], ['CLAUDE.md', 'rules before\n'], ['fallback-reviewer.md', 'agent before\n'],
+    ['done.json', JSON.stringify({ at: '2026-10-20T00:00:00.000Z', absent: [], profile: path.join(HOME, 'another profile') })]]) fs.writeFileSync(path.join(backup, f), text);
+  return { gpt: path.join(dir, 'gpt'), backup };
+}
 
-test('install replaces the old setup\'s hooks, keeps every other hook and setting, twice alike, and leaves live state alone', async () => {
+test('install replaces only crosscheck\'s hooks, keeps every other hook and setting, twice alike, and leaves the rest alone', async () => {
   const p = profile('t1', { settings: oldSettings(), claudeMd: 'old rules\n', agent: 'old agent\n' });
-  const before = liveState();
+  const old = retired(p.dir);
+  fs.writeFileSync(state.files.config(), JSON.stringify({ model: 'gpt-test', codexJs: path.join(HOME, 'no codex here.js') }));
+  const before = [tree(old.gpt), liveState()];
   const renameSync = fs.renameSync;
   let atSwitch = null;
   fs.renameSync = (from, to) => { // (what exists when settings.json, the switch, is written)
@@ -67,19 +82,25 @@ test('install replaces the old setup\'s hooks, keeps every other hook and settin
     if (to === p.settings) atSwitch = [path.join(p.code, 'hook.js'), path.join(p.code, 'RULES.md'), p.agent, state.files.config(), p.claudeMd, p.settings].map(f => fs.existsSync(f));
     return renameSync(from, to);
   };
+  let said = '';
+  let asked = 0;
   try {
-    assert.strictEqual((await installer.install(quiet)).code, 0);
+    const r = await installer.install({ checks: false, ask: async () => { asked++; return true; }, say: text => { said += text; } });
+    assert.strictEqual(r.code, 0, r.text);
   } finally {
     fs.renameSync = renameSync;
   }
+  assert.strictEqual(asked, 1, 'the preview is approved first');
+  assert.match(said, /any earlier crosscheck hooks are replaced/);
+  assert.doesNotMatch(said, /old setup/);
   assert.deepStrictEqual(atSwitch, [true, true, true, true, true, true], 'everything else is in place before the switch');
   const s = json(p.settings);
   assert.deepStrictEqual([s.theme, s.env], ['dark', { KEEP: '1' }]);
   const all = commands(s);
-  assert.ok(!all.some(c => /gpt\/gate\.js|old\/place/.test(c)), 'no old hook is left');
-  assert.ok(['prettier --check', 'echo the old crosscheck/hook.js is gone', 'node --check /tmp/crosscheck/hook.js'].every(c => all.includes(c)), 'unrelated hooks stay');
+  assert.ok(!all.some(c => /old\/place/.test(c)), 'no earlier crosscheck hook is left');
+  assert.ok([gate.command, 'prettier --check', 'echo the old crosscheck/hook.js is gone', 'node --check /tmp/crosscheck/hook.js'].every(c => all.includes(c)), 'every other hook stays');
   const editGroup = s.hooks.PreToolUse.find(g => g.hooks.some(h => h.command === 'prettier --check'));
-  assert.strictEqual(editGroup.matcher, 'Edit|Write|MultiEdit|NotebookEdit');
+  assert.deepStrictEqual([editGroup.matcher, editGroup.hooks], ['Edit|Write|MultiEdit|NotebookEdit', [gate, { type: 'command', command: 'prettier --check', timeout: 5 }]]);
   const hookJs = path.join(p.code, 'hook.js').replace(/\\/g, '/');
   const ours = event => all.filter(c => c === `node "${hookJs}" ${event}`).length;
   assert.deepStrictEqual(['session', 'edit', 'bash', 'plan', 'screen', 'stop'].map(ours), [1, 1, 1, 1, 1, 1]);
@@ -98,110 +119,30 @@ test('install replaces the old setup\'s hooks, keeps every other hook and settin
   assert.strictEqual(s.hooks.UserPromptSubmit, undefined, 'a group left empty goes');
   assert.strictEqual((await installer.install(quiet)).code, 0);
   assert.deepStrictEqual(json(p.settings), s, 'a second install changes nothing');
-  assert.deepStrictEqual(liveState(), before, 'live state is untouched');
+  assert.deepStrictEqual([tree(old.gpt), liveState()], before, 'live state, the retired folder and the former backup are untouched');
+  // the installed doctor's hooks check passes with the retired gate's hook still there
+  const doctor = spawnSync(process.execPath, [path.join(p.code, 'crosscheck.js'), 'doctor'], { cwd: HOME, encoding: 'utf8', env: { ...process.env, CLAUDE_CONFIG_DIR: p.dir } });
+  assert.match(doctor.stdout.split('\n').find(l => l.slice(8).startsWith('Hooks:')) || '', /^ok /, doctor.stdout);
   // the installed copy keeps its state in its own profile, even where neither variable is set (its CLI run by hand)
   const env = { ...process.env };
   delete env.CROSSCHECK_HOME;
   delete env.CLAUDE_CONFIG_DIR;
   const home = spawnSync(process.execPath, ['-e', `process.stdout.write(require(${JSON.stringify(path.join(p.code, 'state.js'))}).HOME)`], { env, encoding: 'utf8' }).stdout;
   assert.strictEqual(home, path.join(p.dir, 'crosscheck-state'));
+  fs.rmSync(old.backup, { recursive: true, force: true });
 });
 
-test('the first backup keeps the original files, and a failed switch puts back what was written', async () => {
-  const p = profile('t2', { settings: oldSettings(), claudeMd: 'original rules ✓\n', agent: 'original agent\n' });
-  const original = [read(p.settings), read(p.claudeMd), read(p.agent)];
+test('the removed restore option is wrong usage and changes no file', async () => {
+  const p = profile('t2', { settings: oldSettings(), claudeMd: 'rules now\n', agent: 'agent now\n' });
   assert.strictEqual((await installer.install(quiet)).code, 0);
-  const backup = path.join(state.HOME, 'backup');
-  const saved = tree(backup, rel => rel === 'done.json');
-  assert.deepStrictEqual(['settings.json', 'CLAUDE.md', 'fallback-reviewer.md'].map(f => read(path.join(backup, f))), original);
-  assert.strictEqual((await installer.install(quiet)).code, 0);
-  assert.deepStrictEqual(tree(backup, rel => rel === 'done.json'), saved, 'a later install never overwrites it');
-  // an update whose switch fails on a full disk: the installed code and rules, CLAUDE.md, the agent and config.json
-  // are put back without writing anything new, and settings.json is unchanged
-  const q = profile('t2 failing', { settings: oldSettings(), claudeMd: 'kept rules\n', agent: 'kept agent\n' });
-  fs.writeFileSync(state.files.config(), JSON.stringify({ model: 'gpt-test' }));
-  assert.strictEqual((await installer.install(quiet)).code, 0);
-  for (const f of fs.readdirSync(q.code)) fs.writeFileSync(path.join(q.code, f), `the installed old version of ${f}\n`);
-  const kept = [tree(q.code), read(q.settings), read(q.claudeMd), read(q.agent), read(state.files.config())];
-  const { renameSync, writeFileSync } = fs;
-  let full = false;
-  fs.renameSync = (from, to) => { if (to === q.settings && from.endsWith('.tmp')) { full = true; throw Object.assign(new Error('disk full'), { code: 'ENOSPC' }); } return renameSync(from, to); };
-  fs.writeFileSync = (...args) => { if (full) throw Object.assign(new Error('disk full'), { code: 'ENOSPC' }); return writeFileSync(...args); };
-  try {
-    await assert.rejects(installer.install(quiet), e => /disk full/.test(e.message) && !/not put back/.test(e.message));
-  } finally {
-    Object.assign(fs, { renameSync, writeFileSync });
-  }
-  assert.deepStrictEqual([tree(q.code), read(q.settings), read(q.claudeMd), read(q.agent), read(state.files.config())], kept);
-  assert.ok(!fs.readdirSync(q.dir).some(f => /crosscheck-before|\.tmp$/.test(f)), 'no file left aside');
-  // an interrupted first backup is made again; once crosscheck is installed, a broken one stops the install
-  const firstSwitch = oldSettings();
-  delete firstSwitch.hooks.Stop; // (only the old setup's hooks: crosscheck was never installed here)
-  profile('t2 marker', { settings: firstSwitch, claudeMd: 'rules before\n', agent: 'agent before\n' });
-  fs.mkdirSync(path.join(state.HOME, 'backup'), { recursive: true });
-  fs.writeFileSync(path.join(state.HOME, 'backup', 'done.json'), '{"at": "cut off');
-  assert.strictEqual((await installer.install(quiet)).code, 0);
-  assert.strictEqual(read(path.join(state.HOME, 'backup', 'CLAUDE.md')), 'rules before\n');
-  fs.writeFileSync(path.join(state.HOME, 'backup', 'done.json'), '{"at": "cut off');
-  const refused = await installer.install(quiet);
-  assert.strictEqual(refused.code, 1, refused.text);
-  assert.match(refused.text, /backup .* is incomplete/);
-  // a backup belongs to its profile: another profile sharing the state folder can't install or restore over it
-  profile('t2 one', { settings: firstSwitch, claudeMd: 'one\n' });
-  assert.strictEqual((await installer.install(quiet)).code, 0);
-  const other = path.join(HOME, 't2 two');
-  fs.mkdirSync(other, { recursive: true });
-  fs.writeFileSync(path.join(other, 'CLAUDE.md'), 'two\n');
-  process.env.CLAUDE_CONFIG_DIR = other;
-  for (const r2 of [await installer.install(quiet), await installer.restore({ yes: true })]) assert.match(r2.text, /belongs to the profile .*t2 one/);
-  assert.strictEqual(read(path.join(other, 'CLAUDE.md')), 'two\n');
-  const marker = path.join(state.HOME, 'backup', 'done.json'); // (a backup whose profile wasn't recorded counts as another's)
-  const { profile: owner, ...unowned } = json(marker);
-  fs.writeFileSync(marker, JSON.stringify(unowned));
-  const backupBytes = tree(path.join(state.HOME, 'backup'));
-  for (const r2 of [await installer.install(quiet), await installer.restore({ yes: true })]) assert.match(r2.text, /\(not recorded\)/);
-  assert.deepStrictEqual([read(path.join(other, 'CLAUDE.md')), tree(path.join(state.HOME, 'backup'))], ['two\n', backupBytes]);
-  // nor is a backup of another profile with a saved file missing written over
-  fs.writeFileSync(marker, JSON.stringify({ ...unowned, profile: owner }));
-  fs.rmSync(path.join(state.HOME, 'backup', 'CLAUDE.md'));
-  const partial = tree(path.join(state.HOME, 'backup'));
-  assert.match((await installer.install(quiet)).text, /belongs to the profile .*t2 one/);
-  assert.deepStrictEqual([read(path.join(other, 'CLAUDE.md')), tree(path.join(state.HOME, 'backup'))], ['two\n', partial]);
-  // input that ends without an answer is a no
-  const { Readable } = require('stream');
-  assert.strictEqual(await installer.confirm('Install? ', Readable.from([])), false);
-});
-
-test('restore puts the old files back, keeps a hook added since, and leaves live state alone', async () => {
-  const p = profile('t3', { settings: oldSettings(), claudeMd: 'old rules\n', agent: 'old agent\n' });
-  const original = [read(p.claudeMd), read(p.agent)];
-  assert.strictEqual((await installer.install(quiet)).code, 0);
-  const s = json(p.settings);
-  s.hooks.PreToolUse.find(g => g.matcher === 'Bash|PowerShell').hooks.push({ type: 'command', command: 'my-linter --strict' });
-  fs.writeFileSync(p.settings, JSON.stringify(s));
-  fs.writeFileSync(path.join(state.HOME, 'proj-a', 'snap', 'newer'), 'a newer snapshot');
-  const live = liveState();
-  assert.strictEqual((await installer.restore({ yes: true })).code, 0);
-  const back = json(p.settings);
-  const expected = oldSettings();
-  delete expected.hooks.Stop; // (an earlier crosscheck's hook in the backup doesn't come back beside the old setup's)
-  expected.hooks.PreToolUse.push({ matcher: 'Bash|PowerShell', hooks: [{ type: 'command', command: 'my-linter --strict' }] });
-  assert.deepStrictEqual(back, expected, 'the old settings, plus the hook added since, once');
-  assert.ok(commands(back).some(c => /gpt\/gate\.js/.test(c)), 'the old setup\'s own hooks are back');
-  assert.deepStrictEqual([read(p.claudeMd), read(p.agent)], original);
-  assert.deepStrictEqual(liveState(), live);
-  // two groups with the same matcher come back as they were, with no hook twice
-  const twins = { hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'lint-a' }] }, { matcher: 'Bash', hooks: [{ type: 'command', command: 'lint-b' }] }] } };
-  const t = profile('t3 twins', { settings: twins });
-  assert.strictEqual((await installer.install(quiet)).code, 0);
-  assert.strictEqual((await installer.restore({ yes: true })).code, 0);
-  assert.deepStrictEqual(json(t.settings), twins);
-  // files that didn't exist before the install are removed again, settings.json included
-  const q = profile('t3 empty');
-  assert.strictEqual((await installer.install(quiet)).code, 0);
-  assert.ok(fs.existsSync(q.claudeMd) && fs.existsSync(q.settings));
-  assert.strictEqual((await installer.restore({ yes: true })).code, 0);
-  assert.deepStrictEqual([q.claudeMd, q.agent, q.settings].map(f => fs.existsSync(f)), [false, false, false]);
+  const old = retired(p.dir);
+  const before = [tree(p.dir), liveState()];
+  const r = spawnSync(process.execPath, [path.join(REPO, 'install.js'), '--restore'], { input: 'y\n', encoding: 'utf8', env: { ...process.env, CLAUDE_CONFIG_DIR: p.dir } });
+  assert.strictEqual(r.status, 2, r.stdout);
+  assert.match(r.stdout, /Usage: node install\.js \[--yes\] \(not --restore\)/);
+  assert.doesNotMatch(r.stdout, /\[y\/N\]/, 'nothing is asked');
+  assert.deepStrictEqual([tree(p.dir), liveState()], before);
+  fs.rmSync(old.backup, { recursive: true, force: true });
 });
 
 test('the MQL5 docs server is read from a plain Codex config, comments included, and left off otherwise', () => {
@@ -216,50 +157,76 @@ test('the MQL5 docs server is read from a plain Codex config, comments included,
   fs.rmSync(config);
 });
 
-test('install waits while a review runs in any project, changing nothing', async () => {
+test('install waits while a review runs in any project, also one started while it asks, changing nothing', async () => {
   const p = profile('t4', { settings: oldSettings(), claudeMd: 'old rules\n', agent: 'old agent\n' });
   const running = path.join(state.HOME, 'proj-b', 'state.json');
   fs.writeFileSync(running, JSON.stringify({ running: { 'a.js': { attempt: 'x1', pid: process.pid } } }));
-  const before = [tree(p.dir), liveState(), read(state.files.config()), fs.existsSync(path.join(state.HOME, 'backup'))];
+  const before = [tree(p.dir), liveState(), read(state.files.config())];
   const r = await installer.install(quiet);
   assert.strictEqual(r.code, 1, r.text);
-  assert.match(r.text, /review is running/);
-  assert.deepStrictEqual([tree(p.dir), liveState(), read(state.files.config()), fs.existsSync(path.join(state.HOME, 'backup'))], before);
+  assert.match(r.text, /review is running \(proj-b\)/);
+  assert.deepStrictEqual([tree(p.dir), liveState(), read(state.files.config())], before);
   fs.writeFileSync(running, JSON.stringify({}));
-  // the old setup's own records, next to the gate.js its hooks run: a live review there waits too; else its open work
-  // here is shown
-  const legacyState = path.join(HOME, 'old setup elsewhere', 'gpt', 'state');
-  fs.mkdirSync(legacyState, { recursive: true });
-  const s = oldSettings();
-  s.hooks.PreToolUse[1].hooks = [{ type: 'command', command: `node "${path.join(legacyState, '..', 'gate.js').replace(/\\/g, '/')}" pre-plan` }];
-  fs.writeFileSync(p.settings, JSON.stringify(s));
-  fs.writeFileSync(path.join(legacyState, 'aa.json'), JSON.stringify({ root: path.join(HOME, 'elsewhere'), running: { [process.pid]: { files: [] } } }));
-  const before2 = [tree(p.dir, rel => rel.startsWith('gpt')), liveState()];
-  const old = await installer.install(quiet);
-  assert.strictEqual(old.code, 1, old.text);
-  assert.match(old.text, /review of the old setup is running/);
-  assert.deepStrictEqual([tree(p.dir, rel => rel.startsWith('gpt')), liveState()], before2);
-  fs.writeFileSync(path.join(legacyState, 'aa.json'), JSON.stringify({ root: process.cwd(), reviewedAt: 5, changes: {
-    'a.js': { at: 9, reviewedAt: 1, openFindings: ['log1'] }, 'b.js': { at: 3 }, 'c.js': { at: 8 } } }));
-  let said = '';
-  assert.strictEqual((await installer.install({ ...quiet, say: text => { said += text; } })).code, 0);
-  assert.match(said, /the old setup in .*: 1 file\(s\) with open findings, 2 pending change\(s\)/);
+  // a review that another project starts while install asks: the check after the answer refuses
+  const late = path.join(state.HOME, 'proj-c', 'state.json');
+  let asked = null;
+  const ask = async () => {
+    fs.mkdirSync(path.dirname(late), { recursive: true });
+    fs.writeFileSync(late, JSON.stringify({ running: { job: { attempt: 'x2', pid: process.pid } } }));
+    asked = [tree(p.dir), liveState(), read(state.files.config())];
+    return true;
+  };
+  const r2 = await installer.install({ checks: false, ask, say: () => {} });
+  assert.strictEqual(r2.code, 1, r2.text);
+  assert.match(r2.text, /review is running \(proj-c\)/);
+  assert.deepStrictEqual([tree(p.dir), liveState(), read(state.files.config())], asked);
+  fs.rmSync(path.dirname(late), { recursive: true, force: true });
 });
 
-test('personal details stay in personal.md and the local backup, never in the repository or the shared files', async () => {
+test('a failed switch on a full disk puts back everything written, and input that ends without an answer is a no', async () => {
+  // an update whose switch fails on a full disk: the installed code and rules, CLAUDE.md, the agent and config.json
+  // are put back without writing anything new, a file the update brought is gone again, and settings.json is unchanged
+  const q = profile('t5', { settings: oldSettings(), claudeMd: 'kept rules\n', agent: 'kept agent\n' });
+  fs.writeFileSync(state.files.config(), JSON.stringify({ model: 'gpt-test' }));
+  assert.strictEqual((await installer.install(quiet)).code, 0);
+  for (const f of fs.readdirSync(q.code)) fs.writeFileSync(path.join(q.code, f), `the installed old version of ${f}\n`);
+  fs.rmSync(path.join(q.code, 'pair.js')); // (not in the installed copy, so the update creates it)
+  const kept = [tree(q.code), read(q.settings), read(q.claudeMd), read(q.agent), read(state.files.config())];
+  const live = liveState();
+  const { renameSync, writeFileSync } = fs;
+  let full = false;
+  fs.renameSync = (from, to) => { if (to === q.settings && from.endsWith('.tmp')) { full = true; throw Object.assign(new Error('disk full'), { code: 'ENOSPC' }); } return renameSync(from, to); };
+  fs.writeFileSync = (...args) => { if (full) throw Object.assign(new Error('disk full'), { code: 'ENOSPC' }); return writeFileSync(...args); };
+  try {
+    await assert.rejects(installer.install(quiet), e => /disk full/.test(e.message) && !/not put back/.test(e.message));
+  } finally {
+    Object.assign(fs, { renameSync, writeFileSync });
+  }
+  assert.deepStrictEqual([tree(q.code), read(q.settings), read(q.claudeMd), read(q.agent), read(state.files.config())], kept);
+  assert.ok(!fs.existsSync(path.join(q.code, 'pair.js')), 'the file the failed update created is gone');
+  assert.ok(!fs.readdirSync(q.dir).some(f => /crosscheck-before|\.tmp$/.test(f)), 'no file left aside');
+  assert.deepStrictEqual(liveState(), live);
+  // input that ends without an answer is a no
+  const { Readable } = require('stream');
+  assert.strictEqual(await installer.confirm('Install? ', Readable.from([])), false);
+});
+
+test('personal details stay in personal.md, never in the repository or the shared files, and no backup is made', async () => {
   const id = crypto.randomBytes(4).toString('hex');
   const markers = [`PC-${id}`, `${id}@example.com`, `C:\\Users\\u${id}`, `MT5 standing confirmation ${id}`];
   const personal = `Run the MT5 tester on ${markers[0]} only (${markers[3]}); mail ${markers[1]}; files in ${markers[2]}.`;
-  const p = profile('t5', { settings: oldSettings(), claudeMd: `old rules with ${personal}\n`, agent: 'old agent\n' });
+  const p = profile('t6', { settings: oldSettings(), claudeMd: `old rules with ${personal}\n`, agent: 'old agent\n' });
   fs.writeFileSync(path.join(state.HOME, 'personal.md'), personal);
   const repoBefore = spawnSync('git', ['status', '--porcelain'], { cwd: REPO, encoding: 'utf8' }).stdout;
   assert.strictEqual((await installer.install(quiet)).code, 0);
   assert.strictEqual(read(p.claudeMd), `@${path.join(p.code, 'RULES.md').replace(/\\/g, '/')}\n\n${personal}\n`);
   assert.strictEqual(read(path.join(state.HOME, 'personal.md')), personal);
-  assert.match(read(path.join(state.HOME, 'backup', 'CLAUDE.md')), new RegExp(id));
-  for (const shared of [path.join(p.code, 'RULES.md'), p.agent, ...fs.readdirSync(p.code).map(f => path.join(p.code, f))]) {
+  assert.ok(!fs.existsSync(path.join(state.HOME, 'backup')), 'no backup folder or marker is made');
+  for (const shared of [path.join(p.code, 'RULES.md'), p.agent, state.files.config(), ...fs.readdirSync(p.code).map(f => path.join(p.code, f))]) {
     assert.ok(!markers.some(m => read(shared).includes(m)), `${shared} holds no personal detail`);
   }
   assert.strictEqual(spawnSync('git', ['grep', '-l', id], { cwd: REPO, encoding: 'utf8' }).stdout, '', 'the repository holds none');
   assert.strictEqual(spawnSync('git', ['status', '--porcelain'], { cwd: REPO, encoding: 'utf8' }).stdout, repoBefore);
 });
+
+test.after(() => fs.rmSync(HOME, { recursive: true, force: true }));
