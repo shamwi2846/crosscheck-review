@@ -96,15 +96,18 @@ test('the hooks check fails for a screen hook that doesn\'t fail closed', async 
   const found = spawnSync(process.execPath, [path.join(__dirname, '..', 'src', 'crosscheck.js'), 'doctor'], { cwd: HOME, encoding: 'utf8',
     env: { ...process.env, PATH: `${pathDir}${path.delimiter}${process.env.PATH}` } });
   assert.match(line(found.stdout, 'Claude Code'), new RegExp(`^ok .*${process.versions.node.replace(/\./g, '\\.')}`));
-  // a saved npm install whose Node moved, with no `claude` on PATH: npm's same cli.js runs through this Node
-  const prefix = path.join(HOME, 'npm prefix');
-  const cli = path.join(prefix, process.platform === 'win32' ? '' : 'lib', 'node_modules', '@anthropic-ai', 'claude-code', 'cli.js');
-  fs.mkdirSync(path.dirname(cli), { recursive: true });
-  fs.copyFileSync(CLAUDE, cli);
-  fs.writeFileSync(state.files.config(), JSON.stringify({ ...saved, claude: [path.join(HOME, 'gone', 'node.exe'), cli] }));
-  const viaNpm = spawnSync(process.execPath, [path.join(__dirname, '..', 'src', 'crosscheck.js'), 'doctor'], { cwd: HOME, encoding: 'utf8',
-    env: { ...process.env, PATH: path.dirname(process.execPath), npm_config_prefix: prefix } });
-  assert.match(line(viaNpm.stdout, 'Claude Code'), /^ok .*2\.1\.299/);
+  // a saved npm install whose Node moved, with no `claude` on PATH: npm's same cli.js runs through this Node (where
+  // npm sits beside Node, as Node's own installer puts it, so an empty PATH hides only claude)
+  if (fs.existsSync(path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js'))) {
+    const prefix = path.join(HOME, 'npm prefix');
+    const cli = path.join(prefix, process.platform === 'win32' ? '' : 'lib', 'node_modules', '@anthropic-ai', 'claude-code', 'cli.js');
+    fs.mkdirSync(path.dirname(cli), { recursive: true });
+    fs.copyFileSync(CLAUDE, cli);
+    fs.writeFileSync(state.files.config(), JSON.stringify({ ...saved, claude: [path.join(HOME, 'gone', 'node.exe'), cli] }));
+    const viaNpm = spawnSync(process.execPath, [path.join(__dirname, '..', 'src', 'crosscheck.js'), 'doctor'], { cwd: HOME, encoding: 'utf8',
+      env: { ...process.env, PATH: fs.mkdtempSync(path.join(HOME, 'empty-path-')), npm_config_prefix: prefix } });
+    assert.match(line(viaNpm.stdout, 'Claude Code'), /^ok .*2\.1\.299/);
+  }
   fs.writeFileSync(state.files.config(), JSON.stringify(saved));
   const s = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
   delete s.hooks.PreToolUse.find(g => g.matcher.startsWith('mcp__computer-use__')).hooks[0].onFailure;
