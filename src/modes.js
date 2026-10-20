@@ -114,13 +114,16 @@ async function plan(root, { file, taskFile, risky, skipWhy }) {
   const bytes = file ? review.bytesOf(path.resolve(file)) : null;
   const text = bytes === null ? '' : review.textOf(bytes);
   if (!text.trim()) return refused(`the plan file ${file || '(none)'} doesn't exist or is empty`);
-  const record = rec => state.update(state.files.global(), g => { g.plans = { ...(g.plans || {}), [planHash(text)]: { at: Date.now(), ...rec } }; });
+  // (bound to the task's requirements as they are now, so a changed request needs the plan reviewed again)
+  const task = taskFile ? review.taskInfo(taskFile) : null;
+  const record = rec => state.update(state.files.global(), g => {
+    g.plans = { ...(g.plans || {}), [planHash(text)]: { at: Date.now(), task: task ? task.id : null, reqHash: task ? task.reqHash : null, ...rec } };
+  });
   if (skipWhy !== undefined) {
     if (!String(skipWhy).trim()) return refused('a plan skip needs its reason (--why "...")');
     const saved = record({ skip: String(skipWhy).trim() });
     return saved.ok ? { status: 'DONE', text: 'plan skip recorded: this exact plan text may leave plan mode' } : refused(saved.why);
   }
-  const task = taskFile ? review.taskInfo(taskFile) : null;
   const name = path.basename(file);
   const prompt = `${PLAN_RULES}\n\n## Task requirements\n${task ? task.requirements : 'No task file: rate no requirement.'}\n\n`
     + `## Project lessons (confirmed past mistakes)\n${gaps.lessons(root).trim() || 'None.'}\n\n## The plan (${name})\n${fence(text)}\n`;

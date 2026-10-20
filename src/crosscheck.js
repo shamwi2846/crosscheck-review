@@ -175,11 +175,13 @@ function switchCommand(args) {
 // ---- GPT's other jobs (modes.js) ----
 
 async function testplanCommand(args) {
+  if (!listOf(args.files).length) throw new Usage('testplan needs --files a,b');
   const { root, taskFile } = where(args);
   return reported(await modes.testplan(root, { taskFile, files: listOf(args.files), context: listOf(args.context) }), false);
 }
 
 function skipCommand(args) {
+  if (!listOf(args.files).length) throw new Usage('skip needs --files a,b');
   const { root, taskFile } = where(args);
   return reported(modes.skip(root, { taskFile, files: listOf(args.files), why: args.why }), false);
 }

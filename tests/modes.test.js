@@ -126,6 +126,7 @@ test('a test plan is checked against its targets and stored for the named task o
     json({ cases: [testCase('T1', [])], not_worth_testing: '-' }),
     json({ cases: [testCase('T1', ['src/EA.mq5', 'src/Risk.mqh']), testCase('T2', ['src/Risk.mqh'])], not_worth_testing: '-' }),
   ] }] });
+  assert.strictEqual(cli(root, ['testplan', '--task', taskB.file]).status, 2, 'no --files is wrong usage');
   const args = ['testplan', '--task', taskB.file, '--files', 'src/EA.mq5,src/Risk.mqh', '--context', 'docs/spec.md'];
   const bad = cli(root, args);
   assert.strictEqual(bad.status, 1, bad.stdout);
@@ -187,6 +188,7 @@ test('a skip is refused for a file GPT rated risky in this task, even after its 
   const before = stateOf(root);
   assert.deepStrictEqual([before.escalations[key('src/payments.js')], before.needsPlan[key('src/payments.js')].length], [undefined, 1]);
   const calls = execCalls().length;
+  assert.strictEqual(cli(root, ['skip', '--why', 'covered elsewhere']).status, 2, 'no --files is wrong usage');
   const r = cli(root, ['skip', '--files', 'src/payments.js', '--why', 'covered elsewhere']);
   assert.strictEqual(r.status, 1, r.stdout);
   assert.match(r.stdout, /only a test plan counts/);
@@ -225,11 +227,19 @@ test('the plan gate accepts only the text reviewed, or a plan skipped with its r
   const plans = state.read(state.files.global()).data.plans;
   assert.strictEqual(plans[hook.planHash(P)].verdict, 'ISSUES_FOUND');
   assert.strictEqual(plans[hook.planHash(Q)], undefined, 'Q never gets P\'s review');
-  const exit = text => hook.handle('plan', { session_id: 'A', cwd: root, tool_name: 'ExitPlanMode', tool_input: { plan: text } });
+  const exit = (text, session = 'A') => hook.handle('plan', { session_id: session, cwd: root, tool_name: 'ExitPlanMode', tool_input: { plan: text } });
   assert.deepStrictEqual([exit(P), exit(P.replace(/\n/g, '\r\n  '))], [null, null]);
+  writeTask(state.files.task(root, 'B')); // (the same requirements, another task)
+  assert.match(denial(exit(P, 'B')), /another task/, 'a review counts for its own task only');
   assert.match(denial(exit(Q)), /no review/);
   const n = execCalls().length;
   const skipped = cli(root, ['plan', '--skip', '--why', 'small revision accepted', '--file', file]);
   assert.strictEqual(skipped.status, 0, skipped.stdout);
   assert.deepStrictEqual([exit(Q), execCalls().length, state.read(state.files.global()).data.plans[hook.planHash(Q)].skip], [null, n, 'small revision accepted']);
+  // a changed request makes the plan's review stale, until it is reviewed or skipped again
+  writeTask(state.files.task(root, 'A'), 'R1. Every order keeps its stop loss.\nR2. And logs it.');
+  assert.match(denial(exit(P)), /earlier version of its requirements/);
+  fs.writeFileSync(file, P);
+  assert.strictEqual(cli(root, ['plan', '--skip', '--why', 'it still holds with R2', '--file', file]).status, 0);
+  assert.strictEqual(exit(P), null);
 });

@@ -162,7 +162,12 @@ function plan(inp) {
     text = bytes && review.textOf(bytes).trim() ? review.textOf(bytes) : null; // (decoded as the plan command decodes it)
   }
   if (!text) return { systemMessage: 'crosscheck: the hook got no plan text, so it could not check that the plan was reviewed.' };
-  if ((g.plans || {})[planHash(text)]) return null;
+  // (a review counts for the session's task as it is now: a changed request needs the plan reviewed again)
+  const root = state.projectRoot(path.resolve(inp.cwd || '.'));
+  const task = root ? review.sessionTask(root, inp.session_id) : null;
+  const rec = (g.plans || {})[planHash(text)];
+  if (rec && (!task || (rec.task === task.id && rec.reqHash === task.reqHash))) return null;
+  if (rec) return deny(`This plan's review or skip was for ${rec.task ? 'another task or an earlier version of its requirements' : 'no task'}, not this session's task as it is now. Review it again: ${CLI} plan --file <plan.md> (or ${CLI} plan --skip --why "..." --file <plan.md>).`);
   return deny(`This plan has no review. Save it to a file and run ${CLI} plan --file <plan.md> (add --risky for a risky feature) in the background, weigh GPT's points and revise the plan; for a plan too small to matter: ${CLI} plan --skip --why "..." --file <plan.md>. Then present the reviewed text.`);
 }
 
