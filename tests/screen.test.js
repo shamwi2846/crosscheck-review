@@ -72,7 +72,7 @@ test('two projects can\'t both operate the desktop: the second computer run is B
   const won = await winner.closed;
   assert.strictEqual(won.code, 0, won.out);
   assert.match(won.out, /DONE: looked at the window/);
-  assert.strictEqual(shared().desktop.pid, owner.pid, 'the record stays; its ended processes free the desktop');
+  assert.strictEqual(shared().desktop, undefined, 'a run that ended with nothing of it running leaves no old process ids behind');
 });
 
 test('a GPT worker that outlives its killed driver keeps the desktop until it ends', { skip: process.platform !== 'win32' && 'the process notes are Windows-only' }, async () => {

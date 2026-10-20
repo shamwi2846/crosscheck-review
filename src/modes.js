@@ -211,8 +211,8 @@ function recordWorkers(pids) {
 }
 
 // One computer run by GPT: the desktop taken in one locked step, the verified lockdown, one Codex run (never retried).
-// Every process the run starts is added to the desktop record, which stays after the run, so a worker that outlives
-// this driver keeps the desktop owned until it ends.
+// Every process the run starts is added to the desktop record, so a worker that outlives this driver keeps the
+// desktop owned until it ends; a run that ends with nothing of it running removes the record.
 async function computer(root, { task }) {
   if (!String(task || '').trim()) return refused('computer needs --task "..."');
   const taken = state.update(state.files.global(), g => {
@@ -239,6 +239,9 @@ async function computer(root, { task }) {
   const r = await codex.ask({ mode: 'computer', effort: 'high', lockdown: lockdown.args, schema: answer.SCHEMAS.computer, cwd: root,
     prompt: `${COMPUTER_RULES}\n\n## Task\n${task}\n`, onSpawn: child => note([child.pid]), onProcesses: note });
   const after = gitStatus(root);
+  // (the run has stopped what it started: once none of it runs, the record goes, so no old process id lingers in it;
+  // a worker still running keeps it, and so does a driver killed before this point)
+  state.update(state.files.global(), g => { if (mine(g) && !g.desktop.workers.some(state.mayRun)) delete g.desktop; });
   const files = before === after ? `git status is as before the run (a file already changed before it may still have changed): ${after}`
     : `git status before the run:\n${before}\nafter it:\n${after}`;
   if (!r.ok) return { status: 'GPT_UNAVAILABLE', text: `GPT_UNAVAILABLE: ${r.reason} (a computer run is never retried)\n${files}` };
