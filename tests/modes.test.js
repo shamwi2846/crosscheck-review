@@ -151,10 +151,10 @@ test('a test plan is stored only if the requirements still hold once it has the 
   seed(root, s => { s.plans = { [key('src/a.js')]: old, [key('src/b.js')]: old }; s.acks = { other: 'kept' }; });
   const hold = fs.mkdtempSync(path.join(HOME, 't3-hold-'));
   setSpec({ byPrompt: [{ match: 'You design the test cases', answers: [{ hold, ...json({ cases: [testCase('T1', ['src/a.js', 'src/b.js'])], not_worth_testing: '-' }) }] }] });
-  const running = spawn(process.execPath, [CLI, 'testplan', '--files', 'src/a.js,src/b.js'], { cwd: root, env: env('A'), stdio: ['ignore', 'pipe', 'pipe'] });
+  const running = spawn(process.execPath, [CLI, 'testplan', '--files', 'src/a.js,src/b.js'], { cwd: root, env: env('A'), stdio: ['ignore', 'pipe', 'ignore'] });
   let out = '';
   running.stdout.on('data', d => { out += d; });
-  const exited = new Promise(resolve => running.on('exit', resolve));
+  const exited = new Promise(resolve => running.on('close', resolve)); // (close: after the last output, not just the exit)
   await waitFor(path.join(hold, 'started'));
   const bundles = path.join(state.projectDir(root), 'bundles');
   const answered = () => fs.existsSync(bundles) && fs.readdirSync(bundles).some(b => fs.readdirSync(path.join(bundles, b)).some(f => f.startsWith('turn-')));
@@ -211,10 +211,10 @@ test('the plan gate accepts only the text reviewed, or a plan skipped with its r
     { match: 'reviewer A. Check', answers: [{ hold, session: 'sess-A', ...reviewAnswer([finding]) }] },
     { match: 'reviewer B. Attack', answers: [{ session: 'sess-B', ...reviewAnswer() }] },
   ] });
-  const running = spawn(process.execPath, [CLI, 'plan', '--file', file, '--risky'], { cwd: root, env: env('A'), stdio: ['ignore', 'pipe', 'pipe'] });
+  const running = spawn(process.execPath, [CLI, 'plan', '--file', file, '--risky'], { cwd: root, env: env('A'), stdio: ['ignore', 'pipe', 'ignore'] });
   let out = '';
   running.stdout.on('data', d => { out += d; });
-  const exited = new Promise(resolve => running.on('exit', resolve));
+  const exited = new Promise(resolve => running.on('close', resolve));
   await waitFor(path.join(hold, 'started'));
   fs.writeFileSync(file, Q); // (revised while the pair reviews P)
   fs.writeFileSync(path.join(hold, 'go'), '');
