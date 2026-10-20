@@ -105,6 +105,25 @@ test('a failed cross-check applies nothing, and a fallback answer cannot certify
   assert.match(closing.text, /src\/pay\.mqh was rated risky in this chain/);
 });
 
+test('a fallback chain keeps its trading file risky: a follow-up rated normal still needs its plan, at xhigh', async () => {
+  const p = project('t1b', { 'src/EA.mq5': 'e0\n' });
+  write(p.root, 'src/EA.mq5', 'e1\n');
+  seed(p.root, s => { s.changes = { [key('src/EA.mq5')]: pending('src/EA.mq5') }; });
+  // (the fresh follow-up's history holds reviewer A's prompt, so the stub routes it to A's answers)
+  setPair({ A: [reviewAnswer(), followAnswer()], B: [{ fail: 'error: no such session', code: 1 }] });
+  const r = await review.review(p.root, { session: 'A', taskFile: p.taskFile });
+  assert.strictEqual(r.status, 'PAIR_INCOMPLETE', r.text);
+  const answerFile = path.join(HOME, 't1b-answer.json');
+  fs.writeFileSync(answerFile, reviewAnswer());
+  const fb = review.fallback(p.root, { bundle: r.bundle, answerFile });
+  assert.strictEqual(fb.status, 'DONE', fb.text);
+  assert.ok(stateOf(p.root).changes[key('src/EA.mq5')], 'without a plan it stays pending');
+  const f1 = await review.followup(p.root, { chain: fb.chain, responseFile: response('nothing changed') });
+  assert.strictEqual(f1.status, 'DONE', f1.text);
+  assert.ok(stateOf(p.root).changes[key('src/EA.mq5')], 'a normal rating never drops the plan it needs');
+  assert.ok(execCalls().some(c => c.prompt.includes('This is a follow-up round') && c.args.includes('model_reasoning_effort=xhigh')));
+});
+
 test('plan authorization stays bound to the task, its requirements and the frozen plan', async () => {
   const files = { 'src/EA.mq5': 'e0\n', 'src/preset.set': 'p0\n', 'src/Risk.mqh': 'r0\n', 'src/Lots.mqh': 'l0\n', 'src/store.js': 's0\n' };
   const p = project('t2', files);

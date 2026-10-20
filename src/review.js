@@ -372,9 +372,11 @@ function apply(root, manifest, result) {
     if (!manifest.chain) {
       chain = { rev: 0, began: manifest.admittedAt, session: manifest.session, rounds: [], codexSession: null, closed: false, files: {}, frozen: {}, findings: {} };
     }
-    // (only a pair whose four runs all completed counts as a paired review: a fallback answer is one reviewer)
+    // (only a pair whose four runs all completed counts as a paired review: a fallback answer is one reviewer; the
+    // chain keeps its risky files either way, so their follow-ups still need a plan)
     const pairComplete = !!(manifest.paired && result.pairComplete);
-    if (pairComplete) Object.assign(chain, { paired: true, riskyKeys: [...new Set([...(chain.riskyKeys || []), ...manifest.riskyKeys])] });
+    chain.riskyKeys = [...new Set([...(chain.riskyKeys || []), ...manifest.riskyKeys])];
+    if (pairComplete) chain.paired = true;
     const narrow = chain.rounds.length >= 3;
     const fixedGaps = [];
     for (const row of result.answer.followups || []) {
@@ -528,8 +530,9 @@ async function followup(root, { chain: id, responseFile, evidenceFile = null }) 
     const { chain } = admitted;
     const frozen = freeze(root, { attempt, session: chain.session, ...admitted, taskFile: chain.task.path, evidenceFile, response: textOf(response) });
     if (frozen.why) return refused(frozen.why);
-    // (a paired chain's follow-ups are one GPT at xhigh, resuming reviewer A)
-    const result = await run(root, frozen.manifest, frozen.prompt, { resume: chain.codexSession, history: historyOf(root, chain), effort: chain.paired ? 'xhigh' : 'high' });
+    // (a paired chain's follow-ups are one GPT at xhigh, resuming reviewer A; so are a fallback chain's with risky files)
+    const effort = chain.paired || (chain.riskyKeys || []).length ? 'xhigh' : 'high';
+    const result = await run(root, frozen.manifest, frozen.prompt, { resume: chain.codexSession, history: historyOf(root, chain), effort });
     if (result.status !== 'OK') return { status: result.status, text: `${result.status}: ${result.why}`, bundle };
     const applied = apply(root, frozen.manifest, result);
     if (applied.refused) return { status: 'NOT_DONE', text: `NOT_DONE: ${applied.refused}`, bundle };
