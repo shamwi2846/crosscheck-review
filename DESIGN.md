@@ -64,6 +64,13 @@ Recorded overruns:
   - baselines from the last reviewed version or from git for shell changes and deletions;
   - each round's turns saved, so a fresh GPT session can continue a chain;
   - gap entries written under the state lock.
+- `hook.js`, about 300 lines. Step 4's plan review asked for these, and each guards a real harm:
+  - the screen gate validates the desktop record and treats a process it can't check as running, so a bad record never unlocks the desktop;
+  - returned failures (a state that can't be read, a lock taken over, an unreadable gaps or lessons file) are logged, not only thrown errors;
+  - the commit guard finds its repository from `-C` or a leading `cd`, and checks both paths of a rename;
+  - bundle cleanup runs under the project lock and keeps open chains' rounds and reserved attempts.
+
+  The refusal texts name the exact next command, so Claude doesn't have to guess.
 - Tests, about 1,520 lines: the review and pair paths above are each covered by the at most five cases of their test plan, and those cases need real processes and git projects.
 
 ## 4. Commands
@@ -195,6 +202,13 @@ Not carried over:
 <project>/KNOWN_GAPS.md
 ```
 
+- **The shared records in `global.json`** (hooks read them; the CLI writes them, each under the global lock):
+  - `off`: true while the user has switched the driver off;
+  - `plans`: `{ <hash>: { at, skip? } }`, a reviewed or skipped plan by the hash of its text with every run of whitespace made one space (`planHash` in `hook.js`, shared with the `plan` command);
+  - `sessions`: `{ <session id>: { roots, at } }`, the projects a session edited (Stop checks them all);
+  - `desktop`: `{ pid, workers, project, at }`, the computer run that owns the desktop: its driver and every Codex worker process it noted, written as they are noted;
+  - `screen`: `{ session, until, why }`, Claude's allow-screen window (`until` in milliseconds since 1970);
+  - `cooldownUntil`, `cooldownReason`: the usage cooldown.
 - **Atomic writes, one lock.** Every state write goes to a temporary file and is renamed into place, under one lock file per project. An unreadable state is never overwritten: the driver reports it and refuses to acknowledge anything.
 - **A hook that fails open is never silent.** It writes the error to a hooks log, and `status` and `doctor` show it.
 - **Log cleanup.** Logs older than 30 days are deleted, unless they belong to an open chain.
