@@ -1,8 +1,8 @@
-# crosscheck, the coding driver: design (v9, ready to build)
+# crosscheck, the coding driver: design (v9, built)
 
 The coding driver replaces today's Claude + GPT setup with a full rewrite. It is the daily driver for all of the user's code: Claude writes the code, GPT checks it, and the driver keeps that loop honest with as little friction and as little code as possible.
 
-Status: design only, nothing implemented yet. The old setup keeps running, and its repository stays as it is. The code will live in this repository, `shamwi2846/crosscheck-review`.
+Status: built in the steps of section 16 (pull requests 1 to 10) and installed on 2026-10-20, replacing the old setup, whose repository stays as it is. The code lives in this repository, `shamwi2846/crosscheck-review`.
 
 ## 1. Principles (they apply to the driver's own code and to every project it drives)
 
@@ -20,7 +20,7 @@ Status: design only, nothing implemented yet. The old setup keeps running, and i
 1. **Task.** For a non-trivial request, Claude writes `task.md`: numbered requirements in its own words, with constraints and exclusions. The user's exact words go in a separate local `words.md`, which is never sent to GPT. Claude updates `task.md` only when the user's request changes, never to make a check pass. There is no per-message ceremony. Each session has its own task file, so two sessions in one project never share one. The driver identifies a task by its id and the hash of its Requirements section only: plans, skips and reviews are bound to that hash, so a changed request makes them stale (pre-edit asks again, and a plan gets extended), while edits to the Notes section don't. Decisions, progress and open items go in Notes, so nothing is lost when the chat is shortened.
 2. **Sort each change** by what it does, in any kind of project: no behavior change, normal, or risky. Risky means money and payments, deleting or migrating data, security (logins, permissions, secrets), anything that can't be undone, and in trading code orders, lots, SL/TP, risk, EA inputs and `.set` presets, plus code that risky code uses. Unsure means risky. Order, lot and SL/TP changes are always risky.
 3. **Risky: test plan first.** `crosscheck testplan` gets at most 5 cases from GPT (the main path plus the realistic ways to lose money or data), and Claude writes them as tests. A file that isn't risky gets `crosscheck skip --why "..."` instead.
-4. **Code.** Claude reads the code it edits itself, and splits big work into steps of about 300 changed lines or less. It edits with Edit/Write, so the driver sees every change. Steps that depend on a pending GPT result (installs, migrations, releases, trade setup) wait for it, while independent work goes on. Every project the driver works on is a git repository (a one-time `git init`), so a file deleted or moved by a shell command still has its original in git; at session start the driver points out a folder that isn't one. Tests stay as few as possible: only where a bug could cost money, lose data or break security, plus one regression test for each real bug fixed. Claude runs the affected tests (and compiles) while working, runs the full suite on the final code, and attaches that output to the review. Risky changes need a passing run on the final code.
+4. **Code.** Claude reads the code it edits itself. Before changing what a function takes, returns or does, it greps the callers, and it fixes a bug once in the shared code rather than in the one caller that showed it. It splits big work into steps of about 300 changed lines or less. It edits with Edit/Write, so the driver sees every change. Steps that depend on a pending GPT result (installs, migrations, releases, trade setup) wait for it, while independent work goes on. Every project the driver works on is a git repository (a one-time `git init`), so a file deleted or moved by a shell command still has its original in git; at session start the driver points out a folder that isn't one. Tests stay as few as possible: only where a bug could cost money, lose data or break security, plus one regression test for each real bug fixed. Claude runs the affected tests (and compiles) while working, runs the full suite on the final code, and attaches that output to the review. Risky changes need a passing run on the final code.
 5. **One review at the end.**
    - **Normal changes:** one GPT at high effort reads the diff with context.
    - **Risky changes:** two GPTs at xhigh read the whole files and the code that calls them.
@@ -47,16 +47,19 @@ Status: design only, nothing implemented yet. The old setup keeps running, and i
 
 Total: about 1,670 lines of code, install included, and 700 of tests, against about 7,900 and 7,600 today. These are ceilings, not targets: Fable's estimate for this scope is 1,200 to 1,500. Going over a budget needs a reason written into this file.
 
+Built, the code is about 3,160 lines, install included, and the tests about 2,900. Each overrun is recorded below.
+
 Recorded overruns:
-- `state.js`, about 200 lines: lock ownership. A lock names its owner process and is reclaimed only once that process has ended, under a serialized reclaim guard. A write happens only while the lock is still held. Step 1's review found that age-based reclaim lets a stalled holder and a new holder overwrite each other.
-- `codex.js`, about 345 lines:
+- `state.js`, about 230 lines: lock ownership. A lock names its owner process and is reclaimed only once that process has ended, under a serialized reclaim guard. A write happens only while the lock is still held. Step 1's review found that age-based reclaim lets a stalled holder and a new holder overwrite each other. Steps 4 to 6 added finding a project without git (the hooks run on every edit), the desktop owner's process check, and the state folder of the Claude Code profile it serves.
+- `answer.js`, about 170 lines: the answer shapes of GPT's other jobs (step 5b), and the test plan's checks: each case names an existing requirement, covers a listed target and names a test inside the project.
+- `codex.js`, about 355 lines:
   - Process cleanup on Windows. Codex's launcher runs the native `codex.exe`, and what Codex starts hangs off that process, outside every job object. So the run notes its processes at the first output and stops everything descended from them, even after they exit. Step 1's review found that killing only the launcher's tree left those processes running and could hang the run.
   - Reading Codex's `--json` events. Its plain output repeats the prompt and GPT's text, which falsely triggered the usage cooldown (found in PR 1).
-- `gaps.js`, about 140 lines: compatibility and privacy.
+- `gaps.js`, about 165 lines: compatibility and privacy, plus the plain reads the hooks use (a file's open gaps, the lessons as read), added in step 4.
   - Projects already hold `KNOWN_GAPS.md` files that the old setup wrote, some with Windows line endings. New entries are appended so that every existing byte stays, and a status change rewrites only that entry's header.
   - The project and home folders and e-mail addresses are taken out of every field, because the file is committed to public repositories.
   - A file that can't be read is never taken as empty.
-- `review.js`, about 620 lines. Step 3 added the risky material (whole files, frozen candidate callers, frozen plan tests) and the test-plan check before a risky file is acknowledged. Before that, it held what the three plan-review rounds of step 2b required, so that only reviewed versions are ever acknowledged:
+- `review.js`, about 710 lines. Steps 4 and 5 added the queries the hooks use, the review skip, and the runner options GPT's other jobs share. Step 3 added the risky material (whole files, frozen candidate callers, frozen plan tests) and the test-plan check before a risky file is acknowledged. Before that, it held what the three plan-review rounds of step 2b required, so that only reviewed versions are ever acknowledged:
   - choosing and reserving the files in one state transaction, with dead reservations reclaimed;
   - a bundle per attempt (frozen copies, prompt, manifest), so the fallback reviewer judges the same material and an answer applies only once;
   - chain revisions, so a stale follow-up, close or fallback changes nothing;
@@ -64,14 +67,14 @@ Recorded overruns:
   - baselines from the last reviewed version or from git for shell changes and deletions;
   - each round's turns saved, so a fresh GPT session can continue a chain;
   - gap entries written under the state lock.
-- `hook.js`, about 300 lines. Step 4's plan review asked for these, and each guards a real harm:
+- `hook.js`, about 330 lines. Steps 5 and 6 added binding a plan's review to its task, and the hook list and hook-command matcher that install.js and doctor.js share. Step 4's plan review asked for these, and each guards a real harm:
   - the screen gate validates the desktop record and treats a process it can't check as running, so a bad record never unlocks the desktop;
   - returned failures (a state that can't be read, a lock taken over, an unreadable gaps or lessons file) are logged, not only thrown errors;
   - the commit guard finds its repository from `-C` or a leading `cd`, and checks both paths of a rename;
   - bundle cleanup runs under the project lock and keeps open chains' rounds and reserved attempts.
 
   The refusal texts name the exact next command, so Claude doesn't have to guess.
-- `crosscheck.js` and a new `modes.js`, about 270 and 250 lines. GPT's other jobs (test plans and skips, plan reviews, ideas, digests, research, writing, screen control) live in `modes.js`, since the CLI's 250 lines can't also hold them.
+- `crosscheck.js` and a new `modes.js`, about 275 and 270 lines. GPT's other jobs (test plans and skips, plan reviews, ideas, digests, research, writing, screen control) live in `modes.js`, since the CLI's 250 lines can't also hold them.
   - Screen control records every Codex process a computer run starts, as it is noted, so the desktop stays owned while any of them runs, even after its driver is killed.
   - The CLI checks each command's options. A typo or a missing value is wrong usage, never a silently different run, because a review skip bypasses GPT.
   - The jobs reuse review.js's runner, so their isolation, schema, repair and bundles are a review's.
@@ -83,10 +86,10 @@ Recorded overruns:
   - reading the MQL5 docs server from the Codex config only in its plain form, single-quoted strings included;
   - matching only the hook commands that run the old setup's gate or crosscheck's hook;
   - refusing while a review runs or a project's state can't be read.
-- A new `doctor.js`, about 190 lines: the CLI couldn't hold the checks. It shares with install.js the hook list (in hook.js) and the Claude Code lookup.
+- A new `doctor.js`, about 205 lines: the CLI couldn't hold the checks. It shares with install.js the hook list (in hook.js) and the Claude Code lookup, which tries again without the saved command when that fails (Node moved, say).
   - Its live probe asks GPT to really try a write and to answer in a plain sentence, so only an enforced schema yields JSON.
   - A proven write takes away the verified version, and the version is pinned before the probes and checked after.
-- Tests, about 1,520 lines: the review and pair paths above are each covered by the at most five cases of their test plan, and those cases need real processes and git projects.
+- Tests, about 2,900 lines: the review and pair paths above are each covered by the at most five cases of their test plan, and those cases need real processes and git projects. Steps 4 to 6 added the tests of the hooks, the CLI, GPT's other jobs, screen control, install and doctor, each from its plan's cases.
 
 ## 4. Commands
 
@@ -145,7 +148,7 @@ Not carried over:
 
 ## 7. Reviews
 
-- **Material.** The reviewed files and the task file are frozen when the review starts. GPT gets the frozen copies and an exact diff from each file's baseline to its frozen copy, with context lines. Risky files are read whole. Up to 20 project files that mention them come along too; these are candidate callers from a plain name search, labelled as such, and a cut-off is shown in the coverage. Reviewers search further when a finding depends on it. Test-plan cases and their frozen test files come with the risky files, so reviewers check that the cases were written. The evidence file is labelled stale when it is older than the last change to any reviewed file. Diffs come from `git diff --no-index` on the two snapshot files (UTF-16 files decoded first), so there's no diff library. While a task's reviews run, none of its files is edited, so every reviewer sees the same final versions.
+- **Material.** The reviewed files and the task file are frozen when the review starts. GPT gets the frozen copies and an exact diff from each file's baseline to its frozen copy, with context lines. Risky files are read whole. Up to 20 project files that mention them come along too; these are candidate callers from a plain name search, labelled as such, and a cut-off is shown in the coverage. Reviewers search further when a finding depends on it, and check every caller of a function whose inputs, result or promise the change alters. Before reporting a finding they confirm its trigger can really happen, and a fix they suggest is the smallest change that works. Test-plan cases and their frozen test files come with the risky files, so reviewers check that the cases were written. The evidence file is labelled stale when it is older than the last change to any reviewed file. Diffs come from `git diff --no-index` on the two snapshot files (UTF-16 files decoded first), so there's no diff library. While a task's reviews run, none of its files is edited, so every reviewer sees the same final versions.
 - **Acknowledgement.** Only the frozen version counts as reviewed. A file edited during the review stays pending, checked by comparing its hash at the end. If the task file changed meanwhile, nothing is acknowledged and the review runs again. After a review, the frozen copy becomes the file's new baseline.
 - **One review per file at a time.** A review that includes a file already in a running review is refused, so reviews never overlap and their order can't matter. Snapshots are immutable files named by their hash. A review writes them first, then applies its result in one state transaction, so a crash between the two steps leaves only unused snapshot files.
 - **Round 1 gets the task and the requirements, never Claude's reasoning,** so GPT judges the code on its own.

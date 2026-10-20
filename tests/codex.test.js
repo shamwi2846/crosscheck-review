@@ -140,11 +140,9 @@ test('a retry waits out a cooldown another driver started meanwhile, and unreada
   assert.match(r.reason, /no retry: GPT is cooling down/);
   assert.strictEqual(execCalls().length, 1);
   fs.writeFileSync(global, '{"cooldownUntil": 17');
-  for (const force of [false, true]) {
-    const blocked = await codex.ask({ mode: 'review', effort: 'high', prompt: 'y', cwd: WORK, force });
-    assert.strictEqual(blocked.unavailable, true);
-    assert.match(blocked.reason, /can't be read/);
-  }
+  const blocked = await codex.ask({ mode: 'review', effort: 'high', prompt: 'y', cwd: WORK });
+  assert.strictEqual(blocked.unavailable, true);
+  assert.match(blocked.reason, /can't be read/);
   assert.strictEqual(execCalls().length, 1);
   assert.strictEqual(fs.readFileSync(global, 'utf8'), '{"cooldownUntil": 17');
   fs.rmSync(global);

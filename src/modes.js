@@ -105,7 +105,7 @@ function skip(root, { taskFile, files, why }) {
 
 const PLAN_RULES = `You review a plan before its work starts, for the project in the current folder (read-only). Judge whether following it does what the task asks, safely and simply.
 Report every real problem as a finding: BUG when following the plan would really cause harm (a wrong result, lost data, lost money or a security hole; in money or trading work, an unlikely trigger with a big possible loss too), else GAP.
-Each finding: severity; title; location: the plan's name below, or "-"; trigger; harm; failure; fix; test (required for CRITICAL and HIGH, else null); label; reqs: the requirement ids it shows unmet.
+Each finding: severity; title; location: the plan's name below, or "-"; trigger; harm; failure; fix: the smallest change that works, with no option, layer or config the problem doesn't need; test (required for CRITICAL and HIGH, else null); label; reqs: the requirement ids it shows unmet.
 Rate every requirement once, by whether the plan delivers it: MET (with evidence), PARTIAL, NOT_MET or NOT_IN_THIS_CHANGE.
 possibly_missing: requirements the work clearly needs that the list lacks. class: none, normal or risky for the work the plan describes (files: [] or the plan's name), and why. coverage: one line.
 verdict: ISSUES_FOUND when there is a finding or an unmet requirement, else NO_ISSUES.`;
