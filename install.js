@@ -10,12 +10,12 @@ const path = require('path');
 const readline = require('readline');
 const { spawnSync } = require('child_process');
 const state = require('./src/state');
+const { registration, runsScript } = require('./src/hook');
+const { npmRoot, claudeVersion, MIN_CLAUDE, olderThan } = require('./src/doctor');
 
 const DOCS_TOOLS = ['mql5_chm_status', 'mql5_chm_lookup_identifiers', 'mql5_chm_search', 'mql5_chm_read', 'mql5_chm_read_image'];
-const MIN_CLAUDE = [2, 1, 295];
 // (a hook command is ours when node runs the old setup's gate.js or crosscheck's hook.js; any other command is kept)
-// (the script must follow node directly: `node --check <path>` only checks a file, so it is the user's)
-const script = name => new RegExp(`^\\s*node(\\.exe)?\\s+(?:"([^"]*[\\\\/]${name})"|([^\\s"]*[\\\\/]${name}))(\\s|$)`, 'i');
+const script = runsScript;
 const OURS = script('(?:gpt[\\\\/]gate\\.js|crosscheck[\\\\/]hook\\.js)');
 const CROSSCHECK = script('crosscheck[\\\\/]hook\\.js'); // (crosscheck's own, which restore drops)
 const GATE = script('gpt[\\\\/]gate\\.js'); // (the old setup's, whose folder holds its state)
@@ -38,18 +38,9 @@ function writeAtomic(file, text) {
   }
 }
 const run = (cmd, args, cwd) => spawnSync(cmd, args, { cwd, encoding: 'utf8', windowsHide: true, timeout: 600000 });
-const olderThan = (v, min) => (v[0] - min[0] || v[1] - min[1] || v[2] - min[2]) < 0;
 const sameDir = (a, b) => path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
 
 // ---- What install needs ----
-
-// npm's global folder, or null (npm run through Node: its Windows .cmd shim can't start without a shell).
-function npmRoot() {
-  const npm = path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js');
-  const r = fs.existsSync(npm) ? run(process.execPath, [npm, 'root', '-g']) : run('npm', ['root', '-g']);
-  const root = r.status === 0 ? String(r.stdout).trim() : '';
-  return root && path.isAbsolute(root) ? root : null;
-}
 
 // The Codex launcher: config.json's, else the one npm installed globally.
 function findCodex() {
@@ -60,21 +51,7 @@ function findCodex() {
   return found && fs.existsSync(found) ? found : null;
 }
 
-// Claude Code's version as [major, minor, patch], or why it couldn't be read: the `claude` command, else, where npm
-// installed it (a .cmd shim on Windows), its cli.js through Node.
-function claudeVersion() {
-  let r = run('claude', ['--version']);
-  if (r.error || r.status !== 0) {
-    const root = npmRoot();
-    const cli = root && path.join(root, '@anthropic-ai', 'claude-code', 'cli.js');
-    if (cli && fs.existsSync(cli)) r = run(process.execPath, [cli, '--version']);
-  }
-  const v = String(r.stdout || '').match(/(\d+)\.(\d+)\.(\d+)/);
-  if (v) return { version: v.slice(1).map(Number), text: v[0] };
-  return { why: r.error ? `${r.error.code || 'it could not start'}: ${r.error.message}` : `exit ${r.status}, no version printed${String(r.stderr || '').trim() ? `: ${String(r.stderr).trim().slice(0, 300)}` : ''}` };
-}
-
-// The prerequisites' problems (none when all hold), and the Codex launcher found.
+// The prerequisites' problems (none when all hold), the Codex launcher and the Claude Code command found.
 function prerequisites() {
   const problems = [];
   if (Number(process.versions.node.split('.')[0]) < 22) problems.push(`Node 22 or newer is needed (this is ${process.versions.node})`);
@@ -84,7 +61,7 @@ function prerequisites() {
   else if (run(process.execPath, [codexJs, 'login', 'status']).status !== 0) problems.push('Codex is not logged in (codex login)');
   const claude = claudeVersion();
   if (!claude.version || olderThan(claude.version, MIN_CLAUDE)) problems.push(`Claude Code ${MIN_CLAUDE.join('.')} or newer is needed (${claude.text ? `found ${claude.text}` : `not found: ${claude.why}`})`);
-  return { problems, codexJs };
+  return { problems, codexJs, claude: claude.command };
 }
 
 // A plain one-line TOML value: a 'literal' or "basic" string, or a list of them, then at most a # comment.
@@ -180,19 +157,7 @@ function busy(settings) {
 
 // ---- The hooks ----
 
-function ourHooks(code) {
-  const hook = (event, timeout, extra = {}) => ({ type: 'command', command: `node "${path.join(code, 'hook.js').replace(/\\/g, '/')}" ${event}`, timeout, ...extra });
-  return {
-    SessionStart: [{ hooks: [hook('session', 30)] }],
-    PreToolUse: [
-      { matcher: 'Edit|Write|MultiEdit|NotebookEdit', hooks: [hook('edit', 15)] },
-      { matcher: 'Bash|PowerShell', hooks: [hook('bash', 30)] },
-      { matcher: 'ExitPlanMode', hooks: [hook('plan', 15)] },
-      { matcher: 'mcp__computer-use__.*|mcp__remote-devices__computer.*', hooks: [hook('screen', 15, { onFailure: 'block' })] },
-    ],
-    Stop: [{ hooks: [hook('stop', 30)] }],
-  };
-}
+const ourHooks = code => registration(path.join(code, 'hook.js')); // (the list doctor checks too)
 
 // `hooks` without the old setup's and crosscheck's commands; a group left with no command goes.
 function withoutOurs(hooks = {}, ours = OURS) {
@@ -300,11 +265,11 @@ async function install({ yes = false, checks = true, ask = confirm, say = text =
   const p = paths();
   const config = state.read(state.files.config());
   if (config.unreadable) return { code: 1, text: `Not installed: ${state.files.config()} can't be read (${config.unreadable}).` };
-  let codexJs = state.config().codexJs;
+  let { codexJs, claude } = state.config();
   if (checks) {
     const found = prerequisites();
     if (found.problems.length) return { code: 1, text: `Not installed:\n- ${found.problems.join('\n- ')}` };
-    codexJs = found.codexJs;
+    ({ codexJs, claude } = found);
   }
   const current = JSON.parse(readOr(p.settings, '{}'));
   const waiting = busy(current);
@@ -328,7 +293,7 @@ async function install({ yes = false, checks = true, ask = confirm, say = text =
   writeAll([...code,
     [path.join(p.code, 'RULES.md'), fs.readFileSync(path.join(__dirname, 'RULES.md'), 'utf8')],
     [p.agent, fs.readFileSync(path.join(__dirname, 'agents', 'fallback-reviewer.md'), 'utf8')],
-    [state.files.config(), JSON.stringify({ ...config.data, model: config.data.model || state.config().model, codexJs, mql5Docs: docsServer() }, null, 2)],
+    [state.files.config(), JSON.stringify({ ...config.data, model: config.data.model || state.config().model, codexJs, claude, mql5Docs: docsServer() }, null, 2)],
     [p.claudeMd, claudeMd],
     [p.settings, JSON.stringify({ ...settings, hooks: addHooks(withoutOurs(settings.hooks), ourHooks(p.code)) }, null, 2)], // (the switch)
   ]);
