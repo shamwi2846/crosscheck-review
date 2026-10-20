@@ -101,12 +101,20 @@ function taskOf(text) {
 // The session's task file and the identity plans and skips are bound to (its id and requirements hash, as a review
 // freezes them), or null when the session has none with a Requirements section.
 function sessionTask(root, session) {
-  if (!session) return null;
-  const file = state.files.task(root, session);
+  return session ? taskInfo(state.files.task(root, session)) : null;
+}
+
+// A task file's identity and requirements: { file, id, reqHash, title, requirements, ids, reqs }, or null when it
+// doesn't exist or has no Requirements section. The id is its path, as a review freezes it.
+function taskInfo(file) {
   const bytes = bytesOf(file);
   const task = bytes && taskOf(textOf(bytes));
-  return task ? { file, id: state.pathKey(path.resolve(file)), reqHash: task.reqHash } : null;
+  return task ? { file, id: state.pathKey(path.resolve(file)), ...task } : null;
 }
+
+// The read-only MQL5 docs server (config.json `mql5Docs`, recorded at install) for runs on MQL5 files, else null.
+const docsFor = paths => (paths.some(p => /\.(mq5|mqh)$/i.test(p)) && state.config().mql5Docs) || null;
+const DOCS_NOTE = '\nFor MQL5 API facts, use the read-only MQL5 docs tools (mql5-chm) and cite the topic you checked; mark a fact you couldn\'t check "unverified against the MQL5 docs".';
 
 const dropDeadMarks = s => { for (const [key, mark] of Object.entries(s.running)) if (!state.alive(mark.pid)) delete s.running[key]; };
 const asBaseline = version => (version === DELETED ? null : version); // (a missing file's successor is a new file)
@@ -286,7 +294,7 @@ function freeze(root, { attempt, session, names = [], files, admittedAt, rev, ta
   const prompt = chain
     ? `${FOLLOWUP_RULES}${narrow ? NARROW : ''}\n\n## Open findings\n${openList(chain.findings) || 'None.'}\n\n## Claude's response\n${response.trim() || '-'}\n\n`
       + `## Changed requirements\n${rowIds.map(id => task.reqs[id]).join('\n') || 'None.'}\n\n${tail}`
-    : `${RULES}\n\n## Task requirements (the authority on what the work must do)\n${task.requirements}\n\n${tail}`;
+    : `${RULES}${docsFor(Object.values(files).map(f => f.path)) ? DOCS_NOTE : ''}\n\n## Task requirements (the authority on what the work must do)\n${task.requirements}\n\n${tail}`;
   const manifest = { attempt, kind: chain ? 'followup' : 'review', root, session, names, admittedAt, files, chain: chain ? chain.id : null, rev,
     openIds: chain ? Object.keys(chain.findings).filter(id => chain.findings[id].status === 'open') : [],
     paired, riskyKeys, wholeKeys, plans: Object.fromEntries(Object.entries(current).map(([key, p]) => [key, sha(JSON.stringify(p))])),
@@ -315,20 +323,22 @@ function historyOf(root, chain) {
 // starts a fresh one with the chain's `history` when there is none or resuming fails; with `strict` (a pair's
 // cross-check, which needs that very session) a failed resume is the end. `kind` and `asked` default to the
 // manifest's; `label` names the turns saved in the bundle (turn-<label>-<n>.md), so a pair's turns don't overlap.
-async function run(root, manifest, prompt, { resume = null, history = '', strict = false, kind = manifest.kind, asked = askedOf(manifest), label = '', effort = 'high' } = {}) {
+// `mode` is Codex's ('research' alone has the web); `docs` defaults to the MQL5 docs server when MQL5 files are reviewed.
+async function run(root, manifest, prompt, { resume = null, history = '', strict = false, kind = manifest.kind, asked = askedOf(manifest), label = '', effort = 'high',
+  mode = 'review', docs = docsFor(Object.values(manifest.files || {}).map(f => f.path)) } = {}) {
   const schema = answer.SCHEMAS[kind];
   const save = (n, text, result) => fs.writeFileSync(path.join(bundleDir(root, manifest.attempt), `turn-${label ? `${label}-` : ''}${n}.md`),
     `# Prompt\n\n${text}\n\n${result.ok ? `# Answer\n\n${result.text}` : `${NO_ANSWER} ${result.reason})`}\n`);
   let first = null;
   if (resume) {
-    first = await codex.ask({ mode: 'review', effort, resume, schema, prompt, cwd: root });
+    first = await codex.ask({ mode, effort, resume, schema, prompt, cwd: root, docs });
     save(1, prompt, first);
     if (first.ok) first.sessionId = first.sessionId || resume;
   }
   if (!first || (!first.ok && !first.unavailable && !strict)) {
     // (a follow-up without a session to resume, e.g. after a fallback round, starts fresh with the chain's history)
     const fresh = history ? `${history}\n\n# The current round\n\n${prompt}` : prompt;
-    first = await codex.ask({ mode: 'review', effort, persist: true, schema, prompt: fresh, cwd: root });
+    first = await codex.ask({ mode, effort, persist: true, schema, prompt: fresh, cwd: root, docs });
     save(resume ? '1-fresh' : 1, fresh, first);
   }
   // (a run Codex couldn't complete even after its retry means GPT is unavailable, so the fallback takes the bundle;
@@ -338,7 +348,7 @@ async function run(root, manifest, prompt, { resume = null, history = '', strict
   if (checked.problems.length) {
     if (!first.sessionId) return { status: 'NOT_DONE', why: `the answer has problems and its session can't be resumed: ${checked.problems.join('; ')}` };
     const repair = `Your answer has these problems. Answer again, in full, without them:\n- ${checked.problems.join('\n- ')}`;
-    const second = await codex.ask({ mode: 'review', effort, resume: first.sessionId, schema, prompt: repair, cwd: root });
+    const second = await codex.ask({ mode, effort, resume: first.sessionId, schema, prompt: repair, cwd: root, docs });
     save(2, repair, second);
     if (!second.ok) return { status: second.unavailable || !strict ? 'GPT_UNAVAILABLE' : 'NOT_DONE', why: second.reason }; // (as above)
     checked = answer.read(kind, second.text, asked);
@@ -692,4 +702,5 @@ const bugsIn = s => Object.entries(s.chains).filter(([, c]) => !c.closed)
 const openBugs = root => bugsIn(stateOf(root));
 
 module.exports = { review, followup, close, fallback, skip, pending, openChains, openBugs, bugsIn, DELETED,
-  RISKY_FILE, sessionTask, stateOf, withMaps, bytesOf, textOf, snapshot, snapFile, versionOf, asBaseline };
+  RISKY_FILE, sessionTask, stateOf, withMaps, bytesOf, textOf, snapshot, snapFile, versionOf, asBaseline,
+  run, newAttempt, bundleDir, findingsOf, taskInfo, docsFor, DOCS_NOTE }; // (the last line: for modes.js)

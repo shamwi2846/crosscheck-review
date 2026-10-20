@@ -39,6 +39,19 @@ const SCHEMAS = {
   crosscheck: object({
     marks: list(object({ id: text, mark: oneOf('CONFIRM', 'DISPUTE', 'SAME_AS'), evidence: text, same_as: { type: ['string', 'null'] } })),
   }),
+  // GPT's other jobs (modes.js)
+  testplan: object({
+    cases: list(object({ id: text, severity: oneOf('CRITICAL', 'HIGH', 'MEDIUM'), covers: list(text), reqs: list(text), input: text, expected: text,
+      test_file: text, test_name: text })),
+    not_worth_testing: text,
+  }),
+  idea: object({ verdict: oneOf('SOUND', 'CHANGES_RECOMMENDED', 'AGAINST'), recommendation: text,
+    points: list(object({ severity: oneOf('HIGH', 'MEDIUM', 'LOW'), point: text, why: text })) }),
+  digest: object({ answer: text, evidence: list(object({ place: text, quote: text })),
+    counts: object({ passed: { type: ['number', 'null'] }, failed: { type: ['number', 'null'] }, first_failure: { type: ['string', 'null'] } }),
+    scope: text, confidence: oneOf('proven', 'hypothesis') }),
+  research: object({ answer: text, sources: list(object({ url: text, claim: text })), confidence: oneOf('proven', 'hypothesis') }),
+  write: object({ title: text, text: text }),
 };
 
 // The first place where a value doesn't fit a schema built above, or null. Codex enforces the schema for its
@@ -97,6 +110,22 @@ function read(kind, answerText, asked) {
     }
     return { answer, problems };
   }
+  if (kind === 'testplan') {
+    // (`asked.targets`: the target paths exactly as the prompt listed them; a test file must be inside the project)
+    if (!answer.cases.length || answer.cases.length > 5) problems.push(`a plan has 1 to 5 cases, not ${answer.cases.length}`);
+    exactlyOnce(answer.cases.map(c => c.id), answer.cases.map((c, i) => `T${i + 1}`), 'case');
+    for (const c of answer.cases) {
+      if (!c.covers.length) problems.push(`${c.id} covers no target`);
+      for (const p of c.covers) if (!asked.targets.includes(p)) problems.push(`${c.id} covers ${p}: covers must name targets exactly as listed`);
+      if (!c.reqs.length) problems.push(`${c.id} serves no requirement`);
+      for (const id of c.reqs) if (!asked.linkIds.includes(id)) problems.push(`${c.id} names requirement ${id}, which doesn't exist`);
+      const file = c.test_file.trim().replace(/\\/g, '/');
+      if (!file || !c.test_name.trim()) problems.push(`${c.id} names no test`);
+      else if (/^([a-z]:|\/)/i.test(file) || file.split('/').includes('..')) problems.push(`${c.id}'s test file ${c.test_file} must be a path inside the project`);
+    }
+    return { answer, problems };
+  }
+  if (kind !== 'review' && kind !== 'followup') return { answer, problems }; // (the other jobs: their schema is the check)
   exactlyOnce(answer.requirements.map(r => r.id), asked.rowIds, 'requirement');
   if (kind === 'followup') exactlyOnce(answer.followups.map(f => f.id), asked.openIds, 'finding');
   const reviewed = asked.files.map(pathKey);

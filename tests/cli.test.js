@@ -156,10 +156,10 @@ test('a review skip cannot acknowledge a file a live review holds', async () => 
   seed(root, s => { s.changes = { [key('docs/guide.md')]: pending('docs/guide.md') }; });
   const hold = fs.mkdtempSync(path.join(HOME, 't4-hold-'));
   setSpec({ exec: [{ hold, text: answerOf({ requirements: [{ id: 'R1', status: 'NOT_IN_THIS_CHANGE', evidence: 'docs only' }] }) }] });
-  const running = spawn(process.execPath, [CLI, 'review'], { cwd: root, env: env('A'), stdio: ['ignore', 'pipe', 'pipe'] });
+  const running = spawn(process.execPath, [CLI, 'review'], { cwd: root, env: env('A'), stdio: ['ignore', 'pipe', 'ignore'] });
   let out = '';
   running.stdout.on('data', d => { out += d; });
-  const exited = new Promise(resolve => running.on('exit', resolve));
+  const exited = new Promise(resolve => running.on('close', resolve)); // (close: after the last output, not just the exit)
   await waitFor(path.join(hold, 'started'));
   const r = cli(root, ['review', '--skip', '--why', 'formatting only']);
   assert.strictEqual(r.status, 1, r.stdout);

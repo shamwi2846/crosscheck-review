@@ -148,8 +148,9 @@ function bash(inp) {
 // ---- Plans ----
 
 // A plan's identity: its text with every run of whitespace made one space. The `plan` command records reviews and
-// skips under it in the shared state (`plans`).
+// skips in the shared state (`plans`) under it plus the task's id (`planKey`), so each task keeps its own record.
 const planHash = text => crypto.createHash('sha256').update(String(text).replace(/\s+/g, ' ').trim()).digest('hex');
+const planKey = (text, task) => (task ? `${planHash(text)} ${task.id}` : planHash(text));
 
 // Before leaving plan mode: the plan presented must have been reviewed, or skipped with a reason.
 function plan(inp) {
@@ -162,8 +163,16 @@ function plan(inp) {
     text = bytes && review.textOf(bytes).trim() ? review.textOf(bytes) : null; // (decoded as the plan command decodes it)
   }
   if (!text) return { systemMessage: 'crosscheck: the hook got no plan text, so it could not check that the plan was reviewed.' };
-  if ((g.plans || {})[planHash(text)]) return null;
-  return deny(`This plan has no review. Save it to a file and run ${CLI} plan --file <plan.md> (add --risky for a risky feature) in the background, weigh GPT's points and revise the plan; for a plan too small to matter: ${CLI} plan --skip --why "..." --file <plan.md>. Then present the reviewed text.`);
+  // (a review counts for the session's task as it is now: a changed request needs the plan reviewed again)
+  const root = state.projectRoot(path.resolve(inp.cwd || '.'));
+  const task = root ? review.sessionTask(root, inp.session_id) : null;
+  const plans = g.plans || {};
+  // (a session without a task takes any record of this text; one with a task, only its task's own and current one)
+  if (!task && Object.keys(plans).some(k => k === planHash(text) || k.startsWith(`${planHash(text)} `))) return null;
+  const rec = plans[planKey(text, task)];
+  if (rec && (!task || rec.reqHash === task.reqHash)) return null;
+  if (rec) return deny(`This plan's review or skip was for an earlier version of the task's requirements. Review it again: ${CLI} plan --file <plan.md> (or ${CLI} plan --skip --why "..." --file <plan.md>).`);
+  return deny(`This plan has no review for this session's task. Save it to a file and run ${CLI} plan --file <plan.md> (add --risky for a risky feature) in the background, weigh GPT's points and revise the plan; for a plan too small to matter: ${CLI} plan --skip --why "..." --file <plan.md>. Then present the reviewed text.`);
 }
 
 // ---- The screen ----
@@ -308,4 +317,4 @@ if (require.main === module) {
   if (answer) process.stdout.write(JSON.stringify(answer));
 }
 
-module.exports = { handle, planHash };
+module.exports = { handle, planHash, planKey };
