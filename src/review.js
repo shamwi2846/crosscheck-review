@@ -11,10 +11,11 @@ const state = require('./state');
 const codex = require('./codex');
 const answer = require('./answer');
 const gaps = require('./gaps');
+const pair = require('./pair');
 
 const DELETED = 'deleted'; // the frozen version of a file that doesn't exist
 const RISKY_FILE = /\.(mq5|mqh|set)$/i; // trading files: always reviewed in pairs (step 3)
-const MAPS = ['changes', 'acks', 'running', 'applied', 'chains', 'escalations'];
+const MAPS = ['changes', 'acks', 'running', 'applied', 'chains', 'escalations', 'plans', 'skips', 'needsPlan', 'riskyReviews'];
 
 const sha = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const newAttempt = () => `${new Date().toISOString().replace(/\D/g, '').slice(0, 14)}-${crypto.randomBytes(3).toString('hex')}`;
@@ -93,17 +94,21 @@ function taskOf(text) {
     if (id) reqs[id] = reqs[id] === undefined ? line : `${reqs[id]}\n${line}`;
   }
   for (const r of Object.keys(reqs)) reqs[r] = reqs[r].trim();
-  return { title: (text.match(/^#\s+(.+)$/m) || [, '-'])[1].trim(), requirements: section[1].trim(), ids: Object.keys(reqs), reqs };
+  const requirements = section[1].trim();
+  return { title: (text.match(/^#\s+(.+)$/m) || [, '-'])[1].trim(), requirements, reqHash: sha(requirements), ids: Object.keys(reqs), reqs };
 }
 
 const dropDeadMarks = s => { for (const [key, mark] of Object.entries(s.running)) if (!state.alive(mark.pid)) delete s.running[key]; };
 const asBaseline = version => (version === DELETED ? null : version); // (a missing file's successor is a new file)
 
 // Reserves an attempt's files in one state transaction, choosing them from the same state the reservation is
-// written to. A fresh review takes this session's pending changes plus the named paths; a follow-up (`chain`) takes
-// the chain's files except escalated ones, which wait for a paired review, with their last reviewed versions as
-// baselines. Returns { files, admittedAt, rev } or { refused }.
-function admit(root, { attempt, session, named = [], chain = null }) {
+// written to. A fresh review takes this session's pending changes plus the named paths, and is paired when any of
+// them is risky: a trading file, a file with an escalation, or all of them when the caller asks (`risky`). A
+// follow-up (`chain`) takes the chain's files, with their last reviewed versions as baselines; a chain that isn't
+// paired leaves out escalated files, which wait for their own paired review. The test plans the files have now are
+// copied in, so the answer can only count the plans the reviewers saw. Returns { files, admittedAt, rev, chain,
+// paired, riskyKeys, plans } or { refused }.
+function admit(root, { attempt, session, named = [], chain = null, risky = false }) {
   const result = state.update(state.files.project(root), data => {
     const s = withMaps(data);
     dropDeadMarks(s);
@@ -111,18 +116,17 @@ function admit(root, { attempt, session, named = [], chain = null }) {
     const c = chain && s.chains[chain];
     if (chain) {
       if (!c || c.closed) return { refused: `chain ${chain} is ${c ? 'closed' : 'unknown'}` };
-      for (const [key, p] of Object.entries(c.files)) if (!s.escalations[key]) files[key] = { path: p };
+      for (const [key, p] of Object.entries(c.files)) if (c.paired || !s.escalations[key]) files[key] = { path: p };
     } else {
       for (const [key, change] of Object.entries(s.changes)) if (session && change.session === session) files[key] = { path: change.path };
       for (const n of named) files[n.key] = files[n.key] || { path: n.path };
     }
     const keys = Object.keys(files);
     const list = ks => ks.map(k => files[k].path).join(', ');
-    if (!keys.length) return { refused: chain ? 'every file of the chain is escalated: they need a paired review (step 3)' : 'nothing to review: this session has no pending changes and no file was named' };
+    if (!keys.length) return { refused: chain ? 'every file of the chain is escalated: each needs its own paired review first' : 'nothing to review: this session has no pending changes and no file was named' };
     const busy = keys.filter(k => s.running[k]);
     if (busy.length) return { refused: `already in a running review: ${list(busy)}` };
-    const risky = keys.filter(k => RISKY_FILE.test(k) || s.escalations[k]);
-    if (risky.length) return { refused: `these files need a paired review, which isn't built yet (step 3): ${list(risky)}` };
+    const riskyKeys = c ? keys.filter(k => (c.riskyKeys || []).includes(k)) : keys.filter(k => risky || RISKY_FILE.test(k) || s.escalations[k]);
     for (const key of keys) {
       const change = s.changes[key];
       // (without a change record, the baseline is the last reviewed version, if any; freeze falls back to HEAD)
@@ -130,7 +134,9 @@ function admit(root, { attempt, session, named = [], chain = null }) {
       Object.assign(files[key], change ? { at: change.at, session: change.session } : { at: null }, { baseline });
       s.running[key] = { attempt, pid: process.pid };
     }
-    return { files, admittedAt: Date.now(), rev: c ? c.rev : null, chain: c ? { ...JSON.parse(JSON.stringify(c)), id: chain } : null };
+    const plans = Object.fromEntries(keys.filter(k => s.plans[k]).map(k => [k, JSON.parse(JSON.stringify(s.plans[k]))]));
+    return { files, admittedAt: Date.now(), rev: c ? c.rev : null, chain: c ? { ...JSON.parse(JSON.stringify(c)), id: chain } : null,
+      paired: !c && riskyKeys.length > 0, riskyKeys, plans };
   });
   return result.ok ? result.value : { refused: result.why };
 }
@@ -169,6 +175,22 @@ function material(root, f, { full = false, narrow = false } = {}) {
   return narrow ? `### ${f.path} (unchanged since the last round)` : `### ${f.path} (whole file)\n${fence(text)}`;
 }
 
+// The project files that mention a risky file's name, sorted: candidate callers from a plain search of their
+// decoded text (UTF-16 included), leaving out the reviewed files and anything over 2 MB.
+function callersOf(root, riskyPaths, reviewedKeys) {
+  const names = [...new Set(riskyPaths.map(p => path.basename(p, path.extname(p))).filter(n => n.length >= 3))];
+  if (!names.length) return [];
+  const listed = String(git(root, ['ls-files', '-co', '--exclude-standard', '-z'], 'utf8').stdout || '').split('\0').filter(Boolean);
+  return [...new Set(listed)].sort().filter(rel => {
+    if (reviewedKeys.has(state.pathKey(rel))) return false;
+    const abs = path.join(root, rel);
+    const stat = fs.existsSync(abs) && fs.statSync(abs);
+    if (!stat || !stat.isFile() || stat.size > 2 << 20) return false;
+    const text = textOf(fs.readFileSync(abs));
+    return names.some(n => text.includes(n));
+  });
+}
+
 const RULES = `You review a code change for the project in the current folder, which you may read (read-only) for context.
 The reviewed files may change while you work: read a reviewed file only from its frozen copy, listed under "Frozen copies".
 Report every real problem as a finding:
@@ -198,22 +220,37 @@ const openList = findings => Object.entries(findings).filter(([, f]) => f.status
 // Freezes an attempt into its bundle: snapshots of the files and the task, the prompt built only from them, and
 // the manifest the answer is applied from. The fallback reviewer gets the same bundle. A follow-up (`chain`, the
 // chain as admitted) gets the open findings, Claude's `response` and only the requirements that changed.
-function freeze(root, { attempt, session, names = [], files, admittedAt, rev, taskFile, evidenceFile, full, chain = null, response = '' }) {
+function freeze(root, { attempt, session, names = [], files, admittedAt, rev, taskFile, evidenceFile, full, chain = null, response = '',
+  paired = false, riskyKeys = [], plans = {} }) {
   const taskBytes = bytesOf(taskFile);
   if (taskBytes === null) return { why: `the task file ${taskFile} doesn't exist` };
   const task = taskOf(textOf(taskBytes));
   if (!task) return { why: `the task file ${taskFile} has no "## Requirements" section` };
   snapshot(root, taskBytes);
+  const taskId = state.pathKey(path.resolve(taskFile));
   const narrow = !!chain && chain.rounds.length >= 3;
   const code = [];
-  for (const f of Object.values(files)) {
+  for (const [key, f] of Object.entries(files)) {
     f.frozen = snapshot(root, bytesOf(path.join(root, f.path)));
     if (f.baseline === undefined) { // (no change record: the version git has, if any)
       const head = git(root, ['show', `HEAD:${f.path}`]);
       f.baseline = head.status === 0 ? snapshot(root, head.stdout) : null;
     }
-    code.push(material(root, f, { full, narrow }));
+    const shown = material(root, f, { full, narrow });
+    code.push(shown);
+    // (a paired review reads a risky file in full, beside its diff)
+    if (paired && riskyKeys.includes(key) && shown.includes('(diff from')) code.push(`### ${f.path} (whole file, read in full)\n${fence(snapText(root, f.frozen))}`);
   }
+  // A plan counts only for this task and its current requirements; the cases and the frozen tests go to GPT.
+  const current = Object.fromEntries(Object.entries(plans).filter(([, p]) => p.task === taskId && p.reqHash === task.reqHash));
+  const planText = Object.entries(current).map(([key, p]) => `### Test plan of ${files[key].path}\n${(p.cases || []).map(c => `- ${c.id}: ${c.text} (test: ${c.test})`).join('\n')}\n`
+    + (p.tests || []).map(t => { const bytes = bytesOf(path.join(root, t)); return `- frozen test ${t}: ${bytes === null ? '(missing)' : snapFile(root, snapshot(root, bytes))}`; }).join('\n')).join('\n\n');
+  const callers = paired ? callersOf(root, riskyKeys.map(k => files[k].path), new Set(Object.keys(files))) : [];
+  const callerText = callers.slice(0, 20).map(p => `- ${p}: ${snapFile(root, snapshot(root, fs.readFileSync(path.join(root, p))))}`).join('\n')
+    + (callers.length > 20 ? `\n(${callers.length - 20} more not shown)` : '');
+  if (paired) code.push(`## Candidate callers (a plain name search; frozen copies, not reviewed files)\n${callerText || 'None found.'}`);
+  // (any plan that can count for a file in this attempt is shown, so it never counts unseen)
+  if (paired || planText) code.push(`## Test plans\n${planText || 'None is current for these files.'}`);
   let evidence = 'None was supplied.';
   if (evidenceFile) {
     const bytes = bytesOf(evidenceFile);
@@ -237,7 +274,8 @@ function freeze(root, { attempt, session, names = [], files, admittedAt, rev, ta
     : `${RULES}\n\n## Task requirements (the authority on what the work must do)\n${task.requirements}\n\n${tail}`;
   const manifest = { attempt, kind: chain ? 'followup' : 'review', root, session, names, admittedAt, files, chain: chain ? chain.id : null, rev,
     openIds: chain ? Object.keys(chain.findings).filter(id => chain.findings[id].status === 'open') : [],
-    task: { path: taskFile, title: task.title, sha: sha(taskBytes), rowIds, linkIds: task.ids, reqs: task.reqs } };
+    paired, riskyKeys, plans: Object.fromEntries(Object.entries(current).map(([key, p]) => [key, sha(JSON.stringify(p))])),
+    task: { path: taskFile, id: taskId, title: task.title, sha: sha(taskBytes), reqHash: task.reqHash, rowIds, linkIds: task.ids, reqs: task.reqs } };
   fs.mkdirSync(bundleDir(root, attempt), { recursive: true });
   fs.writeFileSync(path.join(bundleDir(root, attempt), 'manifest.json'), JSON.stringify(manifest, null, 2));
   fs.writeFileSync(path.join(bundleDir(root, attempt), 'prompt.md'), prompt);
@@ -258,35 +296,35 @@ function historyOf(root, chain) {
   return `This review continues in a new session. Its earlier rounds:\n\n${turns.join('\n\n')}`;
 }
 
-// Runs GPT on the bundle's prompt, with one repair in the same session. A follow-up resumes the chain's session
-// (`resume`), or starts a fresh one with the chain's `history` when there is none or resuming fails. Each turn is
-// saved in the bundle.
-async function run(root, manifest, prompt, { resume = null, history = '' } = {}) {
-  const asked = askedOf(manifest);
-  const schema = answer.SCHEMAS[manifest.kind];
-  const save = (n, text, result) => fs.writeFileSync(path.join(bundleDir(root, manifest.attempt), `turn-${n}.md`),
+// Runs GPT on a prompt, with one repair in the same session. A follow-up resumes the chain's session (`resume`), or
+// starts a fresh one with the chain's `history` when there is none or resuming fails; with `strict` (a pair's
+// cross-check, which needs that very session) a failed resume is the end. `kind` and `asked` default to the
+// manifest's; `label` names the turns saved in the bundle (turn-<label>-<n>.md), so a pair's turns don't overlap.
+async function run(root, manifest, prompt, { resume = null, history = '', strict = false, kind = manifest.kind, asked = askedOf(manifest), label = '', effort = 'high' } = {}) {
+  const schema = answer.SCHEMAS[kind];
+  const save = (n, text, result) => fs.writeFileSync(path.join(bundleDir(root, manifest.attempt), `turn-${label ? `${label}-` : ''}${n}.md`),
     `# Prompt\n\n${text}\n\n${result.ok ? `# Answer\n\n${result.text}` : `${NO_ANSWER} ${result.reason})`}\n`);
   let first = null;
   if (resume) {
-    first = await codex.ask({ mode: 'review', effort: 'high', resume, schema, prompt, cwd: root });
+    first = await codex.ask({ mode: 'review', effort, resume, schema, prompt, cwd: root });
     save(1, prompt, first);
     if (first.ok) first.sessionId = first.sessionId || resume;
   }
-  if (!first || (!first.ok && !first.unavailable)) {
+  if (!first || (!first.ok && !first.unavailable && !strict)) {
     // (a follow-up without a session to resume, e.g. after a fallback round, starts fresh with the chain's history)
     const fresh = history ? `${history}\n\n# The current round\n\n${prompt}` : prompt;
-    first = await codex.ask({ mode: 'review', effort: 'high', persist: true, schema, prompt: fresh, cwd: root });
+    first = await codex.ask({ mode: 'review', effort, persist: true, schema, prompt: fresh, cwd: root });
     save(resume ? '1-fresh' : 1, fresh, first);
   }
   if (!first.ok) return { status: first.unavailable ? 'GPT_UNAVAILABLE' : 'NOT_DONE', why: first.reason };
-  let checked = answer.read(manifest.kind, first.text, asked);
+  let checked = answer.read(kind, first.text, asked);
   if (checked.problems.length) {
     if (!first.sessionId) return { status: 'NOT_DONE', why: `the answer has problems and its session can't be resumed: ${checked.problems.join('; ')}` };
     const repair = `Your answer has these problems. Answer again, in full, without them:\n- ${checked.problems.join('\n- ')}`;
-    const second = await codex.ask({ mode: 'review', effort: 'high', resume: first.sessionId, schema, prompt: repair, cwd: root });
+    const second = await codex.ask({ mode: 'review', effort, resume: first.sessionId, schema, prompt: repair, cwd: root });
     save(2, repair, second);
     if (!second.ok) return { status: second.unavailable ? 'GPT_UNAVAILABLE' : 'NOT_DONE', why: second.reason };
-    checked = answer.read(manifest.kind, second.text, asked);
+    checked = answer.read(kind, second.text, asked);
     if (checked.problems.length) return { status: 'NOT_DONE', why: `the answer still has problems after its repair: ${checked.problems.join('; ')}` };
   }
   return { status: 'OK', answer: checked.answer, session: first.sessionId };
@@ -330,6 +368,9 @@ function apply(root, manifest, result) {
     if (!manifest.chain) {
       chain = { rev: 0, began: manifest.admittedAt, session: manifest.session, rounds: [], codexSession: null, closed: false, files: {}, frozen: {}, findings: {} };
     }
+    // (only a pair whose four runs all completed counts as a paired review: a fallback answer is one reviewer)
+    const pairComplete = !!(manifest.paired && result.pairComplete);
+    if (pairComplete) Object.assign(chain, { paired: true, riskyKeys: [...new Set([...(chain.riskyKeys || []), ...manifest.riskyKeys])] });
     const narrow = chain.rounds.length >= 3;
     const fixedGaps = [];
     for (const row of result.answer.followups || []) {
@@ -352,7 +393,7 @@ function apply(root, manifest, result) {
       const known = gaps.readFile(root);
       if (known.unreadable) return { refused: `KNOWN_GAPS.md can't be read (${known.unreadable}), so nothing was applied` };
       const composed = gaps.compose(root, known.text, newGaps.map(fid => gapItem(manifest.task, manifest.attempt, fid, chain.findings[fid],
-        `labelled GAP by the reviewer; harm: ${chain.findings[fid].harm}`)));
+        chain.findings[fid].agreement ? `pair: ${chain.findings[fid].agreement}` : `labelled GAP by the reviewer; harm: ${chain.findings[fid].harm}`)));
       newGaps.forEach((fid, i) => { chain.findings[fid].gap = composed.ids[i]; });
       if (composed.added.length && !write(gapsFile, composed.text)) return { refused: 'the lock was taken over, so nothing was applied' };
       gapText = composed.text;
@@ -360,17 +401,33 @@ function apply(root, manifest, result) {
     const taskBytes = bytesOf(manifest.task.path);
     const taskChanged = taskBytes === null || sha(taskBytes) !== manifest.task.sha;
     const ratedRisky = result.answer.class.level === 'risky' ? result.answer.class.files.map(state.pathKey) : [];
-    const acked = [], pending = [], escalated = [];
+    const { id: taskId, reqHash } = manifest.task;
+    const forThisTask = r => !!r && r.task === taskId && r.reqHash === reqHash;
+    const acked = [], pending = [], escalated = [], unplanned = [];
     for (const [key, f] of Object.entries(manifest.files)) {
       if (ratedRisky.includes(key)) {
-        s.escalations[key] = { chain: id, at: Date.now() };
-        chain.risky = { ...chain.risky, [key]: Date.now() }; // (this chain's own record: closing it needs a paired review)
-        escalated.push(f.path);
+        s.needsPlan[key] = { task: taskId, reqHash }; // (from now on only a real test plan counts for it, never a skip)
+        if (!chain.paired) { // (a paired chain is already reviewed by two: its risky files need a plan, not another pair)
+          s.escalations[key] = { chain: id, at: Date.now() };
+          chain.risky = { ...chain.risky, [key]: Date.now() }; // (this chain's own record: closing it needs a paired review)
+          escalated.push(f.path);
+        }
       }
+      if (pairComplete && manifest.riskyKeys.includes(key)) { // (the pair read it in full: its paired review is done)
+        s.riskyReviews[key] = manifest.admittedAt;
+        delete s.escalations[key];
+      }
+      // A risky file is acknowledged only with the test plan the reviewers saw, still current for this task; a
+      // trading file may have a skip instead, unless GPT ever rated it risky for this task.
+      const planned = forThisTask(s.plans[key]) && manifest.plans[key] === sha(JSON.stringify(s.plans[key]));
+      const skipped = RISKY_FILE.test(key) && forThisTask(s.skips[key]) && !forThisTask(s.needsPlan[key]);
+      // (once a file was found risky for this task, it needs a plan however a later round rates it)
+      const needsPlan = manifest.riskyKeys.includes(key) || ratedRisky.includes(key) || (chain.riskyKeys || []).includes(key) || forThisTask(s.needsPlan[key]);
+      if (needsPlan && !planned && !skipped) unplanned.push(f.path);
       const record = s.changes[key];
       const sameRecord = record ? record.at === f.at && record.session === f.session : f.at === null;
       const reviewed = !taskChanged && !s.escalations[key];
-      if (reviewed && sameRecord && versionOf(root, f.path) === f.frozen) {
+      if (reviewed && sameRecord && (!needsPlan || planned || skipped) && versionOf(root, f.path) === f.frozen) {
         s.acks[key] = f.frozen;
         delete s.changes[key];
         acked.push(f.path);
@@ -394,7 +451,7 @@ function apply(root, manifest, result) {
     // (gaps are marked fixed only once the state holds their resolution: a failed write leaves them open, never hidden)
     const marked = fixedGaps.reduce((t, g) => gaps.composeMark(t, g, 'fixed') || t, gapText);
     if (fixedGaps.length && marked !== gapText) write(gapsFile, marked);
-    return { chain: id, added: Object.fromEntries(added.map(fid => [fid, chain.findings[fid]])), acked, pending, escalated, taskChanged };
+    return { chain: id, added: Object.fromEntries(added.map(fid => [fid, chain.findings[fid]])), acked, pending, escalated, unplanned, taskChanged };
   });
   return done.ok === false ? { refused: done.why } : done;
 }
@@ -406,29 +463,35 @@ function summary(a, applied) {
   if (applied.acked.length) lines.push(`acknowledged: ${applied.acked.join(', ')}`);
   if (applied.pending.length) lines.push(`still pending (changed during the review, rated risky, or the task changed): ${applied.pending.join(', ')}`);
   if (applied.escalated.length) lines.push(`rated risky by GPT, so they need a test plan and a paired review: ${applied.escalated.join(', ')}`);
+  if (applied.unplanned.length) lines.push(`not acknowledged until they have a current test plan (a trading file not rated risky may have a skip): ${applied.unplanned.join(', ')}`);
   if (applied.taskChanged) lines.push('the task file changed during the review, so nothing was acknowledged: run the review again');
   return lines.join('\n');
 }
 
 // A fresh review of this session's pending changes plus the named files (`files`, from the project root), against
-// `taskFile`. Returns { status, text, chain, bundle }: status DONE, REFUSED, GPT_UNAVAILABLE or NOT_DONE (the
-// bundle stays for the fallback reviewer).
+// `taskFile`; paired when a file is risky (or `risky`). Returns { status, text, chain, bundle }: status DONE,
+// REFUSED, GPT_UNAVAILABLE, PAIR_INCOMPLETE or NOT_DONE (the bundle stays for another run or the fallback reviewer).
 async function review(root, { session = null, files = [], taskFile = null, evidenceFile = null, full = false, risky = false } = {}) {
   const refused = why => ({ status: 'REFUSED', text: `REFUSED: ${why}` });
-  if (risky) return refused('a risky review is paired, which isn\'t built yet (step 3)');
   if (!taskFile) return refused('a review needs its task file');
   if (!session && !files.length) return refused('without a session id, name the files to review');
   const resolved = resolveNamed(root, files);
   if (resolved.why) return refused(resolved.why);
   const attempt = newAttempt();
-  const admitted = admit(root, { attempt, session, named: resolved.named });
+  const admitted = admit(root, { attempt, session, named: resolved.named, risky });
   if (admitted.refused) return refused(admitted.refused);
   const bundle = bundleDir(root, attempt);
   try {
     const frozen = freeze(root, { attempt, session, names: files, ...admitted, taskFile, evidenceFile, full });
     if (frozen.why) return refused(frozen.why);
-    const result = await run(root, frozen.manifest, frozen.prompt);
-    if (result.status !== 'OK') return { status: result.status, text: `${result.status}: ${result.why}`, bundle };
+    const result = frozen.manifest.paired
+      ? await pair.runPair({ prompt: frozen.prompt, materialize: findingsOf,
+        runOne: (prompt, options) => run(root, frozen.manifest, prompt, { ...options, effort: 'xhigh' }) })
+      : await run(root, frozen.manifest, frozen.prompt);
+    if (result.status !== 'OK') {
+      const unavailable = result.status === 'GPT_UNAVAILABLE' || !!result.unavailable; // (then the fallback reviewer takes the bundle)
+      return { status: result.status, unavailable, text: `${result.status}: ${result.why}`, bundle };
+    }
     const applied = apply(root, frozen.manifest, result);
     if (applied.refused) return { status: 'NOT_DONE', text: `NOT_DONE: ${applied.refused}`, bundle };
     return { status: 'DONE', chain: applied.chain, text: summary(result.answer, applied), bundle };
@@ -451,7 +514,8 @@ async function followup(root, { chain: id, responseFile, evidenceFile = null }) 
     const { chain } = admitted;
     const frozen = freeze(root, { attempt, session: chain.session, ...admitted, taskFile: chain.task.path, evidenceFile, response: textOf(response) });
     if (frozen.why) return refused(frozen.why);
-    const result = await run(root, frozen.manifest, frozen.prompt, { resume: chain.codexSession, history: historyOf(root, chain) });
+    // (a paired chain's follow-ups are one GPT at xhigh, resuming reviewer A)
+    const result = await run(root, frozen.manifest, frozen.prompt, { resume: chain.codexSession, history: historyOf(root, chain), effort: chain.paired ? 'xhigh' : 'high' });
     if (result.status !== 'OK') return { status: result.status, text: `${result.status}: ${result.why}`, bundle };
     const applied = apply(root, frozen.manifest, result);
     if (applied.refused) return { status: 'NOT_DONE', text: `NOT_DONE: ${applied.refused}`, bundle };

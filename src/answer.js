@@ -35,6 +35,10 @@ const SCHEMAS = {
     followups: list(object({ id: text, status: oneOf('RESOLVED', 'MAINTAIN', 'CONCEDE'), reason: text })),
     ...SHARED,
   }),
+  // a pair's cross-check: one mark for each of the other reviewer's findings
+  crosscheck: object({
+    marks: list(object({ id: text, mark: oneOf('CONFIRM', 'DISPUTE', 'SAME_AS'), evidence: text, same_as: { type: ['string', 'null'] } })),
+  }),
 };
 
 // The first place where a value doesn't fit a schema built above, or null. Codex enforces the schema for its
@@ -64,9 +68,10 @@ function mismatch(schema, value, where = 'answer') {
 // The reviewed file a finding's location names ("path", "path:12" or "path:12-30"), as a key; '-' is the task.
 const locationKey = location => (location === '-' ? '-' : pathKey(location.replace(/:\d+(-\d+)?$/, '')));
 
-// Reads an answer of `kind` ('review' or 'followup'). `asked` says what GPT was asked about: { rowIds (the
-// requirements to rate), linkIds (every requirement a finding may name), files (the reviewed paths), openIds
-// (follow-ups) }. Returns { answer, problems }: every problem found, for GPT's one repair.
+// Reads an answer of `kind` ('review', 'followup' or 'crosscheck'). `asked` says what GPT was asked about: { rowIds
+// (the requirements to rate), linkIds (every requirement a finding may name), files (the reviewed paths), openIds
+// (follow-ups) }, or for a cross-check { otherIds, ownIds }. Returns { answer, problems }: every problem found, for
+// GPT's one repair.
 function read(kind, answerText, asked) {
   let answer;
   try {
@@ -84,6 +89,14 @@ function read(kind, answerText, asked) {
     }
     for (const id of new Set(ids)) if (!expected.includes(id)) problems.push(`${what} ${id} wasn't asked about`);
   };
+  if (kind === 'crosscheck') {
+    exactlyOnce(answer.marks.map(m => m.id), asked.otherIds, 'finding');
+    for (const m of answer.marks) {
+      if (m.mark === 'SAME_AS' && !asked.ownIds.includes(m.same_as)) problems.push(`${m.id} is marked SAME_AS ${m.same_as}, which isn't one of your findings`);
+      if (m.mark === 'DISPUTE' && !m.evidence.trim()) problems.push(`${m.id} is disputed without evidence: give the concrete reason it can't happen`);
+    }
+    return { answer, problems };
+  }
   exactlyOnce(answer.requirements.map(r => r.id), asked.rowIds, 'requirement');
   if (kind === 'followup') exactlyOnce(answer.followups.map(f => f.id), asked.openIds, 'finding');
   const reviewed = asked.files.map(pathKey);
@@ -112,6 +125,7 @@ function render(answer) {
   for (const f of answer.findings) {
     lines.push(`[${f.severity}] ${f.label}${f.id ? ` ${f.id}` : ''}: ${f.title} (${f.location})`);
     lines.push(`  trigger: ${f.trigger}`, `  harm: ${f.harm}`, `  fix: ${f.fix}${f.test ? ` · test: ${f.test}` : ''}`);
+    if (f.agreement) lines.push(`  pair: ${f.agreement}`); // (a paired review: who found it, and any dispute's evidence)
   }
   for (const r of answer.requirements) lines.push(`${r.id} ${r.status.replace(/_/g, ' ')}: ${r.evidence}`);
   for (const p of answer.possibly_missing) lines.push(`possibly missing: ${p}`);

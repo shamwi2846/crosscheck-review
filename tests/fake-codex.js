@@ -8,7 +8,8 @@ const { spawn } = require('child_process');
 const args = process.argv.slice(2);
 const forever = () => setInterval(() => {}, 1000);
 const event = e => process.stdout.write(`${JSON.stringify(e)}\n`); // (Codex's --json events, as seen live)
-const sessionStarted = () => event({ type: 'thread.started', thread_id: '0123abcd-0000-4000-8000-00000000c0de' });
+let session = '0123abcd-0000-4000-8000-00000000c0de';
+const sessionStarted = () => event({ type: 'thread.started', thread_id: session });
 const startRole = (role, roleArgs, options) => spawn(process.execPath, [__filename, '--role', role, ...roleArgs], options);
 
 if (args[0] === '--role') {
@@ -36,8 +37,22 @@ if (args[0] === '--role') {
   const earlier = fs.existsSync(log) ? fs.readFileSync(log, 'utf8').split('\n').filter(Boolean).map(JSON.parse) : [];
   const index = earlier.filter(call => call.kind === kind).length;
   const answers = spec[kind] || [];
-  const answer = answers[Math.min(index, answers.length - 1)] || {};
+  let answer = answers[Math.min(index, answers.length - 1)] || {};
   const outFile = args[args.indexOf('-o') + 1];
+  // `byPrompt`: [{ match, answers }] picks the answers of the first group whose `match` the prompt contains, in the
+  // order of that group's calls, for calls whose order isn't fixed (a pair's two reviewers run at once)
+  const pick = prompt => {
+    const logged = fs.readFileSync(log, 'utf8').split('\n').filter(Boolean).map(JSON.parse);
+    let group = (spec.byPrompt || []).findIndex(g => prompt.includes(g.match));
+    if (group < 0 && args[1] === 'resume') { // (a repair goes on with the group of the session it resumes)
+      const last = logged.filter(c => c.session === args[args.length - 2]).pop();
+      group = last ? last.group : -1;
+    }
+    if (group < 0 || group === null) return { group: null };
+    const done = logged.filter(c => c.group === group).length;
+    const list = spec.byPrompt[group].answers;
+    return { group, answer: list[Math.min(done, list.length - 1)] };
+  };
 
   if (kind !== 'exec') {
     fs.appendFileSync(log, JSON.stringify({ kind, args }) + '\n');
@@ -48,7 +63,11 @@ if (args[0] === '--role') {
   let prompt = '';
   process.stdin.on('data', d => { prompt += d; });
   process.stdin.on('end', () => {
-    fs.appendFileSync(log, JSON.stringify({ kind, args, prompt }) + '\n'); // (with the prompt it was sent)
+    if (!fs.existsSync(log)) fs.writeFileSync(log, '');
+    const picked = pick(prompt);
+    if (picked.group !== null) answer = picked.answer;
+    if (answer.session) session = answer.session;
+    fs.appendFileSync(log, JSON.stringify({ kind, args, prompt, group: picked.group, session }) + '\n'); // (with the prompt it was sent)
     if (answer.hang) {
       // a tree that lives forever, under this launcher, which waits forever too
       startRole('tree', [answer.hang, 'ignore'], { stdio: 'ignore' });

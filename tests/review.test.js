@@ -162,10 +162,10 @@ test('changed requirements acknowledge nothing, and a risky rating stays escalat
   assert.ok(s.chains[r.chain]);
   assert.strictEqual(s.escalations[key('src/m.js')].chain, r.chain);
   const calls = execCalls().length;
-  const again = await review.review(root, { session: 'A', files: ['src/m.js'], taskFile });
-  assert.strictEqual(again.status, 'REFUSED');
-  assert.match(again.text, /paired review/);
-  assert.strictEqual(execCalls().length, calls);
+  const again = await review.review(root, { session: 'A', files: ['src/m.js'], taskFile }); // (escalated: now always a pair)
+  assert.strictEqual(again.status, 'PAIR_INCOMPLETE'); // (the stub has no answers for a pair)
+  const pairCalls = execCalls().slice(calls);
+  assert.ok(pairCalls.some(c => c.prompt.includes('reviewer A.')) && pairCalls.some(c => c.prompt.includes('reviewer B.')));
   s = stateOf(root);
   assert.ok(s.escalations[key('src/m.js')]);
   assert.ok(s.changes[key('src/m.js')]);
@@ -218,7 +218,7 @@ test('an answer still wrong after its one repair applies nothing and keeps its b
   assert.strictEqual(calls.length, 2);
   assert.deepStrictEqual(calls[1].args.slice(0, 2), ['exec', 'resume']);
   assert.ok(calls[1].args.includes('0123abcd-0000-4000-8000-00000000c0de'));
-  assert.deepStrictEqual(stateOf(root), { ...before, running: {}, applied: {} });
+  assert.deepStrictEqual(stateOf(root), { ...before, running: {}, applied: {}, plans: {}, skips: {}, needsPlan: {}, riskyReviews: {} });
   assert.strictEqual(fs.readFileSync(path.join(root, gaps.NAME), 'utf8'), '# Known gaps\n');
   const manifest = JSON.parse(fs.readFileSync(path.join(r.bundle, 'manifest.json'), 'utf8'));
   assert.deepStrictEqual(manifest.files[key('src/a.js')], { path: 'src/a.js', at: 7, session: 'A', baseline: null, frozen: sha('a1\n') });
