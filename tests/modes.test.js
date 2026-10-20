@@ -201,10 +201,12 @@ test('the plan gate accepts only the text reviewed, or a plan skipped with its r
   const P = '# Plan\n\nStep one: add the stop loss.\nStep two: test it.\n';
   const Q = '# Plan\n\nStep one: drop the stop loss.\n';
   fs.writeFileSync(file, P);
+  const taskA = review.sessionTask(root, 'A');
+  const plansNow = () => state.read(state.files.global()).data.plans || {};
   setSpec({ exec: [reviewAnswer()] });
   const mistyped = cli(root, ['plan', '--file', file, '--task', 'no-such-task.md']); // (a task named but missing: refused, never reviewed without it)
   assert.strictEqual(mistyped.status, 1, mistyped.stdout);
-  assert.deepStrictEqual([execCalls().length, (state.read(state.files.global()).data.plans || {})[hook.planHash(P)]], [0, undefined]);
+  assert.deepStrictEqual([execCalls().length, plansNow()[hook.planKey(P, taskA)]], [0, undefined]);
   const hold = fs.mkdtempSync(path.join(HOME, 't5-hold-'));
   const finding = { severity: 'MEDIUM', title: 'no rollback step', location: 't5-plan.md', trigger: 'a failed deploy', harm: 'lost data', failure: 'f', fix: 'add one', test: null, label: 'BUG', reqs: [] };
   setSpec({ byPrompt: [
@@ -224,22 +226,42 @@ test('the plan gate accepts only the text reviewed, or a plan skipped with its r
   const calls = execCalls();
   assert.ok(calls.some(c => c.prompt.includes('Cross-check (you are reviewer B)')), 'the pair cross-checked A\'s finding');
   for (const c of calls) isolated(c, { effort: 'xhigh' });
-  const plans = state.read(state.files.global()).data.plans;
-  assert.strictEqual(plans[hook.planHash(P)].verdict, 'ISSUES_FOUND');
-  assert.strictEqual(plans[hook.planHash(Q)], undefined, 'Q never gets P\'s review');
+  assert.strictEqual(plansNow()[hook.planKey(P, taskA)].verdict, 'ISSUES_FOUND');
+  assert.strictEqual(plansNow()[hook.planKey(Q, taskA)], undefined, 'Q never gets P\'s review');
   const exit = (text, session = 'A') => hook.handle('plan', { session_id: session, cwd: root, tool_name: 'ExitPlanMode', tool_input: { plan: text } });
   assert.deepStrictEqual([exit(P), exit(P.replace(/\n/g, '\r\n  '))], [null, null]);
   writeTask(state.files.task(root, 'B')); // (the same requirements, another task)
-  assert.match(denial(exit(P, 'B')), /another task/, 'a review counts for its own task only');
+  assert.match(denial(exit(P, 'B')), /no review for this session's task/, 'a review counts for its own task only');
+  const planB = path.join(HOME, 't5-plan-B.md');
+  fs.writeFileSync(planB, P);
+  assert.strictEqual(cli(root, ['plan', '--skip', '--why', 'B checked it', '--file', planB], 'B').status, 0);
+  assert.deepStrictEqual([exit(P, 'B'), exit(P)], [null, null], 'B\'s record of the same plan leaves A\'s in place');
+  assert.strictEqual(exit(P, 'no-task'), null, 'a session without a task takes the plan\'s review');
+  assert.match(denial(exit(Q, 'no-task')), /no review/);
   assert.match(denial(exit(Q)), /no review/);
   const n = execCalls().length;
   const skipped = cli(root, ['plan', '--skip', '--why', 'small revision accepted', '--file', file]);
   assert.strictEqual(skipped.status, 0, skipped.stdout);
-  assert.deepStrictEqual([exit(Q), execCalls().length, state.read(state.files.global()).data.plans[hook.planHash(Q)].skip], [null, n, 'small revision accepted']);
+  assert.deepStrictEqual([exit(Q), execCalls().length, plansNow()[hook.planKey(Q, taskA)].skip], [null, n, 'small revision accepted']);
   // a changed request makes the plan's review stale, until it is reviewed or skipped again
   writeTask(state.files.task(root, 'A'), 'R1. Every order keeps its stop loss.\nR2. And logs it.');
-  assert.match(denial(exit(P)), /earlier version of its requirements/);
+  assert.match(denial(exit(P)), /earlier version of the task's requirements/);
   fs.writeFileSync(file, P);
   assert.strictEqual(cli(root, ['plan', '--skip', '--why', 'it still holds with R2', '--file', file]).status, 0);
   assert.strictEqual(exit(P), null);
+  // requirements that change while GPT reviews the plan: nothing is recorded
+  const hold2 = fs.mkdtempSync(path.join(HOME, 't5-hold2-'));
+  setSpec({ exec: [{ hold: hold2, ...reviewAnswer([], { requirements: ['R1', 'R2'].map(id => ({ id, status: 'MET', evidence: 'it is there' })) }) }] });
+  fs.writeFileSync(file, Q);
+  const before = plansNow()[hook.planKey(Q, taskA)];
+  const again = spawn(process.execPath, [CLI, 'plan', '--file', file], { cwd: root, env: env('A'), stdio: ['ignore', 'pipe', 'ignore'] });
+  let said = '';
+  again.stdout.on('data', d => { said += d; });
+  const ended = new Promise(resolve => again.on('close', resolve));
+  await waitFor(path.join(hold2, 'started'));
+  writeTask(state.files.task(root, 'A'), 'R1. Every order keeps its stop loss.\nR2. And logs it.\nR3. And alerts.');
+  fs.writeFileSync(path.join(hold2, 'go'), '');
+  assert.strictEqual(await ended, 1, said);
+  assert.match(said, /requirements changed meanwhile/);
+  assert.deepStrictEqual(plansNow()[hook.planKey(Q, taskA)], before, 'the stale review was not recorded');
 });

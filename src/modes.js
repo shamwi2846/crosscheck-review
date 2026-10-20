@@ -9,7 +9,7 @@ const answer = require('./answer');
 const review = require('./review');
 const gaps = require('./gaps');
 const pair = require('./pair');
-const { planHash } = require('./hook');
+const { planKey } = require('./hook');
 
 const refused = text => ({ status: 'REFUSED', text: `REFUSED: ${text}` });
 const fence = text => { const ticks = '`'.repeat(Math.max(3, ...[...text.matchAll(/`+/g)].map(m => m[0].length + 1))); return `${ticks}\n${text}\n${ticks}`; };
@@ -116,13 +116,20 @@ async function plan(root, { file, taskFile, risky, skipWhy }) {
   if (!text.trim()) return refused(`the plan file ${file || '(none)'} doesn't exist or is empty`);
   // (bound to the task's requirements as they are now, so a changed request needs the plan reviewed again)
   const task = taskFile ? review.taskInfo(taskFile) : null;
-  const record = rec => state.update(state.files.global(), g => {
-    g.plans = { ...(g.plans || {}), [planHash(text)]: { at: Date.now(), task: task ? task.id : null, reqHash: task ? task.reqHash : null, ...rec } };
-  });
+  // (only while the requirements are still those the review saw; each task keeps its own record of a plan)
+  const record = rec => {
+    const saved = state.update(state.files.global(), g => {
+      const now = taskFile ? review.taskInfo(taskFile) : null;
+      if (task && (!now || now.reqHash !== task.reqHash)) return 'the task\'s requirements changed meanwhile, so nothing was recorded: run plan again';
+      g.plans = { ...(g.plans || {}), [planKey(text, task)]: { at: Date.now(), task: task ? task.id : null, reqHash: task ? task.reqHash : null, ...rec } };
+      return null;
+    });
+    return saved.ok ? saved.value : saved.why;
+  };
   if (skipWhy !== undefined) {
     if (!String(skipWhy).trim()) return refused('a plan skip needs its reason (--why "...")');
-    const saved = record({ skip: String(skipWhy).trim() });
-    return saved.ok ? { status: 'DONE', text: 'plan skip recorded: this exact plan text may leave plan mode' } : refused(saved.why);
+    const problem = record({ skip: String(skipWhy).trim() });
+    return problem ? refused(problem) : { status: 'DONE', text: 'plan skip recorded: this exact plan text may leave plan mode' };
   }
   const name = path.basename(file);
   const prompt = `${PLAN_RULES}\n\n## Task requirements\n${task ? task.requirements : 'No task file: rate no requirement.'}\n\n`
@@ -133,8 +140,8 @@ async function plan(root, { file, taskFile, risky, skipWhy }) {
     ? await pair.runPair({ prompt, materialize: review.findingsOf, runOne: (p, options) => review.run(root, manifest, p, { ...options, effort: 'xhigh' }) })
     : await review.run(root, manifest, prompt, { effort: 'high' });
   if (r.status !== 'OK') return failed({ ...r, bundle: manifest.dir });
-  const saved = record({ verdict: r.answer.verdict, bundle: manifest.dir });
-  if (!saved.ok) return refused(saved.why);
+  const problem = record({ verdict: r.answer.verdict, bundle: manifest.dir });
+  if (problem) return refused(problem);
   return { status: 'DONE', text: `${answer.render({ ...r.answer, findings: review.findingsOf(r.answer) })}\nrecorded: this exact plan text may leave plan mode; a revised plan needs another review, or a plan skip with its reason.` };
 }
 
