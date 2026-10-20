@@ -649,4 +649,4 @@ const bugsIn = s => Object.entries(s.chains).filter(([, c]) => !c.closed)
 const openBugs = root => bugsIn(stateOf(root));
 
 module.exports = { review, followup, close, fallback, pending, openChains, openBugs, bugsIn, DELETED,
-  RISKY_FILE, sessionTask, stateOf, withMaps, bytesOf, snapshot, snapFile, versionOf, asBaseline };
+  RISKY_FILE, sessionTask, stateOf, withMaps, bytesOf, textOf, snapshot, snapFile, versionOf, asBaseline };

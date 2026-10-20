@@ -180,10 +180,11 @@ function projectRoot(dir) {
 }
 
 // The same, found without git (for the hooks, which run on every edit): the nearest folder above `file` holding a
-// .git folder or file, by its real spelling, or null.
+// .git folder or file, as { root: its real spelling, the project's identity; dir: as `file` spells it, so a path
+// through a linked folder stays inside it }, or null.
 function repoOf(file) {
   for (let dir = path.dirname(path.resolve(file)); ; dir = path.dirname(dir)) {
-    if (fs.existsSync(path.join(dir, '.git'))) return fs.realpathSync.native(dir);
+    if (fs.existsSync(path.join(dir, '.git'))) return { root: fs.realpathSync.native(dir), dir };
     if (path.dirname(dir) === dir) return null;
   }
 }

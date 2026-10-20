@@ -74,6 +74,11 @@ test('a trading Write needs a current plan or skip, and its baseline is the orig
   fs.writeFileSync(path.join(root, 'src/EA.mq5'), 'shell change\n');
   assert.strictEqual(noGit(() => edit(root, 'src/EA.mq5', 'S')), null);
   assert.strictEqual(stateOf(root).changes[k].baseline, reviewed);
+  // through a linked project folder, the file keeps its project-relative key
+  const link = path.join(HOME, 't1 link');
+  fs.symlinkSync(root, link, 'junction');
+  assert.strictEqual(edit(link, 'README.md', 'S'), null);
+  assert.strictEqual(stateOf(root).changes[key('README.md')].path, 'README.md');
 });
 
 test('the desktop stays GPT\'s while its driver or worker lives, and Claude\'s tools need this session\'s window', async () => {
@@ -131,6 +136,9 @@ test('leaving plan mode needs a review or skip of the plan presented', () => {
   seedGlobal(g => { g.plans = { [hook.planHash(reviewed)]: { at: Date.now() } }; });
   const exit = input => hook.handle('plan', { session_id: 'S', cwd: HOME, tool_name: 'ExitPlanMode', tool_input: input });
   assert.strictEqual(exit({ planFilePath: file }), null);
+  const utf16 = path.join(HOME, 't4-plan-utf16.md'); // (as Windows PowerShell saves it)
+  fs.writeFileSync(utf16, Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(reviewed, 'utf16le')]));
+  assert.strictEqual(exit({ planFilePath: utf16 }), null);
   assert.strictEqual(exit({ plan: '  # Plan\r\n\r\nStep one.   Step two.' }), null);
   const changed = '# Plan\n\nStep one.\nStep three.\n';
   assert.match(denial(exit({ plan: changed, planFilePath: file })), /plan --file/);
@@ -174,12 +182,17 @@ test('session start reports the state, and its cleanup keeps what an open chain 
   };
   old('failed-followup', { chain: 'C1' });
   old('unused', { chain: null });
-  seed(root, s => { s.chains = { C1: { closed: false, rounds: ['round-1'], files: {}, findings: {} } }; });
+  old('crashed', { chain: null });
+  const dead = spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], { encoding: 'utf8' }).stdout;
+  seed(root, s => {
+    s.chains = { C1: { closed: false, rounds: ['round-1'], files: {}, findings: {} } };
+    s.running = { [key('src/y.js')]: { attempt: 'crashed', pid: Number(dead) } }; // (a review whose driver crashed)
+  });
   const start = () => hook.handle('session', { session_id: 'S', cwd: root, source: 'startup' }).hookSpecificOutput.additionalContext;
   seedGlobal(g => { g.off = true; });
   const before = fs.readFileSync(state.files.project(root), 'utf8');
   assert.match(start(), /OFF/);
-  assert.deepStrictEqual([fs.readdirSync(bundles).sort(), fs.readFileSync(state.files.project(root), 'utf8')], [['failed-followup', 'unused'], before]);
+  assert.deepStrictEqual([fs.readdirSync(bundles).sort(), fs.readFileSync(state.files.project(root), 'utf8')], [['crashed', 'failed-followup', 'unused'], before]);
   seedGlobal(g => { g.off = false; });
   assert.match(start(), /crosscheck is on: 0 unreviewed change\(s\), 1 open review chain\(s\), 0 open BUG/);
   assert.deepStrictEqual(fs.readdirSync(bundles), ['failed-followup']);

@@ -60,9 +60,10 @@ function edit(inp) {
   const given = ti.file_path || ti.notebook_path;
   if (!given) return null;
   const abs = path.resolve(inp.cwd || '.', given);
-  const root = state.repoOf(abs);
-  if (!root) return null; // (outside git: not tracked; session start points that out)
-  const rel = path.relative(root, abs).replace(/\\/g, '/');
+  const repo = state.repoOf(abs);
+  if (!repo) return null; // (outside git: not tracked; session start points that out)
+  const root = repo.root;
+  const rel = path.relative(repo.dir, abs).replace(/\\/g, '/');
   const key = state.pathKey(rel);
   const session = inp.session_id || null;
   const task = review.sessionTask(root, session);
@@ -156,7 +157,10 @@ function plan(inp) {
   if (g.off) return null;
   const ti = inp.tool_input || {};
   let text = typeof ti.plan === 'string' && ti.plan.trim() ? ti.plan : null;
-  if (!text && ti.planFilePath) text = String(review.bytesOf(path.resolve(inp.cwd || '.', ti.planFilePath)) || '').trim() || null;
+  if (!text && ti.planFilePath) {
+    const bytes = review.bytesOf(path.resolve(inp.cwd || '.', ti.planFilePath));
+    text = bytes && review.textOf(bytes).trim() ? review.textOf(bytes) : null; // (decoded as the plan command decodes it)
+  }
   if (!text) return { systemMessage: 'crosscheck: the hook got no plan text, so it could not check that the plan was reviewed.' };
   if ((g.plans || {})[planHash(text)]) return null;
   return deny(`This plan has no review. Save it to a file and run ${CLI} plan --file <plan.md> (add --risky for a risky feature) in the background, weigh GPT's points and revise the plan; for a plan too small to matter: ${CLI} plan --skip --why "..." --file <plan.md>. Then present the reviewed text.`);
@@ -244,7 +248,7 @@ function cleanBundles(root) {
   const done = state.update(state.files.project(root), data => {
     const s = review.withMaps(data);
     const kept = new Set([...Object.values(s.chains).filter(c => !c.closed).flatMap(c => c.rounds || []),
-      ...Object.values(s.running).map(r => r.attempt)]);
+      ...Object.values(s.running).filter(r => state.alive(r.pid)).map(r => r.attempt)]); // (a crashed review's mark keeps nothing)
     for (const name of fs.existsSync(dir) ? fs.readdirSync(dir) : []) {
       const bundle = path.join(dir, name);
       if (disposable(bundle, name, s, kept)) fs.rmSync(bundle, { recursive: true, force: true });
