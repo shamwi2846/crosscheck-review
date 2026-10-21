@@ -189,18 +189,20 @@ function diffOf(root, before, after) {
   }
 }
 
-// What GPT reads about one file: its diff from its baseline, or the whole file when there is no diff to show. In a
-// narrow round (past the round limit) an unchanged file shows no code, only that it didn't change. Returns
-// { text, whole }: whether the frozen file was shown in full.
-function material(root, f, { full = false, narrow = false } = {}) {
+// What GPT reads about one file: its diff from its baseline, or the whole file when there is no diff to show (a
+// binary change has none). In a follow-up, a file still at the very snapshot the chain's last round froze shows no
+// code, only that it didn't change: pasting it again was most of a follow-up's tokens, and its frozen copy stays
+// listed. Returns { text, whole }: whether the frozen file was shown in full.
+function material(root, f, { full = false, followup = false } = {}) {
   if (f.frozen === DELETED) {
     return { text: `### ${f.path} (deleted)\n${f.baseline ? `Its last version:\n${fence(snapText(root, f.baseline))}` : 'No earlier version is known.'}`, whole: false };
   }
+  if (followup && f.frozen === f.baseline) return { text: `### ${f.path} (unchanged since the last round)`, whole: false };
   const text = snapText(root, f.frozen);
   if (!f.baseline) return { text: `### ${f.path} (new file, whole)\n${fence(text)}`, whole: true };
   const diff = full ? '' : diffOf(root, f.baseline, f.frozen);
   if (diff) return { text: `### ${f.path} (diff from its last reviewed version)\n${fence(diff)}`, whole: false };
-  return narrow ? { text: `### ${f.path} (unchanged since the last round)`, whole: false } : { text: `### ${f.path} (whole file)\n${fence(text)}`, whole: true };
+  return { text: `### ${f.path} (whole file)\n${fence(text)}`, whole: true };
 }
 
 // The project files that mention a risky file's name, sorted: candidate callers from a plain search of their
@@ -235,6 +237,7 @@ verdict: ISSUES_FOUND when there is a finding or an unmet requirement, else NO_I
 
 const FOLLOWUP_RULES = `This is a follow-up round of your review of the project in the current folder (read-only). Claude answered the open findings below and changed code; the diff shows what changed since the last round.
 The reviewed files may change while you work: read a reviewed file only from its frozen copy, listed under "Frozen copies".
+A file shown as unchanged since the last round is the version that round reviewed: read its frozen copy whenever an open finding, a changed requirement or a caller needs it.
 Answer every open finding once, by id: RESOLVED (the code now fixes it), MAINTAIN (it still stands) or CONCEDE (it was never real), with your reason.
 Report a new finding only for a real problem in the changed lines or the code that calls them, of MEDIUM severity or above (a LOW one is recorded as a gap). Its fields and labels are those of a review: BUG when it can really happen in normal use and cause real harm (in money or trading code, an unlikely trigger with a big possible loss too), else GAP; location: one of the reviewed paths exactly, optionally with :line or :line-line, or "-" for the task as a whole; test required for CRITICAL and HIGH.
 Rate only the requirements under "Changed requirements" (none: no rows). A finding may name any requirement of the task.
@@ -267,7 +270,7 @@ function freeze(root, { attempt, session, names = [], files, admittedAt, rev, ta
       const head = git(root, ['show', `HEAD:${f.path}`]);
       f.baseline = head.status === 0 ? snapshot(root, head.stdout) : null;
     }
-    const shown = material(root, f, { full, narrow });
+    const shown = material(root, f, { full, followup: !!chain });
     code.push(shown.text);
     // (a paired review reads a risky file in full, beside its diff)
     const addWhole = paired && riskyKeys.includes(key) && f.frozen !== DELETED && !shown.whole;
