@@ -271,3 +271,12 @@ Findings left unfixed on purpose. Entries are never deleted, only marked fixed.
 - Fix: -
 - Log: recorded by hand
 - Why skipped: GPT's narrow-round prompt itself says 'the round limit is reached', so the plain echo is what is caught; CONCEDE is defined as 'never real' and Claude verifies every finding; reading every phrasing is what DESIGN.md section 14 fact 7 rules out.
+
+## G31 · fixed · 2026-10-21 · LOW
+- Task: Split the two slowest test files so the suite runs faster
+- Where: -
+- Problem: F1: Timing evidence does not establish balance or speedup
+- Trigger: Validating R1 against the supplied 67-second full-suite result.
+- Fix: Record comparable baseline and split-suite wall times, plus the four test-file durations.
+- Log: 20261021111245-b82645
+- Why skipped: labelled GAP by the reviewer; harm: The requested performance improvement remains unverified.
