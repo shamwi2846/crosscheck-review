@@ -320,6 +320,7 @@ Each real bug found later gets one regression test, and there are no tests for a
 19. In PowerShell, `git commit -F -` with a here-string doesn't read stdin. Write the message to a file and use `-F <file>`.
 20. A relative path must be resolved from the project's root, not the shell's current folder (it once pointed reviews at the wrong project). An ambiguous or missing path stops the call.
 21. Writing `KNOWN_GAPS.md` in place, or closing a chain before its gap entries are saved, could lose entries. Write atomically, and record the gaps before closing.
+22. Codex attaches the user's `$CODEX_HOME/AGENTS.md` to every run, isolated ones included: `--ignore-user-config` skips only `config.toml`. `-c project_doc_max_bytes=0` doesn't stop it (that covers a project's own files), and `-c instructions=""` must never be used: it keeps AGENTS.md and replaces Codex's own base instructions instead (21,835 characters became 42, measured on Codex 0.162.1). The user's file holds only the MT5 test-PC block, so reviews keep it.
 
 ## 15. The rules Claude follows (draft of `RULES.md`, imported by the personal CLAUDE.md)
 
