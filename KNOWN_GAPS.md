@@ -101,7 +101,7 @@ Findings left unfixed on purpose. Entries are never deleted, only marked fixed.
 - Log: 20261021011209-ea5a60
 - Why skipped: pair: both
 
-## G12 · open · 2026-10-21 · LOW
+## G12 · fixed · 2026-10-21 · LOW
 - Task: Fix the final audit's bugs, and stop crosscheck's own gap entries needing another review
 - Where: KNOWN_GAPS.md:59-84
 - Problem: F6: The required F6 gap disposition is absent
@@ -137,7 +137,7 @@ Findings left unfixed on purpose. Entries are never deleted, only marked fixed.
 - Log: 20261021014906-8a03cf
 - Why skipped: pair: both
 
-## G16 · open · 2026-10-21 · LOW
+## G16 · fixed · 2026-10-21 · LOW
 - Task: Fix the final audit's bugs, and stop crosscheck's own gap entries needing another review
 - Where: -
 - Problem: F5: The required planless-exit gap disposition is still absent
@@ -191,7 +191,7 @@ Findings left unfixed on purpose. Entries are never deleted, only marked fixed.
 - Log: 20261021020028-4b4180
 - Why skipped: RULES.md says what Claude does and DESIGN.md says how crosscheck does it (section 15 keeps driver details out of the rules), so these behaviors are described in DESIGN.md only
 
-## G22 · open · 2026-10-21 · MEDIUM
+## G22 · fixed · 2026-10-21 · MEDIUM
 - Task: Fix the final audit's bugs, and stop crosscheck's own gap entries needing another review
 - Where: -
 - Problem: F14: R8 is PARTIAL
@@ -253,3 +253,12 @@ Findings left unfixed on purpose. Entries are never deleted, only marked fixed.
 - Fix: Assign computer runs to a Windows job before their children start, and use its process membership for cleanup and desktop ownership. — test: Between two samples, launch a helper that immediately starts a persistent worker and exits, without waiting for discovery. Verify normal completion stops the worker and forced driver termination never permits desktop access while the worker remains alive.
 - Log: 20261021032842-a41832
 - Why skipped: the leftover-process case recorded as G13 by the owner's decision on 2026-10-21 (a process that GPT's shell starts through a helper exiting within one 2-second watch can outlive a computer run; closing it needs admin-only process events or a kill-on-close job object)
+
+## G29 · open · 2026-10-21 · LOW
+- Task: -
+- Where: src/codex.js:224-225
+- Problem: A computer run's 2-second process check runs PowerShell synchronously, holding the driver's event loop for about 0.5-2 s per check (up to its 15 s timeout if a scan stalls)
+- Trigger: any computer run on Windows
+- Fix: an asynchronous scan, or a longer interval, if a delay is ever measured to matter
+- Log: CodeRabbit PR 14
+- Why skipped: harmless as it is: Codex's output is buffered in its pipes and the timeout and grace timers only fire that much later; keeping it synchronous also means no scan result can arrive after the run settles (CodeRabbit nitpick on PR 14)

@@ -40,7 +40,8 @@ function project(name, files) {
   }
   const taskFile = path.join(HOME, `${name}-task.md`);
   fs.writeFileSync(taskFile, `# ${name}\n\n## Requirements\nR1. Adds numbers.\nR2. Keeps the sum.\n`);
-  return { root, taskFile };
+  // (its real spelling, as git reports it: a short 8.3 temp path would give the commit hook another state folder)
+  return { root: fs.realpathSync.native(root), taskFile };
 }
 const finding = (title, location, over = {}) => ({ severity: 'MEDIUM', title, location, trigger: 't', harm: 'h', failure: 'f', fix: 'x', test: null, label: 'BUG', reqs: [], ...over });
 const met = ids => ids.map(id => ({ id, status: 'MET', evidence: 'src/a.js:1' }));
