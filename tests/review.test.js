@@ -19,6 +19,7 @@ const STATE = path.join(__dirname, '..', 'src', 'state.js');
 const state = require(STATE);
 const review = require('../src/review');
 const gaps = require('../src/gaps');
+const hook = require('../src/hook');
 
 const sha = text => crypto.createHash('sha256').update(text).digest('hex');
 const setSpec = spec => { fs.writeFileSync(SPEC, JSON.stringify(spec)); fs.rmSync(LOG, { force: true }); };
@@ -268,6 +269,28 @@ test('review instructions require proof of the claimed failure', async () => {
     assert.match(prompt, /- BUG: it can really happen in normal use \(a real caller, input or user action\)/);
     assert.doesNotMatch(prompt, /not instructions/);
   }
+});
+
+test('an automatic gap write cannot acknowledge a shell edit made during the review', async () => {
+  const before = '# Known gaps\n\nFindings left unfixed on purpose. Entries are never deleted, only marked fixed.\n\n## G1 · open · 2026-10-01 · LOW\n- Where: src/old.js\n- Problem: older\n';
+  const { root, taskFile } = project('t8', { 'src/q.js': 'q0\n', [gaps.NAME]: before });
+  seed(root, s => { s.acks = { [key(gaps.NAME)]: sha(before) }; });
+  fs.writeFileSync(path.join(root, 'src/q.js'), 'q1\n');
+  const hold = fs.mkdtempSync(path.join(HOME, 't8-hold-'));
+  setSpec({ exec: [{ hold, text: answerOf({ verdict: 'ISSUES_FOUND', findings: [{ ...gapFinding, location: 'src/q.js:1' }] }) }] });
+  const running = review.review(root, { files: ['src/q.js'], taskFile });
+  await waitFor(path.join(hold, 'started'));
+  const edited = '# Known gaps\n\nFindings left unfixed on purpose. Entries are never deleted, only marked fixed.\n'; // (G1 removed by a shell edit: no hook record)
+  fs.writeFileSync(path.join(root, gaps.NAME), edited);
+  fs.writeFileSync(path.join(hold, 'go'), '');
+  const r = await running;
+  assert.strictEqual(r.status, 'DONE', r.text);
+  const text = fs.readFileSync(path.join(root, gaps.NAME), 'utf8');
+  assert.ok(text.startsWith(edited) && /- Problem: F1: odd name/.test(text) && !/older/.test(text), 'the shell edit stays, with the new entry added');
+  const s = stateOf(root);
+  assert.deepStrictEqual([s.acks[key(gaps.NAME)], s.acks[key('src/q.js')]], [sha(before), sha('q1\n')], 'the gaps file keeps its last reviewed version');
+  const denied = hook.handle('bash', { tool_input: { command: 'git commit -m x' }, cwd: root, session_id: 'A' });
+  assert.match(denied.hookSpecificOutput.permissionDecisionReason, /differ from their last reviewed version: KNOWN_GAPS\.md/);
 });
 
 test.after(() => fs.rmSync(HOME, { recursive: true, force: true }));

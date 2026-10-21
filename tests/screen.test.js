@@ -99,6 +99,40 @@ test('a GPT worker that outlives its killed driver keeps the desktop until it en
   assert.strictEqual(freed.status, 0, freed.stdout);
 });
 
+test('a worker started late by a helper keeps the desktop after its driver and its helper are gone', { skip: process.platform !== 'win32' && 'the process notes are Windows-only', timeout: 120000 }, async () => {
+  fresh();
+  const a = project('t7 a');
+  const b = project('t7 b');
+  const gate = fs.mkdtempSync(path.join(HOME, 't7-late-'));
+  const pidFile = path.join(gate, 'worker.pid');
+  const idIn = file => (fs.existsSync(file) ? Number(fs.readFileSync(file, 'utf8')) : null);
+  setSpec({ ...listings(), exec: [{ late: { pidFile, gate }, text: answer }] });
+  const run = started(a, ['computer', '--task', 'Inspect the application'], 'A');
+  const workers = () => ((shared() || {}).desktop || {}).workers || [];
+  try {
+    await until(() => idIn(`${pidFile}.helper`) && workers().includes(idIn(`${pidFile}.helper`)), 'the helper in the desktop record');
+    fs.writeFileSync(path.join(gate, 'go'), '');
+    await until(() => idIn(pidFile) && workers().includes(idIn(pidFile)), 'the late worker in the desktop record');
+    const worker = idIn(pidFile);
+    spawnSync('taskkill', ['/PID', String(run.child.pid), '/F'], { windowsHide: true }); // (forced: the driver's own cleanup never runs)
+    await run.closed;
+    fs.writeFileSync(path.join(gate, 'done'), ''); // (its launcher answers and exits; its helper is gone already)
+    await until(() => workers().filter(pid => pid !== worker).every(pid => !state.mayRun(pid)), 'the end of everything but the worker');
+    assert.ok(state.mayRun(worker), 'the late worker still runs');
+    assert.strictEqual(require('../src/hook').handle('screen', { session_id: 'B' }).hookSpecificOutput.permissionDecision, 'deny', 'the screen hook refuses');
+    assert.match(cli(b, ['computer', '--task', 'Inspect the application'], 'B').stdout, /BUSY/);
+    assert.strictEqual(cli(b, ['allow-screen', '--why', 'Inspect the application'], 'B').status, 1);
+    assert.strictEqual(execCalls().length, 1);
+    spawnSync('taskkill', ['/PID', String(worker), '/F'], { windowsHide: true });
+    await until(() => !state.mayRun(worker), 'the worker\'s end');
+    const freed = cli(b, ['allow-screen', '--why', 'GPT is done'], 'B');
+    assert.strictEqual(freed.status, 0, freed.stdout);
+  } finally {
+    fs.writeFileSync(path.join(gate, 'done'), '');
+    for (const pid of [idIn(`${pidFile}.helper`), idIn(pidFile), ...workers()]) if (pid && state.mayRun(pid)) spawnSync('taskkill', ['/PID', String(pid), '/F'], { windowsHide: true });
+  }
+});
+
 test('a Claude screen window keeps out GPT and other Claude sessions', () => {
   fresh();
   const a = project('t3 a');

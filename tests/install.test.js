@@ -211,6 +211,62 @@ test('a failed switch on a full disk puts back everything written, and input tha
   assert.strictEqual(await installer.confirm('Install? ', Readable.from([])), false);
 });
 
+test('install keeps the config changes made while it asked, a removed verification and a value it would set included, and writes under the config lock', async () => {
+  const p = profile('t7', { settings: oldSettings(), claudeMd: 'old rules\n', agent: 'old agent\n' });
+  fs.writeFileSync(state.files.config(), JSON.stringify({ model: 'gpt-old', custom: { a: 1, b: 2 }, codexVerified: '0.162.1' }));
+  const docs = { command: 'node', args: ['C:/docs/server.mjs'], tools: ['mql5_chm_status'] };
+  const ask = async () => { // (meanwhile doctor took the verification away, the docs server was set by hand, and more changed)
+    const { codexVerified, ...rest } = json(state.files.config());
+    fs.writeFileSync(state.files.config(), JSON.stringify({ ...rest, model: 'gpt-new', custom: { a: 1, b: 3 }, added: true, mql5Docs: docs }));
+    return true;
+  };
+  const renameSync = fs.renameSync;
+  let lockedAtWrite = null;
+  fs.renameSync = (from, to) => { if (to === state.files.config()) lockedAtWrite = fs.existsSync(`${state.files.config()}.lock`); return renameSync(from, to); };
+  let r;
+  try {
+    r = await installer.install({ checks: false, ask, say: () => {} });
+  } finally {
+    fs.renameSync = renameSync;
+  }
+  assert.strictEqual(r.code, 0, r.text);
+  const written = json(state.files.config());
+  assert.deepStrictEqual([written.model, written.custom, written.added, written.mql5Docs, 'codexVerified' in written], ['gpt-new', { a: 1, b: 3 }, true, docs, false]);
+  assert.strictEqual(lockedAtWrite, true, 'no locked update (doctor\'s) can slip in between the read and the write');
+  assert.ok(!fs.existsSync(`${state.files.config()}.lock`), 'and the lock is released');
+  assert.ok(fs.existsSync(path.join(p.code, 'hook.js')) && commands(json(p.settings)).some(c => c.includes('crosscheck/hook.js')), 'installed as usual');
+});
+
+test('install writes nothing when config.json becomes unreadable while it asks', async () => {
+  const p = profile('t8', { settings: oldSettings(), claudeMd: 'old rules\n', agent: 'old agent\n' });
+  fs.writeFileSync(state.files.config(), JSON.stringify({ model: 'gpt-test' }));
+  assert.strictEqual((await installer.install(quiet)).code, 0); // (an installed copy, which the refused update must leave alone)
+  let armed = false;
+  let snapshot = null;
+  const ask = async () => {
+    fs.writeFileSync(state.files.config(), '{"model": "gpt-te');
+    snapshot = [tree(p.dir), tree(state.HOME)];
+    armed = true;
+    return true;
+  };
+  const mutations = [];
+  const names = ['writeFileSync', 'appendFileSync', 'renameSync', 'rmSync', 'unlinkSync', 'linkSync', 'copyFileSync', 'mkdirSync'];
+  const real = Object.fromEntries(names.map(n => [n, fs[n]]));
+  const lock = target => String(target) === state.HOME || String(target).startsWith(`${state.files.config()}.lock`); // (taken and given back)
+  for (const n of names) fs[n] = (...args) => { if (armed && !lock(args[0])) mutations.push(n); return real[n](...args); };
+  let r;
+  try {
+    r = await installer.install({ checks: false, ask, say: () => {} });
+  } finally {
+    Object.assign(fs, real);
+  }
+  assert.strictEqual(r.code, 1, r.text);
+  assert.match(r.text, /config\.json can't be read/);
+  assert.deepStrictEqual(mutations, [], 'nothing is written after the answer');
+  assert.deepStrictEqual([tree(p.dir), tree(state.HOME)], snapshot);
+  fs.writeFileSync(state.files.config(), JSON.stringify({ model: 'gpt-test' }));
+});
+
 test('personal details stay in personal.md, never in the repository or the shared files, and no backup is made', async () => {
   const id = crypto.randomBytes(4).toString('hex');
   const markers = [`PC-${id}`, `${id}@example.com`, `C:\\Users\\u${id}`, `MT5 standing confirmation ${id}`];

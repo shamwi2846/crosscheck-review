@@ -16,8 +16,20 @@ if (args[0] === '--role') {
   // Helper processes for the process-tree cases, not calls. `tree`: a process and its child that live forever,
   // writing [parent, own, child] ids. `native`: like the native Codex under its launcher, it starts a session,
   // starts a detached tree that keeps the output pipes open, answers, reports more after 2 s and exits after 6 s.
+  // `helper`: started by Codex after its first output; once the test writes `go` in its gate folder, it starts a
+  // detached worker that keeps the output pipes open, writes the worker's id, and exits (its own id: <pidFile>.helper).
   const [, role, pidFile, stdio, outFile, text] = args;
   if (role === 'idle') forever();
+  if (role === 'helper') {
+    const gate = stdio;
+    fs.writeFileSync(`${pidFile}.helper`, String(process.pid));
+    const wait = setInterval(() => {
+      if (!fs.existsSync(path.join(gate, 'go'))) return;
+      clearInterval(wait);
+      fs.writeFileSync(pidFile, String(startRole('idle', [], { stdio: 'inherit', detached: true }).pid));
+      process.exit(0);
+    }, 20);
+  }
   if (role === 'tree') {
     const child = startRole('idle', [], { stdio });
     fs.writeFileSync(pidFile, JSON.stringify([process.ppid, process.pid, child.pid]));
@@ -80,6 +92,17 @@ if (args[0] === '--role') {
       // a tree that lives forever, under this launcher, which waits forever too
       startRole('tree', [answer.hang, 'ignore'], { stdio: 'ignore' });
       forever();
+    } else if (answer.late) {
+      // like Codex starting a helper after its first output; it answers and exits once the test writes `done`
+      sessionStarted();
+      startRole('helper', [answer.late.pidFile, answer.late.gate], { stdio: 'inherit' });
+      const wait = setInterval(() => {
+        if (!fs.existsSync(path.join(answer.late.gate, 'done'))) return;
+        clearInterval(wait);
+        fs.writeFileSync(outFile, answer.text || 'answer');
+        event({ type: 'turn.completed' });
+        process.exit(0);
+      }, 20);
     } else if (answer.orphan) {
       // like Codex's launcher: it runs the native process and exits when that exits, leaving the tree behind
       const native = startRole('native', [answer.orphan, 'inherit', outFile, answer.text || 'answer'], { stdio: 'inherit' });
