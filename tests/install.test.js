@@ -285,4 +285,39 @@ test('personal details stay in personal.md, never in the repository or the share
   assert.strictEqual(spawnSync('git', ['status', '--porcelain'], { cwd: REPO, encoding: 'utf8' }).stdout, repoBefore);
 });
 
+test('install preserves an imported CLAUDE.md including personal edits made while it asks', async () => {
+  const p = profile('t7', { settings: oldSettings() });
+  const importLine = `@${path.join(p.code, 'RULES.md').replace(/\\/g, '/')}`;
+  const older = '## MT5 standing confirmation\nask, then pass the old flag\n';
+  fs.writeFileSync(path.join(state.HOME, 'personal.md'), older);
+  fs.writeFileSync(p.claudeMd, `${importLine}\r\n\r\n## MT5 test PC\r\ncompile and test without asking\r\n`); // (newer, changed in CLAUDE.md itself)
+  let saved = null;
+  const ask = async () => { // (and changed again while install asks)
+    saved = `${importLine}\n\n## MT5 test PC\ncompile and test without asking; never trade outside the tester\n`;
+    fs.writeFileSync(p.claudeMd, saved);
+    return true;
+  };
+  assert.strictEqual((await installer.install({ ...quiet, yes: false, ask })).code, 0);
+  assert.strictEqual(read(p.claudeMd), saved, 'CLAUDE.md is kept as it was when install wrote');
+  assert.strictEqual(read(path.join(state.HOME, 'personal.md')), older, 'personal.md is not touched');
+});
+
+test('an imported CLAUDE.md saved while install writes its other files keeps that save', async () => {
+  const p = profile('t8', { settings: oldSettings() });
+  const importLine = `@${path.join(p.code, 'RULES.md').replace(/\\/g, '/')}`;
+  fs.writeFileSync(p.claudeMd, `${importLine}\n\n## MT5 test PC\nbefore\n`);
+  const late = `${importLine}\n\n## MT5 test PC\nsaved by another session while install wrote\n`;
+  const realRename = fs.renameSync;
+  fs.renameSync = (from, to) => { // (the save lands as install puts its first file of the code in place)
+    if (to.startsWith(p.code) && read(p.claudeMd) !== late) fs.writeFileSync(p.claudeMd, late);
+    return realRename(from, to);
+  };
+  try {
+    assert.strictEqual((await installer.install(quiet)).code, 0);
+  } finally {
+    fs.renameSync = realRename;
+  }
+  assert.strictEqual(read(p.claudeMd), late);
+});
+
 test.after(() => fs.rmSync(HOME, { recursive: true, force: true }));

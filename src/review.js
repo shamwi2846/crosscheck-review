@@ -121,7 +121,8 @@ const asBaseline = version => (version === DELETED ? null : version); // (a miss
 
 // Reserves an attempt's files in one state transaction, choosing them from the same state the reservation is
 // written to. A fresh review takes this session's pending changes plus the named paths, and is paired when any of
-// them is risky: a trading file, a file with an escalation, or all of them when the caller asks (`risky`). A
+// them is risky: a trading file, a file with an escalation, or what the caller marks (`risky`: the named paths, or
+// all of them when none is named). A
 // follow-up (`chain`) takes the chain's files, with their last reviewed versions as baselines; a chain that isn't
 // paired leaves out escalated files, which wait for their own paired review. The test plans the files have now are
 // copied in, so the answer can only count the plans the reviewers saw. Returns { files, admittedAt, rev, chain,
@@ -148,8 +149,10 @@ function admit(root, { attempt, session, named = [], chain = null, risky = false
     if (!keys.length) return { refused: chain ? 'every file of the chain is escalated: each needs its own paired review first' : 'nothing to review: this session has no pending changes and no file was named' };
     const busy = keys.filter(k => s.running[k]);
     if (busy.length) return { refused: `already in a running review: ${list(busy)}` };
-    // (a follow-up's risky files: those of the chain's reviews and those GPT rated risky in the chain since)
-    const riskyKeys = c ? keys.filter(k => (c.riskyKeys || []).includes(k) || (c.risky || {})[k]) : keys.filter(k => risky || RISKY_FILE.test(k) || s.escalations[k]);
+    // (a follow-up's risky files: those of the chain's reviews and those GPT rated risky in the chain since; `risky`
+    // marks the named files, or all of them when none is named, so docs and tests that come along stay normal)
+    const marked = k => risky && (!named.length || named.some(n => n.key === k));
+    const riskyKeys = c ? keys.filter(k => (c.riskyKeys || []).includes(k) || (c.risky || {})[k]) : keys.filter(k => marked(k) || RISKY_FILE.test(k) || s.escalations[k]);
     for (const key of keys) {
       const change = s.changes[key];
       // (without a change record, the baseline is the last reviewed version, if any; freeze falls back to HEAD)
@@ -231,7 +234,7 @@ Before reporting a finding, re-read the lines and confirm its trigger can really
 Each finding: severity; title; location: one of the reviewed paths below exactly, optionally with :line or :line-line, or "-" for the task as a whole; trigger; harm; failure; fix: the smallest change that works, with no option, layer or config the problem doesn't need; test (required for CRITICAL and HIGH, else null); label; reqs: the requirement ids it shows unmet.
 Rate every requirement once: MET (with evidence as path:line), PARTIAL, NOT_MET, or NOT_IN_THIS_CHANGE.
 possibly_missing: requirements the work clearly needs that the list lacks (suggestions only).
-class: none (no behavior change), normal, or risky (money and payments, deleting or migrating data, security, anything that can't be undone; in trading code orders, lots, SL/TP, risk, EA inputs and .set presets; or code risky code uses), with the files it applies to and why.
+class: none (no behavior change), normal, or risky (money and payments, deleting or migrating data, security, anything that can't be undone; in trading code orders, lots, SL/TP, risk, EA inputs and .set presets; or code risky code uses), with the files it applies to and why. List a file as risky only when its own change can cause that harm: a test, doc or config file is not risky just because it sits next to risky code.
 coverage: one line on what you checked, what doesn't apply (n/a) and what you didn't examine.
 verdict: ISSUES_FOUND when there is a finding or an unmet requirement, else NO_ISSUES.`;
 
@@ -241,7 +244,7 @@ A file shown as unchanged since the last round is the version that round reviewe
 Answer every open finding once, by id: RESOLVED (the code now fixes it), MAINTAIN (it still stands) or CONCEDE (it was never real), with your reason.
 Report a new finding only for a real problem in the changed lines or the code that calls them, of MEDIUM severity or above (a LOW one is recorded as a gap). Its fields and labels are those of a review: BUG when it can really happen in normal use and cause real harm (in money or trading code, an unlikely trigger with a big possible loss too), else GAP; location: one of the reviewed paths exactly, optionally with :line or :line-line, or "-" for the task as a whole; test required for CRITICAL and HIGH.
 Rate only the requirements under "Changed requirements" (none: no rows). A finding may name any requirement of the task.
-class: none, normal or risky for the changed code, with its files and why. coverage: one line.
+class: none, normal or risky for the changed code, with its files (only those whose own change can cause the harm) and why. coverage: one line.
 verdict: ISSUES_REMAIN when a finding is maintained, a new finding is reported or a rated requirement is unmet, else RESOLVED.`;
 const NARROW = `
 The round limit is reached, so this round checks only the fixed lines. Report no unrelated finding, but do report any bug that a fix itself caused, with its real severity and label.`;
@@ -311,7 +314,7 @@ function freeze(root, { attempt, session, names = [], files, admittedAt, rev, ta
   const manifest = { attempt, kind: chain ? 'followup' : 'review', root, session, names, admittedAt, files, chain: chain ? chain.id : null, rev,
     openIds: chain ? Object.keys(chain.findings).filter(id => chain.findings[id].status === 'open') : [],
     paired, riskyKeys, wholeKeys, plans: Object.fromEntries(Object.entries(current).map(([key, p]) => [key, sha(JSON.stringify(p))])),
-    task: { path: taskFile, id: taskId, title: task.title, sha: sha(taskBytes), reqHash: task.reqHash, rowIds, linkIds: task.ids, reqs: task.reqs } };
+    task: { path: taskFile, id: taskId, title: task.title, reqHash: task.reqHash, rowIds, linkIds: task.ids, reqs: task.reqs } };
   fs.mkdirSync(bundleDir(root, attempt), { recursive: true });
   fs.writeFileSync(path.join(bundleDir(root, attempt), 'manifest.json'), JSON.stringify(manifest, null, 2));
   fs.writeFileSync(path.join(bundleDir(root, attempt), 'prompt.md'), prompt);
@@ -437,8 +440,10 @@ function apply(root, manifest, result) {
       added.push(`F${n}`);
     }
     const newGaps = added.filter(fid => chain.findings[fid].label === 'GAP');
+    // (GPT read only the task's Requirements, so only a change there voids the round; a Notes edit made while it ran doesn't)
     const taskBytes = bytesOf(manifest.task.path);
-    const taskChanged = taskBytes === null || sha(taskBytes) !== manifest.task.sha;
+    const taskNow = taskBytes === null ? null : taskOf(textOf(taskBytes));
+    const taskChanged = !taskNow || taskNow.reqHash !== manifest.task.reqHash;
     const ratedRisky = result.answer.class.level === 'risky' ? result.answer.class.files.map(state.pathKey) : [];
     const { id: taskId, reqHash } = manifest.task;
     const forThisTask = r => !!r && r.task === taskId && r.reqHash === reqHash;
@@ -531,7 +536,7 @@ function summary(a, applied) {
   if (applied.pending.length) lines.push(`still pending (changed during the review, rated risky, or the task changed): ${applied.pending.join(', ')}`);
   if (applied.escalated.length) lines.push(`rated risky by GPT, or risky without a completed pair, so they need a test plan and a paired review: ${applied.escalated.join(', ')}`);
   if (applied.unplanned.length) lines.push(`not acknowledged until they have a current test plan (a trading file not rated risky may have a skip): ${applied.unplanned.join(', ')}`);
-  if (applied.taskChanged) lines.push('the task file changed during the review, so nothing was acknowledged: run the review again');
+  if (applied.taskChanged) lines.push('the task\'s requirements changed during the review, so nothing was acknowledged: run the review again');
   return lines.join('\n');
 }
 
