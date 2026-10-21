@@ -262,3 +262,12 @@ Findings left unfixed on purpose. Entries are never deleted, only marked fixed.
 - Fix: an asynchronous scan, or a longer interval, if a delay is ever measured to matter
 - Log: CodeRabbit PR 14
 - Why skipped: harmless as it is: Codex's output is buffered in its pipes and the timeout and grace timers only fire that much later; keeping it synchronous also means no scan result can arrive after the run settles (CodeRabbit nitpick on PR 14)
+
+## G30 · open · 2026-10-21 · LOW
+- Task: -
+- Where: src/answer.js:89
+- Problem: The round-limit check catches only plain wordings (round limit, the limit of three rounds, the limit was reached after three rounds); a concession worded otherwise, such as 'no further follow-up is allowed after three rounds', passes (CodeRabbit on PR 14).
+- Trigger: -
+- Fix: -
+- Log: recorded by hand
+- Why skipped: GPT's narrow-round prompt itself says 'the round limit is reached', so the plain echo is what is caught; CONCEDE is defined as 'never real' and Claude verifies every finding; reading every phrasing is what DESIGN.md section 14 fact 7 rules out.
