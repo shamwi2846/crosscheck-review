@@ -105,12 +105,11 @@ test('a failed cross-check applies nothing, and a fallback answer cannot certify
   assert.match(closing.text, /src\/pay\.mqh was rated risky in this chain/);
 });
 
-test('a fallback chain keeps its trading file risky: a follow-up rated normal still needs its plan, at xhigh', async () => {
+test('a fallback chain keeps its trading file risky: its own pair comes first, and a follow-up rated normal then still needs its plan, at xhigh', async () => {
   const p = project('t1b', { 'src/EA.mq5': 'e0\n' });
   write(p.root, 'src/EA.mq5', 'e1\n');
   seed(p.root, s => { s.changes = { [key('src/EA.mq5')]: pending('src/EA.mq5') }; });
-  // (the fresh follow-up's history holds reviewer A's prompt, so the stub routes it to A's answers)
-  setPair({ A: [reviewAnswer(), followAnswer()], B: [{ fail: 'error: no such session', code: 1 }] });
+  setPair({ A: [reviewAnswer()], B: [{ fail: 'error: no such session', code: 1 }] });
   const r = await review.review(p.root, { session: 'A', taskFile: p.taskFile });
   assert.strictEqual(r.status, 'PAIR_INCOMPLETE', r.text);
   const answerFile = path.join(HOME, 't1b-answer.json');
@@ -118,10 +117,196 @@ test('a fallback chain keeps its trading file risky: a follow-up rated normal st
   const fb = review.fallback(p.root, { bundle: r.bundle, answerFile });
   assert.strictEqual(fb.status, 'DONE', fb.text);
   assert.ok(stateOf(p.root).changes[key('src/EA.mq5')], 'without a plan it stays pending');
+  assert.match((await review.followup(p.root, { chain: fb.chain, responseFile: response('nothing changed') })).text, /every file of the chain is escalated/);
+  // (the fresh follow-up's history holds reviewer A's prompt, so the stub routes it to A's answers)
+  setPair({ A: [reviewAnswer(), followAnswer()], B: [reviewAnswer()] });
+  assert.strictEqual((await review.review(p.root, { session: 'A', taskFile: p.taskFile })).status, 'DONE');
+  assert.ok(stateOf(p.root).changes[key('src/EA.mq5')], 'its pair completed, but without a plan it stays pending');
   const f1 = await review.followup(p.root, { chain: fb.chain, responseFile: response('nothing changed') });
   assert.strictEqual(f1.status, 'DONE', f1.text);
   assert.ok(stateOf(p.root).changes[key('src/EA.mq5')], 'a normal rating never drops the plan it needs');
   assert.ok(execCalls().some(c => c.prompt.includes('This is a follow-up round') && c.args.includes('model_reasoning_effort=xhigh')));
+});
+
+test('a planned trading file stays pending after a fallback until a pair completes, and the fallback chain\'s follow-up keeps that acknowledgement', async () => {
+  const p = project('t1c', { 'src/EA.mq5': 'e0\n' });
+  write(p.root, 'src/EA.mq5', 'e1\n');
+  seed(p.root, s => { s.changes = { [key('src/EA.mq5')]: pending('src/EA.mq5') }; s.plans = { [key('src/EA.mq5')]: plan(p) }; });
+  setPair({ A: [reviewAnswer()], B: [{ fail: 'error: no such session', code: 1 }] });
+  const r = await review.review(p.root, { session: 'A', taskFile: p.taskFile });
+  assert.strictEqual(r.status, 'PAIR_INCOMPLETE', r.text);
+  const waiting = what => {
+    const s = stateOf(p.root);
+    assert.deepStrictEqual([s.acks[key('src/EA.mq5')], s.changes[key('src/EA.mq5')], s.riskyReviews[key('src/EA.mq5')]],
+      [undefined, pending('src/EA.mq5'), undefined], `${what}: still pending, its baseline kept, no paired receipt`);
+  };
+  waiting('the incomplete pair');
+  seed(p.root, s => { delete s.escalations[key('src/EA.mq5')]; }); // (as a driver from before admission escalated risky files left it)
+  const answerFile = path.join(HOME, 't1c-answer.json');
+  fs.writeFileSync(answerFile, reviewAnswer([finding('a loose lot check', 'src/EA.mq5:1', { severity: 'LOW', label: 'GAP' })]));
+  const fb = review.fallback(p.root, { bundle: r.bundle, answerFile });
+  assert.strictEqual(fb.status, 'DONE', fb.text);
+  assert.ok(stateOf(p.root).chains[fb.chain].findings.F1, 'the fallback\'s finding is recorded');
+  waiting('the fallback');
+  assert.ok(stateOf(p.root).escalations[key('src/EA.mq5')], 'it needs its own paired review');
+  assert.match((await review.followup(p.root, { chain: fb.chain, responseFile: response('tightened it') })).text, /every file of the chain is escalated/);
+  waiting('a refused single follow-up');
+  setPair({ A: [reviewAnswer(), followAnswer([{ id: 'F1', status: 'RESOLVED', reason: 'the lot check is tightened' }])], B: [reviewAnswer()] });
+  const paired = await review.review(p.root, { session: 'A', taskFile: p.taskFile });
+  assert.strictEqual(paired.status, 'DONE', paired.text);
+  const acknowledged = what => {
+    const s = stateOf(p.root);
+    assert.deepStrictEqual([s.acks[key('src/EA.mq5')], s.changes[key('src/EA.mq5')], s.escalations[key('src/EA.mq5')]], [sha('e1\n'), undefined, undefined], what);
+  };
+  acknowledged('a completed pair acknowledges it');
+  assert.ok(stateOf(p.root).riskyReviews[key('src/EA.mq5')]);
+  const f1 = await review.followup(p.root, { chain: fb.chain, responseFile: response('tightened it') });
+  assert.strictEqual(f1.status, 'DONE', f1.text);
+  acknowledged('the fallback chain\'s follow-up leaves the acknowledgement as it is');
+  assert.strictEqual(review.close(p.root, { chain: fb.chain, rev: stateOf(p.root).chains[fb.chain].rev, notes: {} }).status, 'DONE');
+});
+
+test('a file reviewed as risky by hand still needs a pair after a fallback, in a later ordinary review too', async () => {
+  const p = project('t1d', { 'src/payments.js': 'p0\n' });
+  write(p.root, 'src/payments.js', 'p1\n');
+  seed(p.root, s => { // (its earlier version was reviewed: that acknowledgement must stay as it is until a pair covers p1)
+    s.acks = { [key('src/payments.js')]: sha('p0\n') };
+    s.changes = { [key('src/payments.js')]: pending('src/payments.js') };
+    s.plans = { [key('src/payments.js')]: plan(p) };
+  });
+  const both = [finding('a refund can run twice', 'src/payments.js:1')];
+  setPair({ A: [reviewAnswer(both)], B: [reviewAnswer(both)], xA: [marks([['B1', 'SAME_AS', 'A1']])], xB: [{ fail: 'error: no such session', code: 1 }] });
+  const r = await review.review(p.root, { session: 'A', taskFile: p.taskFile, risky: true });
+  assert.strictEqual(r.status, 'PAIR_INCOMPLETE', r.text);
+  assert.deepStrictEqual(Object.keys(stateOf(p.root).chains), [], 'the incomplete pair applies nothing');
+  const answerFile = path.join(HOME, 't1d-answer.json');
+  fs.writeFileSync(answerFile, reviewAnswer([finding('a refund can run twice', 'src/payments.js:1', { severity: 'LOW', label: 'GAP' })]));
+  const fb = review.fallback(p.root, { bundle: r.bundle, answerFile });
+  assert.strictEqual(fb.status, 'DONE', fb.text);
+  let s = stateOf(p.root);
+  assert.ok(s.chains[fb.chain].findings.F1, 'the fallback\'s finding is recorded');
+  assert.deepStrictEqual([s.acks[key('src/payments.js')], s.changes[key('src/payments.js')], s.riskyReviews[key('src/payments.js')]],
+    [sha('p0\n'), pending('src/payments.js'), undefined], 'the fallback alone acknowledges nothing and grants no receipt');
+  assert.ok(!s.chains[fb.chain].paired);
+  assert.match((await review.followup(p.root, { chain: fb.chain, responseFile: response('nothing yet') })).text, /every file of the chain is escalated/, 'its single follow-up is refused');
+  setPair({ A: [reviewAnswer(both)], B: [reviewAnswer(both)], xA: [marks([['B1', 'SAME_AS', 'A1']])], xB: [marks([['A1', 'SAME_AS', 'B1']])] });
+  const later = await review.review(p.root, { session: 'A', taskFile: p.taskFile }); // (no --risky this time)
+  assert.strictEqual(later.status, 'DONE', later.text);
+  assert.ok(execCalls().some(c => c.prompt.includes('reviewer B. Attack')) && execCalls().some(c => c.prompt.includes('Cross-check (you are reviewer B)')), 'it is reviewed as a pair, cross-checks included');
+  s = stateOf(p.root);
+  assert.deepStrictEqual([s.acks[key('src/payments.js')], s.changes[key('src/payments.js')], s.escalations[key('src/payments.js')]], [sha('p1\n'), undefined, undefined]);
+});
+
+test('a risky review whose pair didn\'t complete is paired again on a plain retry, and acknowledges nothing before that', async () => {
+  const p = project('t1e', { 'src/payments.js': 'p0\n' });
+  write(p.root, 'src/payments.js', 'p1\n');
+  seed(p.root, s => { s.changes = { [key('src/payments.js')]: pending('src/payments.js') }; s.plans = { [key('src/payments.js')]: plan(p) }; });
+  const both = [finding('a refund can run twice', 'src/payments.js:1')];
+  setPair({ A: [reviewAnswer(both)], B: [reviewAnswer(both)], xA: [marks([['B1', 'SAME_AS', 'A1']])], xB: [{ fail: 'error: no such session', code: 1 }] });
+  const r = await review.review(p.root, { session: 'A', taskFile: p.taskFile, risky: true });
+  assert.strictEqual(r.status, 'PAIR_INCOMPLETE', r.text);
+  let s = stateOf(p.root);
+  assert.ok(s.escalations[key('src/payments.js')] && !s.acks[key('src/payments.js')] && s.changes[key('src/payments.js')], 'it now needs its own paired review');
+  setPair({ A: [reviewAnswer(both)], B: [reviewAnswer(both)], xA: [marks([['B1', 'SAME_AS', 'A1']])], xB: [marks([['A1', 'SAME_AS', 'B1']])] });
+  const retry = await review.review(p.root, { session: 'A', taskFile: p.taskFile }); // (no --risky this time)
+  assert.strictEqual(retry.status, 'DONE', retry.text);
+  assert.ok(execCalls().some(c => c.prompt.includes('reviewer B. Attack')), 'the retry is a pair');
+  s = stateOf(p.root);
+  assert.deepStrictEqual([s.acks[key('src/payments.js')], s.escalations[key('src/payments.js')]], [sha('p1\n'), undefined], 'only the completed pair acknowledges it');
+});
+
+const GAPS_BEFORE = '# Known gaps\n\nFindings left unfixed on purpose. Entries are never deleted, only marked fixed.\n\n## G1 · open · 2026-10-01 · LOW\n- Where: src/old.js\n- Problem: older\n';
+const gapsNow = root => fs.readFileSync(path.join(root, gaps.NAME), 'utf8');
+
+test('a completed pair acknowledges a planned payments file, and its gap entries stay acknowledged through a follow-up and a close', async () => {
+  const p = project('t1f', { 'src/payments.js': 'p0\n', [gaps.NAME]: GAPS_BEFORE });
+  write(p.root, 'src/payments.js', 'p1\n');
+  seed(p.root, s => { s.acks = { [key(gaps.NAME)]: sha(GAPS_BEFORE) }; s.changes = { [key('src/payments.js')]: pending('src/payments.js') }; s.plans = { [key('src/payments.js')]: plan(p) }; });
+  const found = [finding('a refund can run twice', 'src/payments.js:1'), finding('odd name', 'src/payments.js:2', { severity: 'LOW', label: 'GAP' })];
+  setPair({ A: [reviewAnswer(found)], B: [reviewAnswer(found)], xA: [marks([['B1', 'SAME_AS', 'A1'], ['B2', 'SAME_AS', 'A2']])], xB: [marks([['A1', 'SAME_AS', 'B1'], ['A2', 'SAME_AS', 'B2']])],
+    follow: [followAnswer([{ id: 'F1', status: 'MAINTAIN', reason: 'refunds still repeat' }, { id: 'F2', status: 'RESOLVED', reason: 'renamed' }])] });
+  const acknowledged = what => {
+    const s = stateOf(p.root);
+    assert.deepStrictEqual([s.acks[key(gaps.NAME)], s.changes[key(gaps.NAME)]], [sha(gapsNow(p.root)), undefined], what);
+    assert.match(gapsNow(p.root), /- Problem: older/, `${what}: the older entry stays`);
+  };
+  const r = await review.review(p.root, { session: 'A', taskFile: p.taskFile, risky: true });
+  assert.strictEqual(r.status, 'DONE', r.text);
+  const s = stateOf(p.root);
+  assert.deepStrictEqual([s.acks[key('src/payments.js')], s.changes[key('src/payments.js')], !!s.riskyReviews[key('src/payments.js')]], [sha('p1\n'), undefined, true]);
+  assert.match(gapsNow(p.root), /- Problem: F2: odd name/);
+  acknowledged('the pair');
+  assert.strictEqual((await review.followup(p.root, { chain: r.chain, responseFile: response('renamed it') })).status, 'DONE');
+  assert.match(gapsNow(p.root), /· fixed ·/);
+  acknowledged('a follow-up');
+  assert.strictEqual(review.close(p.root, { chain: r.chain, rev: stateOf(p.root).chains[r.chain].rev, notes: { F1: 'gap: refunds are switched off in this build' } }).status, 'DONE');
+  assert.match(gapsNow(p.root), /- Problem: F1: a refund can run twice/);
+  acknowledged('a close');
+});
+
+test('a follow-up is refused for another session\'s change in an escalated chain file, starting no reviewer', async () => {
+  const p = project('t1g', { 'src/payments.js': 'p0\n', 'src/notes.js': 'n0\n' });
+  write(p.root, 'src/payments.js', 'p1\n');
+  write(p.root, 'src/notes.js', 'n1\n');
+  seed(p.root, s => { s.changes = { [key('src/payments.js')]: pending('src/payments.js'), [key('src/notes.js')]: pending('src/notes.js') }; });
+  setPair({ single: [reviewAnswer([finding('off by one', 'src/notes.js:1')])] });
+  const r = await review.review(p.root, { session: 'A', taskFile: p.taskFile });
+  assert.strictEqual(r.status, 'DONE', r.text);
+  write(p.root, 'src/payments.js', 'p2 by B\n');
+  seed(p.root, s => {
+    s.changes[key('src/payments.js')] = { path: 'src/payments.js', session: 'B', at: 9, baseline: sha('p1\n') };
+    s.escalations = { [key('src/payments.js')]: { chain: 'C0', at: 1 } };
+  });
+  const before = [JSON.stringify(stateOf(p.root)), execCalls().length];
+  const f = await review.followup(p.root, { chain: r.chain, responseFile: response('fixed it') });
+  assert.strictEqual(f.status, 'REFUSED');
+  assert.match(f.text, /another session has pending changes in src\/payments\.js/);
+  assert.deepStrictEqual([JSON.stringify(stateOf(p.root)), execCalls().length], before, 'nothing changes and no reviewer starts');
+});
+
+test('a concession because of the round limit gets its repair, only the repaired answer applies, and the same reason can\'t close', async () => {
+  const p = project('t1h', { 'src/payments.js': 'p0\n' });
+  write(p.root, 'src/payments.js', 'p1\n');
+  seed(p.root, s => { s.changes = { [key('src/payments.js')]: pending('src/payments.js') }; });
+  const maintain = { id: 'F1', status: 'MAINTAIN', reason: 'a payment can still be sent twice' };
+  setPair({ single: [reviewAnswer([finding('a payment can be sent twice', 'src/payments.js:1')])],
+    follow: [followAnswer([maintain]), followAnswer([maintain]), followAnswer([{ id: 'F1', status: 'CONCEDE', reason: 'the round limit was reached' }]), followAnswer([maintain])] });
+  const r = await review.review(p.root, { session: 'A', taskFile: p.taskFile });
+  assert.strictEqual(r.status, 'DONE', r.text);
+  for (const v of ['p2\n', 'p3\n']) {
+    write(p.root, 'src/payments.js', v);
+    assert.strictEqual((await review.followup(p.root, { chain: r.chain, responseFile: response(v) })).status, 'DONE');
+  }
+  write(p.root, 'src/payments.js', 'p4\n');
+  const rev = stateOf(p.root).chains[r.chain].rev;
+  const f = await review.followup(p.root, { chain: r.chain, responseFile: response('past it') });
+  assert.strictEqual(f.status, 'DONE', f.text);
+  const [conceded, repair] = execCalls().slice(-2);
+  assert.ok(repair.prompt.startsWith('Your answer has these problems') && repair.args[1] === 'resume' && repair.args.includes(conceded.session), 'one repair, in the same session');
+  const c = stateOf(p.root).chains[r.chain];
+  assert.deepStrictEqual([c.rev, c.rounds.length, c.findings.F1.status, c.findings.F1.label], [rev + 1, 4, 'open', 'BUG'], 'only the repaired MAINTAIN applied');
+  const before = JSON.stringify(stateOf(p.root));
+  const closing = review.close(p.root, { chain: r.chain, rev: c.rev, notes: { F1: 'gap: the round limit was reached' } });
+  assert.strictEqual(closing.status, 'REFUSED');
+  assert.strictEqual(JSON.stringify(stateOf(p.root)), before);
+  assert.ok(!fs.existsSync(path.join(p.root, gaps.NAME)), 'no gap is written');
+});
+
+test('a paired review\'s gap write cannot acknowledge a manual edit made while it ran', async () => {
+  const p = project('t1i', { 'src/payments.js': 'p0\n', [gaps.NAME]: GAPS_BEFORE });
+  write(p.root, 'src/payments.js', 'p1\n');
+  seed(p.root, s => { s.acks = { [key(gaps.NAME)]: sha(GAPS_BEFORE) }; s.changes = { [key('src/payments.js')]: pending('src/payments.js') }; s.plans = { [key('src/payments.js')]: plan(p) }; });
+  const hold = fs.mkdtempSync(path.join(HOME, 't1i-hold-'));
+  const gap = [finding('odd name', 'src/payments.js:2', { severity: 'LOW', label: 'GAP' })];
+  setPair({ A: [{ hold, text: reviewAnswer(gap) }], B: [reviewAnswer(gap)], xA: [marks([['B1', 'SAME_AS', 'A1']])], xB: [marks([['A1', 'SAME_AS', 'B1']])] });
+  const running = review.review(p.root, { session: 'A', taskFile: p.taskFile, risky: true });
+  await waitFor(path.join(hold, 'started'));
+  fs.writeFileSync(path.join(p.root, gaps.NAME), `${GAPS_BEFORE}\n## G9 · open · 2026-10-02 · LOW\n- Where: src/manual.js\n- Problem: written by hand\n`);
+  fs.writeFileSync(path.join(hold, 'go'), '');
+  const r = await running;
+  assert.strictEqual(r.status, 'DONE', r.text);
+  assert.ok(/written by hand/.test(gapsNow(p.root)) && /- Problem: F1: odd name/.test(gapsNow(p.root)) && /- Problem: older/.test(gapsNow(p.root)), 'the manual entry stays, with the new one');
+  assert.strictEqual(stateOf(p.root).acks[key(gaps.NAME)], sha(GAPS_BEFORE), 'its acknowledgement stays where it was');
 });
 
 test('plan authorization stays bound to the task, its requirements and the frozen plan', async () => {

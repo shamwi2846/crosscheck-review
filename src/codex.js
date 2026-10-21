@@ -18,6 +18,7 @@ const CU_FEATURES_OFF = ['apps', 'remote_plugin', 'multi_agent', 'image_generati
 const PLAIN_KEY = /^[A-Za-z0-9_@-]+$/; // a name that fits in one -c key segment
 const TIMEOUT_MINUTES = { medium: 20, high: 30, xhigh: 45 };
 const CLOSE_GRACE_MS = 2000; // after Codex exits, how long its output may take to arrive
+const WATCH_MS = 2000; // how often a computer run notes the processes it started since
 const COOLDOWN_MS = 15 * 60 * 1000;
 const LIMIT_ERROR = /usage limit|rate limit|quota|too many requests|model is not supported when using Codex with a ChatGPT account/i;
 const LOGIN_ERROR = /not logged in|log in again|login required|unauthorized/i;
@@ -171,17 +172,18 @@ function runProcesses(run, rows) {
   return found;
 }
 
-// Windows: Codex's launcher starts the native Codex at once, and what Codex starts hangs off that one, not off
-// the launcher. So at Codex's first output the run notes its processes, to find what they leave behind later.
-// Returns false when the process table couldn't be read, so the next output tries again.
-function noteProcesses(run) {
-  const rows = processTable();
-  if (!rows.length) return false;
-  const launcher = rows.find(([pid]) => pid === run.child.pid);
-  if (!launcher) return true; // (it has exited already)
-  run.known = [[launcher[0], launcher[2]]];
-  run.known = runProcesses(run, rows).map(pid => [pid, rows.find(([id]) => id === pid)[2]]);
-  return true;
+// Windows: Codex's launcher starts the native Codex at once, and what Codex starts hangs off that one, not off the
+// launcher. So the run notes its processes from the process table (`rows`): its launcher once seen, and everything
+// started from a noted process since the run began, kept after it exits, so what it leaves behind stays the run's.
+// This happens at Codex's first output, and in a computer run every WATCH_MS too. Returns whether any was added.
+function noteProcesses(run, rows) {
+  for (const known of run.known) { // (the launcher, until it is first seen: our own child, so its row is it)
+    const row = known[1] === null && rows.find(([pid]) => pid === known[0]);
+    if (row) known[1] = row[2];
+  }
+  const added = runProcesses(run, rows).filter(pid => !run.known.some(([id]) => id === pid));
+  for (const pid of added) run.known.push([pid, rows.find(([id]) => id === pid)[2]]);
+  return added.length > 0;
 }
 
 // Stops a run's Codex and everything it started.
@@ -204,7 +206,7 @@ for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) {
 // Starts Codex with the prompt on stdin. Resolves { stdout, stderr, failure } (failure: null, 'TIMEOUT' or a
 // reason) once everything the run started has been stopped. If processes Codex leaves behind hold its output
 // open, the run ends CLOSE_GRACE_MS after Codex exits, so they can't hang it. `onProcesses(pids)` hears the run's
-// processes once they are noted (a computer run's desktop record keeps them).
+// processes once they are noted, and again whenever more are found (a computer run's desktop record keeps them).
 function spawnCodex(args, prompt, timeoutMs, onSpawn, onProcesses) {
   return new Promise(resolve => {
     const child = spawn(process.execPath, args, { windowsHide: true, detached: process.platform !== 'win32' });
@@ -217,11 +219,17 @@ function spawnCodex(args, prompt, timeoutMs, onSpawn, onProcesses) {
     let settled = false;
     let grace;
     const timer = setTimeout(() => { timedOut = true; stopRun(run); }, timeoutMs);
+    const pids = () => run.known.map(([pid]) => pid);
+    // (a computer run notes from its start on, output or not, so a process started at any time stays the run's)
+    const watch = onProcesses && process.platform === 'win32'
+      ? setInterval(() => { const rows = processTable(); if (rows.length && noteProcesses(run, rows)) onProcesses(pids()); }, WATCH_MS) : null;
     const collect = stream => d => {
       output[stream] += d;
-      if (noteTries > 0) {
-        noteTries = noteProcesses(run) ? 0 : noteTries - 1;
-        if (noteTries === 0 && onProcesses) onProcesses(run.known.map(([pid]) => pid));
+      if (noteTries > 0) { // (the process table may fail to load: the next output tries again, three times in all)
+        const rows = processTable();
+        noteTries = rows.length ? 0 : noteTries - 1;
+        if (rows.length) noteProcesses(run, rows);
+        if (noteTries === 0 && onProcesses) onProcesses(pids());
       }
     };
     child.stdout.setEncoding('utf8'); // (so a character split across two chunks stays whole)
@@ -234,6 +242,7 @@ function spawnCodex(args, prompt, timeoutMs, onSpawn, onProcesses) {
       settled = true;
       clearTimeout(timer);
       clearTimeout(grace);
+      clearInterval(watch);
       stopRun(run);
       running.delete(run);
       resolve({ ...output, failure });

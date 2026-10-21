@@ -80,6 +80,14 @@ function mismatch(schema, value, where = 'answer') {
   return null;
 }
 
+// A reason that rests on the round limit, which never closes a finding (neither a follow-up's concession nor a close):
+// the plain phrasings ("round limit", "round-limit", "the limit of three full rounds", "the limit was reached after three
+// rounds": rounds counted by a number), line breaks included, never numerical rounding ("the broker limit is checked
+// after the helper rounds the lot down"). It is a backstop for plain wording, not a reading of every phrasing
+// (DESIGN.md section 14, fact 7).
+const COUNTED_ROUNDS = '(?:\\d+|one|two|three|four|five|six)\\s+(?:\\w+\\s+)?rounds\\b';
+const ROUND_LIMIT = new RegExp(`\\brounds?[-\\s]+limit|\\blimit\\s+(?:of|on)\\s+${COUNTED_ROUNDS}|\\blimit\\b[^.;]{0,30}\\bafter\\s+${COUNTED_ROUNDS}`, 'i');
+
 // The reviewed file a finding's location names ("path", "path:12" or "path:12-30"), as a key; '-' is the task.
 const locationKey = location => (location === '-' ? '-' : pathKey(location.replace(/:\d+(-\d+)?$/, '')));
 
@@ -129,7 +137,12 @@ function read(kind, answerText, asked) {
   }
   if (kind !== 'review' && kind !== 'followup') return { answer, problems }; // (the other jobs: their schema is the check)
   exactlyOnce(answer.requirements.map(r => r.id), asked.rowIds, 'requirement');
-  if (kind === 'followup') exactlyOnce(answer.followups.map(f => f.id), asked.openIds, 'finding');
+  if (kind === 'followup') {
+    exactlyOnce(answer.followups.map(f => f.id), asked.openIds, 'finding');
+    for (const f of answer.followups) {
+      if (f.status === 'CONCEDE' && ROUND_LIMIT.test(f.reason)) problems.push(`${f.id} is conceded because of the round limit, which is never a reason: concede only a finding that was never real`);
+    }
+  }
   const reviewed = asked.files.map(pathKey);
   for (const f of answer.findings) {
     for (const id of f.reqs) if (!asked.linkIds.includes(id)) problems.push(`finding "${f.title}" names requirement ${id}, which doesn't exist`);
@@ -164,4 +177,4 @@ function render(answer) {
   return lines.join('\n');
 }
 
-module.exports = { SCHEMAS, read, render, locationKey };
+module.exports = { SCHEMAS, ROUND_LIMIT, read, render, locationKey };

@@ -18,6 +18,7 @@ fs.writeFileSync(path.join(process.env.CROSSCHECK_HOME, 'config.json'), JSON.str
 const state = require('../src/state');
 const review = require('../src/review');
 const gaps = require('../src/gaps');
+const hook = require('../src/hook');
 
 const sha = text => crypto.createHash('sha256').update(text).digest('hex');
 const setSpec = exec => { fs.writeFileSync(SPEC, JSON.stringify({ exec })); fs.rmSync(LOG, { force: true }); };
@@ -39,7 +40,8 @@ function project(name, files) {
   }
   const taskFile = path.join(HOME, `${name}-task.md`);
   fs.writeFileSync(taskFile, `# ${name}\n\n## Requirements\nR1. Adds numbers.\nR2. Keeps the sum.\n`);
-  return { root, taskFile };
+  // (its real spelling, as git reports it: a short 8.3 temp path would give the commit hook another state folder)
+  return { root: fs.realpathSync.native(root), taskFile };
 }
 const finding = (title, location, over = {}) => ({ severity: 'MEDIUM', title, location, trigger: 't', harm: 'h', failure: 'f', fix: 'x', test: null, label: 'BUG', reqs: [], ...over });
 const met = ids => ids.map(id => ({ id, status: 'MET', evidence: 'src/a.js:1' }));
@@ -232,6 +234,11 @@ test('the fallback reserves its frozen scope, keeps newer edits and applies exac
   assert.strictEqual(JSON.stringify(stateOf(root)), after.state);
   assert.strictEqual(gapsText(root), after.gaps);
   write(root, 'src/b.js', 'b2\n');
+  // (B's pending edit of src/a.js is B's to review: the chain's follow-up waits for it)
+  const waiting = await review.followup(root, { chain: done.chain, responseFile: response('after the fallback') });
+  assert.strictEqual(waiting.status, 'REFUSED');
+  assert.match(waiting.text, /another session has pending changes in src\/a\.js/);
+  seed(root, x => { delete x.changes[key('src/a.js')]; }); // (as B's own review leaves it)
   const next = await review.followup(root, { chain: done.chain, responseFile: response('after the fallback') });
   assert.strictEqual(next.status, 'DONE', next.text);
   const prompt = execCalls().slice(-1)[0].prompt;
@@ -252,7 +259,8 @@ test('closing needs a real disposition per open BUG and records relabelled BUGs 
   }
   const rev = stateOf(root).chains[chain].rev;
   const before = { state: JSON.stringify(stateOf(root)), gaps: gapsText(root) };
-  for (const why of ['fixed, the round limit was reached', 'already fixed in the latest edit', 'gap: left open because we hit the round limit', '']) {
+  for (const why of ['fixed, the round limit was reached', 'already fixed in the latest edit', 'gap: left open because we hit the round limit',
+    'gap: the limit of three full rounds has been reached', 'gap: the limit was reached after three rounds', '']) {
     const r = review.close(root, { chain, rev, notes: { F2: why } });
     assert.strictEqual(r.status, 'REFUSED', why);
     assert.strictEqual(JSON.stringify(stateOf(root)), before.state);
@@ -346,6 +354,81 @@ test('a chain keeps its own risky-review prerequisite when another chain escalat
   const closing = review.close(root, { chain: first.chain, rev: s.chains[first.chain].rev, notes: {} });
   assert.strictEqual(closing.status, 'REFUSED');
   assert.match(closing.text, /src\/a\.js was rated risky in this chain/);
+});
+
+const GAPS_BEFORE = '# Known gaps\n\nFindings left unfixed on purpose. Entries are never deleted, only marked fixed.\n\n## G1 · open · 2026-10-01 · LOW\n- Where: src/old.js\n- Problem: older\n';
+const commitRefusal = root => {
+  const denied = hook.handle('bash', { tool_input: { command: 'git commit -m x' }, cwd: root, session_id: 'A' });
+  return denied ? denied.hookSpecificOutput.permissionDecisionReason : null;
+};
+
+test('crosscheck\'s own gap additions, fixes and close dispositions stay acknowledged, so the commit goes through', async () => {
+  const { root, taskFile } = project('t8', { 'src/a.js': 'a0\n', [gaps.NAME]: GAPS_BEFORE });
+  seed(root, s => { s.acks = { [key(gaps.NAME)]: sha(GAPS_BEFORE) }; });
+  write(root, 'src/a.js', 'a1\n');
+  const gap = finding('odd name', 'src/a.js:1', { severity: 'LOW', label: 'GAP' });
+  setSpec([{ text: reviewAnswer([gap, finding('off by one', 'src/a.js:1')]) }, { text: followAnswer([row('F1', 'RESOLVED'), row('F2', 'MAINTAIN')]) }]);
+  const acknowledged = what => {
+    const s = stateOf(root);
+    assert.strictEqual(s.acks[key(gaps.NAME)], sha(gapsText(root)), `${what}: the gaps file as written is acknowledged`);
+    assert.ok(!s.changes[key(gaps.NAME)], `${what}: and not pending`);
+    assert.match(gapsText(root), /## G1 · open · 2026-10-01 · LOW\n- Where: src\/old\.js\n- Problem: older\n/, `${what}: the older entry stays`);
+  };
+  const chain = await freshChain(root, taskFile, []);
+  assert.match(gapsText(root), /## G2 · open · .*\n[^#]*- Problem: F1: odd name/);
+  acknowledged('a review');
+  assert.strictEqual((await review.followup(root, { chain, responseFile: response('renamed it') })).status, 'DONE');
+  assert.match(gapsText(root), /## G2 · fixed ·/);
+  acknowledged('a follow-up');
+  const closing = review.close(root, { chain, rev: stateOf(root).chains[chain].rev, notes: { F2: 'gap: the sum is only ever shown, never stored' } });
+  assert.strictEqual(closing.status, 'DONE', closing.text);
+  assert.match(gapsText(root), /## G3 · open · .*\n[^#]*- Problem: F2: off by one/);
+  acknowledged('a close');
+  assert.strictEqual(commitRefusal(root), null);
+});
+
+test('a follow-up refuses while another session has a pending change in a chain file, changing nothing', async () => {
+  const { root, taskFile } = project('t9', { 'src/a.js': 'a0\n', 'src/b.js': 'b0\n' });
+  write(root, 'src/a.js', 'a1\n');
+  write(root, 'src/b.js', 'b1\n');
+  setSpec([{ text: reviewAnswer([finding('off by one', 'src/a.js:1')]) }, { text: followAnswer([row('F1', 'RESOLVED')]) }]);
+  const chain = await freshChain(root, taskFile, [], { [key('src/b.js')]: { path: 'src/b.js', session: 'A', at: 2, baseline: null } });
+  write(root, 'src/a.js', 'a2 by B\n');
+  seed(root, s => { // (every file escalated too, so the follow-up would take none: the check still names B's file)
+    s.changes[key('src/a.js')] = { path: 'src/a.js', session: 'B', at: 9, baseline: sha('a1\n') };
+    s.escalations = { [key('src/a.js')]: { chain: 'C0', at: 1 }, [key('src/b.js')]: { chain: 'C0', at: 1 } };
+  });
+  const before = JSON.stringify(stateOf(root));
+  const gapsBefore = fs.existsSync(path.join(root, gaps.NAME));
+  const r = await review.followup(root, { chain, responseFile: response('fixed it') });
+  assert.strictEqual(r.status, 'REFUSED');
+  assert.match(r.text, /another session has pending changes in src\/a\.js/);
+  assert.strictEqual(execCalls().length, 1, 'GPT is not asked');
+  assert.strictEqual(JSON.stringify(stateOf(root)), before, 'B\'s record, the acknowledgements, the chain and the reservations are as they were');
+  assert.strictEqual(fs.existsSync(path.join(root, gaps.NAME)), gapsBefore);
+});
+
+test('a follow-up that concedes a BUG because of the round limit is refused after its one repair, applying nothing', async () => {
+  const { root, taskFile } = project('t10', { 'src/a.js': 'a0\n' });
+  write(root, 'src/a.js', 'a1\n');
+  const limit = { id: 'F1', status: 'CONCEDE', reason: 'The round limit was reached, so this stays unfixed' };
+  setSpec([{ text: reviewAnswer([finding('off by one', 'src/a.js:1')]) }, { text: followAnswer([row('F1', 'MAINTAIN')]) }, { text: followAnswer([row('F1', 'MAINTAIN')]) },
+    { text: followAnswer([limit]) }, { text: followAnswer([limit]) }]);
+  const chain = await freshChain(root, taskFile, []);
+  for (const v of ['a2\n', 'a3\n']) {
+    write(root, 'src/a.js', v);
+    assert.strictEqual((await review.followup(root, { chain, responseFile: response(v) })).status, 'DONE');
+  }
+  const before = JSON.stringify(stateOf(root));
+  write(root, 'src/a.js', 'a4\n');
+  const r = await review.followup(root, { chain, responseFile: response('past the limit') });
+  assert.strictEqual(r.status, 'NOT_DONE', r.text);
+  assert.match(r.text, /F1 is conceded because of the round limit/);
+  const [answered, repair] = execCalls().slice(-2);
+  assert.match(answered.prompt, /The round limit is reached/);
+  assert.ok(repair.prompt.startsWith('Your answer has these problems') && repair.args[1] === 'resume');
+  assert.strictEqual(JSON.stringify(stateOf(root)), before, 'F1 stays open, and the chain, acknowledgements and reservations are unchanged');
+  assert.deepStrictEqual(review.openBugs(root).map(b => b.id), ['F1']);
 });
 
 test.after(() => fs.rmSync(HOME, { recursive: true, force: true }));

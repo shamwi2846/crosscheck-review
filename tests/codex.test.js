@@ -131,6 +131,41 @@ test('processes an exited Codex left holding its output end the run and are stop
   assert.deepStrictEqual(survivors, []);
 });
 
+test('a run that tracks its processes keeps noting them, even after a failed first check and no more output: a late helper\'s worker stays the run\'s and is stopped with it', { skip: process.platform !== 'win32' && 'the process notes are Windows-only', timeout: 120000 }, async () => {
+  const gate = fs.mkdtempSync(path.join(HOME, 'late-'));
+  const pidFile = path.join(gate, 'worker.pid');
+  setSpec({ exec: [{ late: { pidFile, gate }, text: 'answer' }] });
+  const notes = [];
+  const noted = pid => notes.some(list => list.includes(pid));
+  const until = async (check, what) => { for (let i = 0; i < 600 && !check(); i++) await sleep(50); assert.ok(check(), `${what} never happened`); };
+  const realPath = process.env.PATH;
+  process.env.PATH = ''; // (the process table can't be read at Codex's first output, its only one until the end)
+  setTimeout(() => { process.env.PATH = realPath; }, 1000);
+  const running = codex.ask({ mode: 'review', effort: 'high', prompt: 'x', cwd: WORK, timeoutMs: 90000, onProcesses: pids => notes.push(pids) });
+  let helper = null;
+  let worker = null;
+  try {
+    await until(() => fs.existsSync(`${pidFile}.helper`), 'the helper\'s start');
+    helper = Number(fs.readFileSync(`${pidFile}.helper`, 'utf8'));
+    await until(() => noted(helper), 'a note of the helper');
+    fs.writeFileSync(path.join(gate, 'go'), '');
+    await until(() => fs.existsSync(pidFile) && !alive(helper), 'the worker\'s start and the helper\'s exit');
+    worker = Number(fs.readFileSync(pidFile, 'utf8'));
+    await until(() => noted(worker), 'a note of the worker, found through the exited helper');
+    fs.writeFileSync(path.join(gate, 'done'), '');
+    const r = await running;
+    assert.strictEqual(r.ok, true, r.reason);
+    for (let i = 0; i < 50 && alive(worker); i++) await sleep(100);
+    assert.strictEqual(alive(worker), false, 'the worker is stopped with the run');
+    const count = notes.length;
+    await sleep(5000);
+    assert.strictEqual(notes.length, count, 'no noting goes on after the run');
+  } finally {
+    fs.writeFileSync(path.join(gate, 'done'), '');
+    for (const pid of [helper, worker]) if (pid && alive(pid)) try { process.kill(pid); } catch {}
+  }
+});
+
 test('a retry waits out a cooldown another driver started meanwhile, and unreadable shared state stops every run', async () => {
   const global = state.files.global();
   setSpec({ exec: [{ fail: 'error: something broke', code: 1 }] });

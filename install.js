@@ -187,14 +187,11 @@ function writeAll(files) {
 // Installs; `checks: false` (tests only) skips the prerequisites and the test run.
 async function install({ yes = false, checks = true, ask = confirm, say = text => process.stdout.write(`${text}\n`) } = {}) {
   const p = paths();
-  const config = state.read(state.files.config());
-  if (config.unreadable) return { code: 1, text: `Not installed: ${state.files.config()} can't be read (${config.unreadable}).` };
-  let { codexJs, claude } = state.config();
-  if (checks) {
-    const found = prerequisites();
-    if (found.problems.length) return { code: 1, text: `Not installed:\n- ${found.problems.join('\n- ')}` };
-    ({ codexJs, claude } = found);
-  }
+  const notReadable = config => ({ code: 1, text: `Not installed: ${state.files.config()} can't be read (${config.unreadable}).` });
+  const before = state.read(state.files.config());
+  if (before.unreadable) return notReadable(before);
+  const found = checks ? prerequisites() : null;
+  if (found && found.problems.length) return { code: 1, text: `Not installed:\n- ${found.problems.join('\n- ')}` };
   const waiting = busy();
   if (waiting) return { code: 1, text: `Not installed: ${waiting}. Run install again once nothing is running.` };
   const claudeMd = claudeMdText(p);
@@ -209,14 +206,27 @@ async function install({ yes = false, checks = true, ask = confirm, say = text =
   const settings = JSON.parse(readOr(p.settings, '{}')); // (read again now, so a hook added meanwhile stays)
   const waitingNow = busy();
   if (waitingNow) return { code: 1, text: `Not installed: ${waitingNow}. Run install again once nothing is running.` };
-  const code = fs.readdirSync(path.join(__dirname, 'src')).map(f => [path.join(p.code, f), fs.readFileSync(path.join(__dirname, 'src', f), 'utf8')]);
-  writeAll([...code,
-    [path.join(p.code, 'RULES.md'), fs.readFileSync(path.join(__dirname, 'RULES.md'), 'utf8')],
-    [p.agent, fs.readFileSync(path.join(__dirname, 'agents', 'fallback-reviewer.md'), 'utf8')],
-    [state.files.config(), JSON.stringify({ ...config.data, model: config.data.model || state.config().model, codexJs, claude, mql5Docs: docsServer() }, null, 2)],
-    [p.claudeMd, claudeMd],
-    [p.settings, JSON.stringify({ ...settings, hooks: addHooks(withoutOurs(settings.hooks), ourHooks(p.code)) }, null, 2)], // (the switch)
-  ]);
+  // config.json is read again under its lock, held until everything is written: what changed while install asked stays
+  // (a verification doctor took away included), and nothing changes it meanwhile
+  const locked = state.withLock(state.files.config(), () => {
+    const now = state.read(state.files.config());
+    if (now.unreadable) return notReadable(now);
+    // (what install found replaces only a value nobody changed while it asked)
+    const discovered = { ...(found ? { codexJs: found.codexJs, claude: found.claude } : {}), mql5Docs: docsServer() };
+    for (const k of Object.keys(discovered)) if (JSON.stringify(now.data[k]) !== JSON.stringify(before.data[k])) delete discovered[k];
+    const config = { ...now.data, ...discovered, model: now.data.model || state.config().model };
+    const code = fs.readdirSync(path.join(__dirname, 'src')).map(f => [path.join(p.code, f), fs.readFileSync(path.join(__dirname, 'src', f), 'utf8')]);
+    writeAll([...code,
+      [path.join(p.code, 'RULES.md'), fs.readFileSync(path.join(__dirname, 'RULES.md'), 'utf8')],
+      [p.agent, fs.readFileSync(path.join(__dirname, 'agents', 'fallback-reviewer.md'), 'utf8')],
+      [state.files.config(), JSON.stringify(config, null, 2)],
+      [p.claudeMd, claudeMd],
+      [p.settings, JSON.stringify({ ...settings, hooks: addHooks(withoutOurs(settings.hooks), ourHooks(p.code)) }, null, 2)], // (the switch)
+    ]);
+    return null;
+  });
+  if (locked && locked.ok === false) return { code: 1, text: `Not installed: ${locked.why}.` };
+  if (locked) return locked;
   return { code: 0, text: `crosscheck is installed. Restart Claude Code, then run: node "${path.join(p.code, 'crosscheck.js')}" doctor --live` };
 }
 
