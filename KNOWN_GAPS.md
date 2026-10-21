@@ -280,3 +280,12 @@ Findings left unfixed on purpose. Entries are never deleted, only marked fixed.
 - Fix: Record comparable baseline and split-suite wall times, plus the four test-file durations.
 - Log: 20261021111245-b82645
 - Why skipped: labelled GAP by the reviewer; harm: The requested performance improvement remains unverified.
+
+## G32 · open · 2026-10-21 · LOW
+- Task: Fix three issues found in the MQL5 chat: notes edits voiding reviews, CLAUDE.md reverts, risk spreading to docs
+- Where: -
+- Problem: F1: R2 adds two regression tests instead of one
+- Trigger: The suite registers both new R2 regressions at tests/install.test.js:288 and tests/install.test.js:305.
+- Fix: Combine the save-during-write scenario into the existing imported-CLAUDE.md regression and remove the second test registration.
+- Log: 20261021145050-f942d6
+- Why skipped: pair: confirmed by B

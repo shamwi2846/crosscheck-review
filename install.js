@@ -147,9 +147,14 @@ const addHooks = (hooks, extra) => Object.fromEntries([...new Set([...Object.key
 
 // ---- Install ----
 
+// CLAUDE.md: crosscheck's import line, then the user's personal lines. One that already starts with that line is never
+// written (null), since its personal lines may have been changed there, even while install runs; any other is written
+// from personal.md.
 function claudeMdText(p) {
+  const importLine = `@${path.join(p.code, 'RULES.md').replace(/\\/g, '/')}`;
+  if (readOr(p.claudeMd, '').split(/\r?\n/)[0] === importLine) return null;
   const personal = readOr(p.personal, '').trim();
-  return `@${path.join(p.code, 'RULES.md').replace(/\\/g, '/')}\n${personal ? `\n${personal}\n` : ''}`;
+  return `${importLine}\n${personal ? `\n${personal}\n` : ''}`;
 }
 
 // Writes `files` ([[path, text, or null to delete]]) so that a failure on any of them puts every one back. Each
@@ -194,10 +199,10 @@ async function install({ yes = false, checks = true, ask = confirm, say = text =
   if (found && found.problems.length) return { code: 1, text: `Not installed:\n- ${found.problems.join('\n- ')}` };
   const waiting = busy();
   if (waiting) return { code: 1, text: `Not installed: ${waiting}. Run install again once nothing is running.` };
-  const claudeMd = claudeMdText(p);
   say([`crosscheck will be installed into ${p.code}.`,
     `settings.json: any earlier crosscheck hooks are replaced by crosscheck's (${Object.keys(ourHooks(p.code)).join(', ')}); every other hook and setting stays.`,
-    `CLAUDE.md becomes:\n${claudeMd}`, `the fallback agent: ${p.agent}`].join('\n'));
+    claudeMdText(p) === null ? 'CLAUDE.md stays as it is: it already imports the rules.' : `CLAUDE.md becomes:\n${claudeMdText(p)}`,
+    `the fallback agent: ${p.agent}`].join('\n'));
   if (!yes && !(await ask('Install? [y/N] '))) return { code: 1, text: 'Nothing was changed.' };
   if (checks) {
     const tests = run(process.execPath, ['--test'], __dirname);
@@ -216,11 +221,12 @@ async function install({ yes = false, checks = true, ask = confirm, say = text =
     for (const k of Object.keys(discovered)) if (JSON.stringify(now.data[k]) !== JSON.stringify(before.data[k])) delete discovered[k];
     const config = { ...now.data, ...discovered, model: now.data.model || state.config().model };
     const code = fs.readdirSync(path.join(__dirname, 'src')).map(f => [path.join(p.code, f), fs.readFileSync(path.join(__dirname, 'src', f), 'utf8')]);
+    const claudeMd = claudeMdText(p); // (read again now: a CLAUDE.md changed while install asked keeps its change)
     writeAll([...code,
       [path.join(p.code, 'RULES.md'), fs.readFileSync(path.join(__dirname, 'RULES.md'), 'utf8')],
       [p.agent, fs.readFileSync(path.join(__dirname, 'agents', 'fallback-reviewer.md'), 'utf8')],
       [state.files.config(), JSON.stringify(config, null, 2)],
-      [p.claudeMd, claudeMd],
+      ...(claudeMd === null ? [] : [[p.claudeMd, claudeMd]]), // (null: left out, since writeAll's null deletes)
       [p.settings, JSON.stringify({ ...settings, hooks: addHooks(withoutOurs(settings.hooks), ourHooks(p.code)) }, null, 2)], // (the switch)
     ]);
     return null;

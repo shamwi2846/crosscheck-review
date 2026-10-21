@@ -157,6 +157,7 @@ test('changed requirements acknowledge nothing, and a risky rating stays escalat
   fs.writeFileSync(path.join(hold, 'go'), '');
   const r = await running;
   assert.strictEqual(r.status, 'DONE', r.text);
+  assert.match(r.text, /the task's requirements changed during the review, so nothing was acknowledged: run the review again/);
   let s = stateOf(root);
   assert.deepStrictEqual(s.acks, {});
   assert.deepStrictEqual(Object.keys(s.changes).sort(), [key('src/a.js'), key('src/m.js')].sort());
@@ -167,9 +168,66 @@ test('changed requirements acknowledge nothing, and a risky rating stays escalat
   assert.strictEqual(again.status, 'DONE', again.text);
   const pairCalls = execCalls().slice(calls);
   assert.ok(pairCalls.some(c => c.prompt.includes('reviewer A.')) && pairCalls.some(c => c.prompt.includes('reviewer B.')));
+  assert.ok(pairCalls.every(c => c.prompt.includes('R2. Keeps the sum, rounded.')), 'the next review reads the changed requirement');
   s = stateOf(root);
   assert.ok(s.riskyReviews[key('src/m.js')], 'the pair it was escalated to records its review');
   assert.ok(s.changes[key('src/m.js')], 'still pending: it has no test plan');
+});
+
+test('edits outside Requirements do not void a running review', async () => {
+  const { root, taskFile } = project('t3b', { 'src/a.js': 'a0\n' });
+  fs.writeFileSync(path.join(root, 'src/a.js'), 'a1\n');
+  seed(root, s => { s.changes = { [key('src/a.js')]: change('src/a.js', 'A', 1, null) }; });
+  const hold = fs.mkdtempSync(path.join(HOME, 't3b-hold-'));
+  setSpec({ exec: [{ hold, text: answerOf() }] });
+  const running = review.review(root, { session: 'A', taskFile });
+  await waitFor(path.join(hold, 'started'));
+  // (Claude renames the task and records progress in its Notes while GPT works)
+  fs.writeFileSync(taskFile, fs.readFileSync(taskFile, 'utf8').replace(/^# .*$/m, '# t3b, renamed').replace('NOTES-SENTINEL: Claude\'s reasoning', 'NOTES-SENTINEL: Claude\'s reasoning\n- progress written while GPT worked'));
+  fs.writeFileSync(path.join(hold, 'go'), '');
+  const r = await running;
+  assert.strictEqual(r.status, 'DONE', r.text);
+  assert.doesNotMatch(r.text, /requirements changed/);
+  const s = stateOf(root);
+  assert.deepStrictEqual([s.acks[key('src/a.js')], s.changes[key('src/a.js')], s.running], [sha('a1\n'), undefined, {}]);
+  assert.ok(!execCalls().some(c => c.prompt.includes('NOTES-SENTINEL')), 'GPT never reads the Notes');
+});
+
+test('a named risky review keeps accompanying docs config and tests normal', async () => {
+  const { root, taskFile } = project('t3c', { 'src/payments.js': 'p0\n', 'README.md': 'r0\n', '.gitignore': 'g0\n' });
+  const rels = ['src/payments.js', 'README.md', '.gitignore', 'tests/payments.test.js'];
+  for (const [i, rel] of rels.entries()) {
+    fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
+    fs.writeFileSync(path.join(root, rel), `changed ${i}\n`);
+  }
+  seed(root, s => { s.changes = Object.fromEntries(rels.map((rel, i) => [key(rel), change(rel, 'A', i + 1, null)])); });
+  const risky = { level: 'risky', files: ['src/payments.js'], why: 'it moves money' };
+  const followed = JSON.stringify({ verdict: 'RESOLVED', followups: [], findings: [], requirements: [], possibly_missing: [], class: risky, coverage: 'c' });
+  setSpec({ byPrompt: [ // (the follow-up first: a fresh one's history holds reviewer A's prompt too)
+    { match: 'This is a follow-up round', answers: [{ text: followed, session: 'sess-A' }] },
+    { match: 'reviewer A. Check', answers: [{ text: answerOf({ class: risky }), session: 'sess-A' }] },
+    { match: 'reviewer B. Attack', answers: [{ text: answerOf({ class: risky }), session: 'sess-B' }] },
+  ] });
+  const r = await review.review(root, { session: 'A', taskFile, files: ['src/payments.js'], risky: true });
+  assert.strictEqual(r.status, 'DONE', r.text);
+  const manifest = JSON.parse(fs.readFileSync(path.join(r.bundle, 'manifest.json'), 'utf8'));
+  assert.deepStrictEqual([Object.keys(manifest.files).sort(), manifest.riskyKeys, manifest.paired], [rels.map(key).sort(), [key('src/payments.js')], true]);
+  const normalNow = what => {
+    const s = stateOf(root);
+    assert.ok(s.changes[key('src/payments.js')], `${what}: payments.js waits for its test plan`);
+    for (const rel of rels.slice(1)) {
+      assert.deepStrictEqual([!!s.acks[key(rel)], s.changes[key(rel)], s.escalations[key(rel)], s.needsPlan[key(rel)]], [true, undefined, undefined, undefined], `${what}: ${rel}`);
+    }
+  };
+  normalNow('the pair');
+  const responseFile = path.join(HOME, 't3c-response.md');
+  fs.writeFileSync(responseFile, 'payments.js: its test plan comes next');
+  assert.strictEqual((await review.followup(root, { chain: r.chain, responseFile })).status, 'DONE');
+  normalNow('its follow-up');
+  const prompts = execCalls().map(c => c.prompt);
+  const reviewers = prompts.filter(p => /reviewer [AB]\. (Check|Attack)/.test(p) && !p.includes('This is a follow-up round'));
+  assert.ok(reviewers.length === 2 && reviewers.every(p => p.includes('List a file as risky only when its own change can cause that harm')));
+  assert.match(prompts[prompts.length - 1], /with its files \(only those whose own change can cause the harm\)/);
 });
 
 test('a dead reservation is reclaimed, but an overlapping live review can neither take nor clear one', async () => {
