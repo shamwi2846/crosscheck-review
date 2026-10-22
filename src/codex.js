@@ -45,8 +45,10 @@ function buildArgs({ mode, effort, cwd, outFile, schemaFile, resume, persist, do
   const args = [cfg.codexJs, 'exec'];
   if (resume) args.push('resume');
   if (mode !== 'computer') args.push('--ignore-user-config');
+  // (the tier is always stated, since a computer run loads the user's Codex config, which may choose Fast itself)
+  const tier = (state.read(state.files.global()).data || {}).fast ? 'priority' : 'default';
   // (--json: Codex reports in JSON events, so its own errors can't be confused with the text GPT writes)
-  args.push('--json', '-m', cfg.model, ...configPairs([`model_reasoning_effort=${effort}`, `windows.sandbox=${cfg.windowsSandbox}`]));
+  args.push('--json', '-m', cfg.model, ...configPairs([`model_reasoning_effort=${effort}`, `windows.sandbox=${cfg.windowsSandbox}`, `service_tier="${tier}"`]));
   if (mode === 'computer') {
     args.push(...lockdown);
   } else {

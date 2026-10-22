@@ -213,3 +213,32 @@ test('a clean install passes doctor --live, run from the installed copy, and its
   assert.deepStrictEqual([execs[1].args[1], execs[1].args[execs[1].args.length - 2]], ['resume', execs[0].session]);
   assert.ok(['plugin list', 'mcp list', 'features list'].every(k => all.some(c => c.kind === k)) && execs.length === 2, 'the lockdown is only listed, never run');
 });
+
+test('doctor probes and usage indicator follow the fast switch', async () => {
+  await freshInstall();
+  const cli = path.join(PROFILE, 'crosscheck', 'crosscheck.js');
+  const repo = path.join(HOME, 'fast-repo'); // (status runs inside a project)
+  fs.mkdirSync(repo, { recursive: true });
+  spawnSync('git', ['init', '-q'], { cwd: repo });
+  const shown = text => (text.match(/GPT speed: Fast \(higher usage\)/g) || []).length;
+  const execs = () => calls().filter(c => c.kind === 'exec');
+  for (const [fast, tier] of [[undefined, 'default'], [true, 'priority'], [false, 'default']]) { // (never set, then on, then off)
+    assert.ok(state.update(state.files.global(), g => { if (fast === undefined) delete g.fast; else g.fast = fast; }).ok);
+    const status = spawnSync(process.execPath, [cli, 'status'], { cwd: repo, encoding: 'utf8' });
+    assert.strictEqual(shown(status.stdout), fast ? 1 : 0, status.stdout);
+    setSpec([]);
+    const plain = doctor(false, cli);
+    assert.strictEqual(shown(plain.stdout), fast ? 1 : 0, plain.stdout);
+    assert.strictEqual(execs().length, 0, 'plain doctor starts no GPT run');
+    setSpec([probe('probe.txt'), probe('probe-resumed.txt')]);
+    const live = doctor(true, cli);
+    assert.strictEqual(live.status, 0, live.stdout);
+    assert.strictEqual(shown(live.stdout), fast ? 1 : 0);
+    assert.strictEqual(execs().length, 2);
+    for (const c of execs()) {
+      assert.ok(c.args.includes(`service_tier="${tier}"`), `the probe runs at ${tier}`);
+      assert.ok(c.args.includes('-s') ? c.args[c.args.indexOf('-s') + 1] === 'read-only' : c.args.includes('sandbox_mode="read-only"'), 'and stays read-only');
+    }
+    assert.match(line(live.stdout, 'Read-only'), /^ok /);
+  }
+});

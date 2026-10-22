@@ -68,7 +68,7 @@ function isolated(call, { web = false, docs = false, effort }) {
   const docsArgs = !docs ? [] : [...c(`${k}.command="C:/docs/mql5-chm.exe"`), ...c(`${k}.args=["--serve"]`), ...c(`${k}.required=false`),
     ...c(`${k}.enabled_tools=["mql5_chm_status","mql5_chm_read"]`), ...c(`${k}.tools.mql5_chm_status.approval_mode="approve"`), ...c(`${k}.tools.mql5_chm_read.approval_mode="approve"`)];
   const resume = call.args[1] === 'resume';
-  const expected = ['exec', ...(resume ? ['resume'] : []), '--ignore-user-config', '--json', '-m', 'gpt-test', ...c(`model_reasoning_effort=${effort}`), ...c('windows.sandbox=unelevated'),
+  const expected = ['exec', ...(resume ? ['resume'] : []), '--ignore-user-config', '--json', '-m', 'gpt-test', ...c(`model_reasoning_effort=${effort}`), ...c('windows.sandbox=unelevated'), ...c('service_tier="default"'),
     ...['apps', 'plugins', 'multi_agent', 'image_generation', 'tool_suggest', 'computer_use', 'browser_use', 'in_app_browser'].flatMap(f => c(`features.${f}=false`)),
     ...(web ? [] : c('web_search="disabled"')), ...docsArgs, '--output-schema', '<schema>', '--skip-git-repo-check', '-o', '<out>',
     ...(resume ? [...c('sandbox_mode="read-only"'), '<session>', '-'] : ['-s', 'read-only', '-C', '<cwd>', '-'])];

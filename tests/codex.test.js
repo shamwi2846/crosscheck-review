@@ -53,7 +53,7 @@ test('a saved review and its resume keep isolation and the answer schema', async
   const second = await codex.ask({ mode: 'review', effort: 'high', resume: SESSION, schema, prompt: 'round 2', cwd: WORK });
   assert.strictEqual(second.ok, true, second.reason);
   const [fresh, resumed] = execCalls().map(c => placeholders(c.args));
-  const head = ['--json', '-m', 'gpt-test', '-c', 'model_reasoning_effort=high', '-c', 'windows.sandbox=unelevated', ...ISOLATION,
+  const head = ['--json', '-m', 'gpt-test', '-c', 'model_reasoning_effort=high', '-c', 'windows.sandbox=unelevated', '-c', 'service_tier="default"', ...ISOLATION,
     '-c', 'web_search="disabled"', '--output-schema', '<schema>', '--skip-git-repo-check', '-o', '<answer>'];
   assert.deepStrictEqual(fresh, ['exec', '--ignore-user-config', ...head, '-s', 'read-only', '-C', '<cwd>', '-']);
   assert.deepStrictEqual(resumed, ['exec', 'resume', '--ignore-user-config', ...head, '-c', 'sandbox_mode="read-only"', SESSION, '-']);
@@ -218,6 +218,63 @@ test('a login failure on the retry starts a 15-minute cooldown that other driver
   state.update(state.files.global(), g => { g.cooldownUntil = Date.now() - 1; });
   assert.strictEqual(otherDriver().ok, true);
   assert.strictEqual(execCalls().length, 3);
+});
+
+// The Fast switch's test plan: every run states Codex's tier, whatever the shared record or the user's Codex config says.
+const setFast = fast => state.update(state.files.global(), g => { if (fast === undefined) delete g.fast; else g.fast = fast; });
+const tiersOf = run => run.args.filter((a, i) => run.args[i - 1] === '-c' && a.startsWith('service_tier='));
+
+test('every run explicitly selects the shared tier without weakening isolation', async () => {
+  const profile = path.join(HOME, '.codex', 'config.toml'); // (the user's own config chooses Fast and write-capable tools)
+  const toml = 'service_tier = "priority"\n[features]\napps = true\n[mcp_servers.writer]\ncommand = "writer.exe"\n';
+  fs.mkdirSync(path.dirname(profile), { recursive: true });
+  fs.writeFileSync(profile, toml);
+  const schema = { type: 'object', properties: { verdict: { type: 'string' } }, required: ['verdict'], additionalProperties: false };
+  const docs = { command: 'docs.exe', args: ['server.mjs'], tools: ['mql5_chm_search'] };
+  for (const [fast, tier] of [[undefined, 'default'], [true, 'priority'], [false, 'default']]) {
+    setFast(fast);
+    setSpec({ exec: [{ text: '{"verdict":"NO_ISSUES"}' }], 'plugin list': [pluginList(ALLOWED)],
+      'mcp list': [serverList([['node_repl', RUNTIME], ['cua_repl', RUNTIME]])], 'features list': [featureList()] });
+    for (const request of [{ mode: 'review', persist: true, schema, docs }, { mode: 'review', resume: SESSION, schema }, { mode: 'review' }, { mode: 'research' }]) {
+      const r = await codex.ask({ effort: 'high', prompt: 'look', cwd: WORK, ...request });
+      assert.ok(r.ok, r.reason);
+    }
+    const lockdown = codex.computerLockdown();
+    assert.ok(lockdown.args, lockdown.problem);
+    assert.ok((await codex.ask({ mode: 'computer', lockdown: lockdown.args, effort: 'high', prompt: 'look only', cwd: WORK })).ok);
+    const [fresh, resumed, consult, research, computer] = execCalls();
+    for (const run of [fresh, resumed, consult, research, computer]) assert.deepStrictEqual(tiersOf(run), [`service_tier="${tier}"`], `fast ${fast}`);
+    for (const run of [fresh, resumed, consult, research]) {
+      assert.ok(run.args.includes('--ignore-user-config') && ISOLATION.every(a => run.args.includes(a)), 'isolated as before');
+      assert.ok(run.args.includes('read-only') || run.args.includes('sandbox_mode="read-only"'), 'read-only as before');
+    }
+    assert.ok(fresh.args.includes('--output-schema') && resumed.args.includes('--output-schema'));
+    assert.ok(fresh.args.includes('mcp_servers.mql5-chm.enabled_tools=["mql5_chm_search"]'), 'the docs server keeps only its lookup tools');
+    assert.ok(consult.args.includes('web_search="disabled"') && !research.args.includes('web_search="disabled"'), 'only research has the web');
+    assert.ok(computer.args.join('\n').includes(lockdown.args.join('\n')) && !computer.args.includes('--ignore-user-config'), 'the computer lockdown as before');
+  }
+  assert.strictEqual(fs.readFileSync(profile, 'utf8'), toml, "the user's Codex config is unchanged");
+  setFast(undefined);
+  fs.rmSync(profile);
+});
+
+test('fast limit keeps the selected tier and the shared cooldown', async () => {
+  setFast(true);
+  setSpec({ exec: [{ fail: 'error: something broke', code: 1 }, { fail: "You've hit your usage limit. Try again at 9:15 PM.", code: 1 }, { text: 'fine' }] });
+  const r = await codex.ask({ mode: 'review', effort: 'high', prompt: 'x', cwd: WORK });
+  assert.deepStrictEqual([r.ok, r.limit], [false, true]);
+  assert.deepStrictEqual(execCalls().map(tiersOf), [['service_tier="priority"'], ['service_tier="priority"']], 'the retry kept Fast');
+  const g = state.read(state.files.global()).data;
+  assert.ok(g.cooldownUntil > Date.now() && g.fast === true, 'the cooldown starts, and Fast stays on');
+  const otherDriver = () => JSON.parse(spawnSync(process.execPath, ['-e',
+    `require(${JSON.stringify(CODEX)}).ask({ mode: 'review', effort: 'high', prompt: 'y', cwd: ${JSON.stringify(WORK)} }).then(r => console.log(JSON.stringify(r)))`],
+  { env: process.env, encoding: 'utf8' }).stdout);
+  assert.strictEqual(otherDriver().unavailable, true);
+  assert.strictEqual(execCalls().length, 2, 'another driver starts nothing during the cooldown');
+  state.update(state.files.global(), x => { x.cooldownUntil = Date.now() - 1; });
+  assert.strictEqual(otherDriver().ok, true);
+  assert.deepStrictEqual(tiersOf(execCalls()[2]), ['service_tier="priority"'], 'after the cooldown, still Fast');
+  fs.rmSync(state.files.global());
 });
 
 test.after(() => fs.rmSync(HOME, { recursive: true, force: true }));

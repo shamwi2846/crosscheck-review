@@ -21,6 +21,7 @@ const USAGE = `Usage: crosscheck <command>
   gap [list] | gap <id> --fixed [--real-bug] | gap --add --where <file[:line]> --problem "..." --why "..." [--severity LOW]
   lesson --text "..."
   on | off                                         (only when the user asks)
+  fast on | fast off                               (Codex's Fast tier for every GPT run: faster, higher usage)
   testplan --files a,b [--context c,d]             (at most 5 cases, stored as the files' plan for this task)
   skip --files a,b --why "..."                     (no test plan needed for these files in this task)
   plan --file plan.md [--risky] | plan --skip --why "..." --file plan.md
@@ -124,6 +125,7 @@ function statusCommand(args) {
   const g = state.read(state.files.global());
   const shared = g.data || {};
   const lines = [`project: ${root}`, `crosscheck: ${g.unreadable ? `the shared state can't be read (${g.unreadable})` : shared.off ? 'OFF' : 'on'}`];
+  if (shared.fast) lines.push('GPT speed: Fast (higher usage)');
   if (shared.cooldownUntil > Date.now()) lines.push(`GPT is cooling down until ${new Date(shared.cooldownUntil).toLocaleTimeString()}: ${shared.cooldownReason}`);
   lines.push(`session: ${session || 'none (outside Claude Code: use --task and name the files)'}`);
   lines.push(`task file: ${taskFile ? `${taskFile}${fs.existsSync(taskFile) ? '' : ' (not written yet)'}` : 'none'}`);
@@ -175,6 +177,14 @@ function switchCommand(args) {
   const off = args._[0] === 'off';
   return done(state.update(state.files.global(), g => { g.off = off; if (off) delete g.screen; }),
     off ? 'crosscheck is OFF: the hooks check nothing until `crosscheck on`' : 'crosscheck is on');
+}
+
+// Codex's Fast tier for every GPT run crosscheck starts: faster, at a higher usage cost.
+function fastCommand(args) {
+  if (args._.length !== 2 || !['on', 'off'].includes(args._[1])) throw new Usage('fast takes on or off');
+  const fast = args._[1] === 'on';
+  return done(state.update(state.files.global(), g => { g.fast = fast; }),
+    fast ? 'GPT speed: Fast (higher usage), until `crosscheck fast off`' : 'GPT speed: normal');
 }
 
 async function computerCommand(args) {
@@ -237,13 +247,13 @@ async function simpleCommand(args) {
   return reported(await modes.simple(root, kind, input), false);
 }
 
-const COMMANDS = { review: reviewCommand, close: closeCommand, status: statusCommand, gap: gapCommand, lesson: lessonCommand, on: switchCommand, off: switchCommand,
+const COMMANDS = { review: reviewCommand, close: closeCommand, status: statusCommand, gap: gapCommand, lesson: lessonCommand, on: switchCommand, off: switchCommand, fast: fastCommand,
   testplan: testplanCommand, skip: skipCommand, plan: planCommand, idea: simpleCommand, digest: simpleCommand, research: simpleCommand, write: simpleCommand,
   computer: computerCommand, 'allow-screen': allowScreenCommand, doctor: doctorCommand };
 // The options each command takes; any other is wrong usage, so a typo never silently changes what runs.
 const OPTIONS = {
   review: ['files', 'risky', 'full', 'evidence-file', 'followup', 'file', 'fallback', 'answer', 'skip', 'why', 'task'],
-  close: ['note', 'task'], status: ['task'], lesson: ['text', 'task'], on: [], off: [],
+  close: ['note', 'task'], status: ['task'], lesson: ['text', 'task'], on: [], off: [], fast: [],
   gap: ['fixed', 'real-bug', 'add', 'where', 'problem', 'why', 'severity', 'trigger', 'fix', 'log', 'task'],
   testplan: ['files', 'context', 'task'], skip: ['files', 'why', 'task'], plan: ['file', 'risky', 'skip', 'why', 'task'],
   idea: ['file'], digest: ['files', 'dir', 'question'], research: ['question'], write: ['brief'], computer: ['task'], 'allow-screen': ['why'], doctor: ['live'],
