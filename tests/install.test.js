@@ -320,4 +320,28 @@ test('an imported CLAUDE.md saved while install writes its other files keeps tha
   assert.strictEqual(read(p.claudeMd), late);
 });
 
+test('fast is a validated global choice that survives reinstalls', async () => {
+  const p = profile('t9', { settings: oldSettings() });
+  const run = (...args) => spawnSync(process.execPath, [path.join(REPO, 'src', 'crosscheck.js'), ...args], { cwd: HOME, encoding: 'utf8', env: process.env });
+  const fastNow = () => json(state.files.global()).fast;
+  assert.strictEqual(fastNow(), undefined, 'off until switched on');
+  for (const [choice, value] of [['on', true], ['off', false]]) {
+    const r = run('fast', choice);
+    assert.strictEqual(r.status, 0, r.stdout);
+    assert.strictEqual(fastNow(), value);
+    for (const wrong of [['fast'], ['fast', 'fastest'], ['fast', choice, 'extra'], ['fast', choice, '--live']]) {
+      const before = read(state.files.global());
+      const refused = run(...wrong);
+      assert.strictEqual(refused.status, 2, `${wrong.join(' ')}: ${refused.stdout}`);
+      assert.match(refused.stdout, /fast on \| fast off +\(Codex's Fast tier for every GPT run: faster, higher usage\)/, 'the usage text explains it');
+      assert.strictEqual(read(state.files.global()), before, `${wrong.join(' ')} changes nothing`);
+    }
+    assert.strictEqual((await installer.install(quiet)).code, 0);
+    assert.strictEqual(fastNow(), value, 'an install keeps the choice');
+    const installed = spawnSync(process.execPath, ['-e', `console.log(JSON.stringify(require(${JSON.stringify(path.join(p.code, 'codex.js'))})
+      .buildArgs({ mode: 'review', effort: 'high', cwd: '.', outFile: 'o' })))`], { cwd: HOME, encoding: 'utf8', env: process.env });
+    assert.ok(JSON.parse(installed.stdout).includes(`service_tier="${value ? 'priority' : 'default'}"`), `a new process of the installed copy runs ${choice}: ${installed.stderr}`);
+  }
+});
+
 test.after(() => fs.rmSync(HOME, { recursive: true, force: true }));

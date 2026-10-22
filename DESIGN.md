@@ -110,6 +110,7 @@ Recorded overruns:
 - `lesson --text "..."`: adds a confirmed past mistake to the project's lessons, which every session start prints.
 - `status`: pending changes, open BUGs and open chains, in a few lines.
 - `on` / `off`: the switch, used only when the user asks.
+- `fast on` / `fast off`: Codex's Fast tier for every GPT run crosscheck starts, off until switched on. Codex describes it as 2x speed at higher usage; a short probe measured about 1.3 to 1.4 times faster end to end. `status` and `doctor` show a line while it is on. If Codex ever rejects the tier, each run fails as GPT unavailable with its reason, and `fast off` is the way back.
 - `allow-screen --why "..."`: a 30-minute window for Claude's own screen tools (section 9).
 - `doctor [--live]`: checks that Codex is found, the hooks are registered and the state can be read. `--live` also makes harmless real Codex calls: a read-only run that tries to write a file and must fail, the same check through a resumed session, and the computer lockdown listing (no screen action). It records the Codex version it verified, and warns when Codex has changed since. It runs after install and Codex updates.
 
@@ -178,6 +179,7 @@ Not carried over:
   - xhigh: test plans, risky reviews and their follow-ups, risky plan reviews, the check before a risky release;
   - medium: `write`;
   - high: everything else.
+- **Speed:** every run states Codex's tier, `service_tier="priority"` (Fast) while `fast` is on and `"default"` otherwise, so the user's own Codex config can't make a computer run fast while the switch is off.
 - **Isolation for every mode except computer use:**
   - `--ignore-user-config`, a read-only sandbox, and the features `apps`, `plugins`, `multi_agent`, `image_generation`, `tool_suggest`, `computer_use`, `browser_use` and `in_app_browser` switched off;
   - web search off, except in `research`;
@@ -220,6 +222,7 @@ Not carried over:
 
 - **The shared records in `global.json`** (hooks read them; the CLI writes them, each under the global lock):
   - `off`: true while the user has switched the driver off;
+  - `fast`: true while Codex's Fast tier is on (`fast on` / `fast off`);
   - `plans`: `{ <hash>: { at, skip? } }`, a reviewed or skipped plan by the hash of its text with every run of whitespace made one space (`planHash` in `hook.js`, shared with the `plan` command);
   - `sessions`: `{ <session id>: { roots, at } }`, the projects a session edited (Stop checks them all);
   - `desktop`: `{ pid, workers, project, at }`, the computer run that owns the desktop: its driver and every Codex worker process it noted, written as they are noted;

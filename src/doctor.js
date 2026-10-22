@@ -115,6 +115,7 @@ function checks() {
     const missing = [docs.command, ...docs.args.filter(a => /[\\/]|\.[cm]?js$|\.py$/i.test(a))].filter((f, i) => !(i === 0 ? findable(f) : fs.existsSync(f)));
     return [!missing.length, missing.length ? `missing: ${missing.join(', ')}` : `${docs.command} ${docs.args.join(' ')}`];
   });
+  if ((state.read(state.files.global()).data || {}).fast) check('GPT speed', () => [true, 'Fast (higher usage)']);
   check('Hook problems', () => {
     const log = path.join(state.HOME, 'hooks.log');
     const recent = fs.existsSync(log) ? fs.readFileSync(log, 'utf8').split('\n').filter(l => Date.parse(l.slice(0, 24)) > Date.now() - 86400000) : [];

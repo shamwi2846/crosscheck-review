@@ -326,3 +326,38 @@ test('a CLI concession because of the round limit fails after its one repair, an
   assert.match(closing.stdout, /the round limit is never a reason/);
   assert.deepStrictEqual([JSON.stringify(stateOf(root)), fs.existsSync(path.join(root, gaps.NAME))], before, 'F1 stays open, the chain open, no gap written');
 });
+
+test('fast toggle preserves concurrent global safety updates', async () => {
+  const global = state.files.global();
+  fs.writeFileSync(global, JSON.stringify({ off: false, plans: { abc: { at: 1 } } }));
+  const hold = fs.mkdtempSync(path.join(HOME, 'fast-hold-'));
+  // (a worker holds the shared lock and, before letting go, records a cooldown, a screen window, a desktop owner and a plan)
+  const worker = spawn(process.execPath, ['-e', `
+    const fs = require('fs'), path = require('path'), state = require(${JSON.stringify(path.join(__dirname, '..', 'src', 'state.js'))});
+    const hold = ${JSON.stringify(hold)};
+    state.update(state.files.global(), g => {
+      fs.writeFileSync(path.join(hold, 'started'), '');
+      const until = Date.now() + 6000;
+      while (!fs.existsSync(path.join(hold, 'go')) && Date.now() < until) {}
+      Object.assign(g, { cooldownUntil: Date.now() + 15 * 60000, cooldownReason: 'usage limit', screen: { session: 'S', until: Date.now() + 60000, why: 'w' },
+        desktop: { pid: 1, workers: [], project: 'p', at: 1 } });
+      g.plans.def = { at: 2 };
+    });`], { env: process.env, stdio: 'ignore' });
+  await waitFor(path.join(hold, 'started'));
+  const toggling = spawn(process.execPath, [CLI, 'fast', 'on'], { cwd: HOME, env: env('A'), stdio: ['ignore', 'pipe', 'ignore'] });
+  let out = '';
+  toggling.stdout.on('data', d => { out += d; });
+  await sleep(400);
+  assert.strictEqual(state.read(global).data.fast, undefined, 'the toggle waits for the lock');
+  fs.writeFileSync(path.join(hold, 'go'), '');
+  const code = await new Promise(resolve => (toggling.exitCode !== null ? resolve(toggling.exitCode) : toggling.on('exit', resolve)));
+  if (worker.exitCode === null) await new Promise(resolve => worker.on('exit', resolve));
+  assert.strictEqual(code, 0, out);
+  const g = state.read(global).data;
+  assert.deepStrictEqual([g.fast, g.off, Object.keys(g.plans).sort(), g.screen.session, g.desktop.pid, g.cooldownReason], [true, false, ['abc', 'def'], 'S', 1, 'usage limit']);
+  setSpec({ exec: [{ text: 'fine' }] });
+  const blocked = await require('../src/codex').ask({ mode: 'review', effort: 'high', prompt: 'x', cwd: HOME });
+  assert.strictEqual(blocked.unavailable, true);
+  assert.strictEqual(calls(), 0, 'the cooldown still blocks GPT: Codex never starts');
+  fs.rmSync(global);
+});
