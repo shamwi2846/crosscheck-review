@@ -47,13 +47,14 @@ function targetsOf(root, taskFile, files) {
   return { task, rels };
 }
 
-const TESTPLAN_RULES = `You design the test cases for a change before its code is written, for the project in the current folder (read-only). Read the target files (some may not exist yet) and the context files yourself.
-At most 5 cases: the main path, plus the realistic ways the change could lose money, lose data or open a security hole. No variants, nothing for logging, formatting or unlikely edge cases.
-Each case: id (T1, T2, ... in order); severity (CRITICAL, HIGH or MEDIUM); covers: the target paths it tests, written exactly as listed below; reqs: the requirement ids it serves; input; expected; test_file (a path inside the project) and test_name.
+const TESTPLAN_RULES = `You design the test cases for a change before its code is written, for the project in the current folder (read-only). Read the target files (some may not exist yet), the context files and the project's existing tests yourself.
+A case is a realistic way the change could lose money, lose data or open a security hole (rare ones included) that no existing test already catches. At most 5, and only as many as earn their cost: none is a fine answer. No case for a path that can't cause that harm, for logging or formatting, or for a variant of another case.
+Each case: id (T1, T2, ... in order); severity (CRITICAL, HIGH or MEDIUM); covers: the target paths it tests, written exactly as listed below; reqs: the requirement ids it serves; input; expected; test_file (a path inside the project) and test_name: the smallest test that really catches the failure (a function's own test where that reproduces it; an end-to-end run, such as the Strategy Tester, only where the risk lies in that boundary).
+no_case: each target no case covers, with the concrete reason it needs none (its change can't cause that harm, or the existing tests you name already catch it).
 not_worth_testing: one line on what you left out and why.`;
 
-// Designs a change's test cases with GPT at xhigh, and stores each covered target's cases as its plan for the task,
-// only if the task's requirements didn't change meanwhile.
+// Designs a change's test cases with GPT at xhigh, and stores each target's cases (or GPT's reason it needs none) as
+// its plan for the task, only if the task's requirements didn't change meanwhile.
 async function testplan(root, { taskFile, files, context = [] }) {
   const found = targetsOf(root, taskFile, files);
   if (found.why) return refused(found.why);
@@ -65,24 +66,24 @@ async function testplan(root, { taskFile, files, context = [] }) {
     + `## Target files\n${rels.map(r => `- ${r}${fs.existsSync(path.join(root, r)) ? '' : ' (new)'}`).join('\n')}\n\n## Context files\n${context.map(c => `- ${c}`).join('\n') || 'None.'}\n`;
   const r = await ask(root, 'testplan', prompt, { asked: { targets: rels, linkIds: task.ids }, effort: 'xhigh', docs });
   if (r.status !== 'OK') return failed(r);
-  const covered = rels.filter(rel => r.answer.cases.some(c => c.covers.includes(rel)));
+  // (the answer's check made sure every target has a case or one reason)
   const done = state.update(state.files.project(root), data => {
     const s = review.withMaps(data);
     const now = review.taskInfo(taskFile);
     if (!now || now.reqHash !== task.reqHash) return 'the task\'s requirements changed while GPT designed the cases, so nothing was stored: run testplan again';
-    for (const rel of covered) {
+    for (const rel of rels) {
       const cases = r.answer.cases.filter(c => c.covers.includes(rel));
+      const none = r.answer.no_case.find(n => n.target === rel);
       s.plans[state.pathKey(rel)] = { task: task.id, reqHash: task.reqHash, at: Date.now(),
         cases: cases.map(c => ({ id: c.id, text: `[${c.severity}] ${c.input} -> ${c.expected} (${c.reqs.join(', ')})`, test: `${c.test_file} — ${c.test_name}` })),
-        tests: [...new Set(cases.map(c => c.test_file.trim().replace(/\\/g, '/')))] };
+        tests: [...new Set(cases.map(c => c.test_file.trim().replace(/\\/g, '/')))], ...(none ? { why: none.why.trim() } : {}) };
     }
     return null;
   });
   if (!done.ok || done.value) return refused(done.why || done.value);
-  const uncovered = rels.filter(rel => !covered.includes(rel));
   return { status: 'DONE', text: [...r.answer.cases.map(c => `${c.id} [${c.severity}] covers ${c.covers.join(', ')} (${c.reqs.join(', ')}): ${c.input} -> ${c.expected} (test: ${c.test_file} — ${c.test_name})`),
-    `not worth testing: ${r.answer.not_worth_testing}`, `stored as this task's test plan of: ${covered.join(', ')}`,
-    ...(uncovered.length ? [`no case covers ${uncovered.join(', ')}, so no plan was stored for it: plan it again`] : [])].join('\n') };
+    ...r.answer.no_case.map(n => `no case for ${n.target}: ${n.why.trim()}`),
+    `not worth testing: ${r.answer.not_worth_testing}`, `stored as this task's test plan of: ${rels.join(', ')}`].join('\n') };
 }
 
 // Records that files need no test plan in this task; refused once GPT rated one risky in it, or while it is escalated.

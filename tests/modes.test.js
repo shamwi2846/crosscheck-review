@@ -83,7 +83,7 @@ test('every GPT job is read-only and isolated; research alone has the web, MQL5 
   seed(root, s => { s.changes = { [key('src/EA.mq5')]: { path: 'src/EA.mq5', session: 'A', at: 1, baseline: null } }; });
   setSpec({ byPrompt: [
     { match: 'reviewer A. Check', answers: [reviewAnswer()] }, { match: 'reviewer B. Attack', answers: [reviewAnswer()] },
-    { match: 'You design the test cases', answers: [json({ cases: [testCase('T1', ['src/EA.mq5'])], not_worth_testing: '-' })] },
+    { match: 'You design the test cases', answers: [json({ cases: [testCase('T1', ['src/EA.mq5'])], no_case: [], not_worth_testing: '-' })] },
     { match: 'You review a plan before', answers: [reviewAnswer()] },
     { match: 'second opinion on a proposal', answers: [json({ verdict: 'SOUND', recommendation: 'go', points: [] })] },
     { match: 'You read large material', answers: [json({ answer: 'all passed', evidence: [], counts: { passed: 1, failed: 0, first_failure: null }, scope: 'run.log', confidence: 'proven' })] },
@@ -128,9 +128,9 @@ test('a test plan is checked against its targets and stored for the named task o
   const taskA = review.sessionTask(root, 'A');
   assert.strictEqual(taskA.reqHash, taskB.reqHash, 'the same requirements, another task');
   setSpec({ byPrompt: [{ match: 'You design the test cases', answers: [
-    json({ cases: [testCase('T1', ['docs/spec.md'])], not_worth_testing: '-' }),
-    json({ cases: [testCase('T1', [])], not_worth_testing: '-' }),
-    json({ cases: [testCase('T1', ['src/EA.mq5', 'src/Risk.mqh']), testCase('T2', ['src/Risk.mqh'])], not_worth_testing: '-' }),
+    json({ cases: [testCase('T1', ['docs/spec.md'])], no_case: [], not_worth_testing: '-' }),
+    json({ cases: [testCase('T1', [])], no_case: [], not_worth_testing: '-' }),
+    json({ cases: [testCase('T1', ['src/EA.mq5', 'src/Risk.mqh']), testCase('T2', ['src/Risk.mqh'])], no_case: [], not_worth_testing: '-' }),
   ] }] });
   assert.strictEqual(cli(root, ['testplan', '--task', taskB.file]).status, 2, 'no --files is wrong usage');
   const args = ['testplan', '--task', taskB.file, '--files', 'src/EA.mq5,src/Risk.mqh', '--context', 'docs/spec.md'];
@@ -157,7 +157,7 @@ test('a test plan is stored only if the requirements still hold once it has the 
   const old = { task: task.id, reqHash: task.reqHash, cases: [{ id: 'T1', text: 'old', test: 'tests/old.test.js — old' }], tests: ['tests/old.test.js'], at: 1 };
   seed(root, s => { s.plans = { [key('src/a.js')]: old, [key('src/b.js')]: old }; s.acks = { other: 'kept' }; });
   const hold = fs.mkdtempSync(path.join(HOME, 't3-hold-'));
-  setSpec({ byPrompt: [{ match: 'You design the test cases', answers: [{ hold, ...json({ cases: [testCase('T1', ['src/a.js', 'src/b.js'])], not_worth_testing: '-' }) }] }] });
+  setSpec({ byPrompt: [{ match: 'You design the test cases', answers: [{ hold, ...json({ cases: [testCase('T1', ['src/a.js', 'src/b.js'])], no_case: [], not_worth_testing: '-' }) }] }] });
   const running = spawn(process.execPath, [CLI, 'testplan', '--files', 'src/a.js,src/b.js'], { cwd: root, env: env('A'), stdio: ['ignore', 'pipe', 'ignore'] });
   let out = '';
   running.stdout.on('data', d => { out += d; });
@@ -199,6 +199,52 @@ test('a skip is refused for a file GPT rated risky in this task, even after its 
   assert.strictEqual(r.status, 1, r.stdout);
   assert.match(r.stdout, /only a test plan counts/);
   assert.deepStrictEqual([stateOf(root), execCalls().length], [before, calls]);
+});
+
+test('a plan target left with neither a case nor a reason stores nothing, after one repair', () => {
+  const root = project('t4b', { 'src/EA.mq5': 'e\n', 'src/Lots.mqh': 'l\n' });
+  const task = review.sessionTask(root, 'A');
+  const old = { task: task.id, reqHash: task.reqHash, cases: [{ id: 'T1', text: 'old', test: 'tests/old.test.js — old' }], tests: ['tests/old.test.js'], at: 1 };
+  seed(root, s => { s.plans = { [key('src/EA.mq5')]: old }; });
+  setSpec({ byPrompt: [{ match: 'You design the test cases', answers: [
+    json({ cases: [testCase('T1', ['src/EA.mq5'])], no_case: [], not_worth_testing: '-' }),
+    json({ cases: [testCase('T1', ['src/EA.mq5'])], no_case: [{ target: 'src/Lots.mqh', why: ' ' }], not_worth_testing: '-' }), // (a reason must say something)
+  ] }] });
+  const r = cli(root, ['testplan', '--files', 'src/EA.mq5,src/Lots.mqh']);
+  assert.strictEqual(r.status, 1, r.stdout);
+  assert.match(r.stdout, /src\/Lots\.mqh/);
+  assert.deepStrictEqual(execCalls().map(c => c.args[1] === 'resume'), [false, true], 'one repair, in its session');
+  assert.deepStrictEqual(stateOf(root).plans, { [key('src/EA.mq5')]: old }, 'nothing stored, nothing overwritten');
+  const edit = hook.handle('edit', { session_id: 'A', cwd: root, tool_name: 'Write', tool_input: { file_path: path.join(root, 'src/Lots.mqh'), content: 'x' } });
+  assert.match(denial(edit), /needs a test plan/);
+});
+
+test('a target planned with no case, for its reason, counts as its plan, and its reviewers see the reason', () => {
+  const root = project('t4c', { 'src/Lots.mqh': 'l\n', 'tests/lots.test.js': 't\n' });
+  const task = review.sessionTask(root, 'A');
+  seed(root, s => { s.needsPlan = { [key('src/Lots.mqh')]: [{ task: task.id, reqHash: task.reqHash }] }; }); // (rated risky: a skip wouldn't count)
+  const why = 'tests/lots.test.js "caps the volume at the broker maximum" already fails on the changed branch';
+  setSpec({ byPrompt: [
+    { match: 'reviewer A. Check', answers: [reviewAnswer()] }, { match: 'reviewer B. Attack', answers: [reviewAnswer()] },
+    { match: 'You design the test cases', answers: [json({ cases: [], no_case: [{ target: 'src/Lots.mqh', why }], not_worth_testing: '-' })] },
+  ] });
+  const planned = cli(root, ['testplan', '--files', 'src/Lots.mqh']);
+  assert.strictEqual(planned.status, 0, planned.stdout);
+  assert.ok(planned.stdout.includes(`no case for src/Lots.mqh: ${why}`), planned.stdout);
+  const s = stateOf(root);
+  const plan = s.plans[key('src/Lots.mqh')];
+  assert.deepStrictEqual([plan.task, plan.reqHash, plan.cases, plan.tests, plan.why], [task.id, task.reqHash, [], [], why]);
+  assert.deepStrictEqual(s.skips, {}, 'a plan, not a skip');
+  const edit = hook.handle('edit', { session_id: 'A', cwd: root, tool_name: 'Write', tool_input: { file_path: path.join(root, 'src/Lots.mqh'), content: 'l2\n' } });
+  assert.strictEqual(denial(edit), null);
+  fs.writeFileSync(path.join(root, 'src/Lots.mqh'), 'l2\n');
+  const r = cli(root, ['review']);
+  assert.strictEqual(r.status, 0, r.stdout);
+  const reviewers = execCalls().filter(c => /reviewer [AB]\. (Check|Attack)/.test(c.prompt));
+  assert.strictEqual(reviewers.length, 2);
+  for (const c of reviewers) assert.ok(c.prompt.includes(`### Test plan of src/Lots.mqh\n- no case: ${why}`), 'each reviewer sees the reason');
+  const after = stateOf(root);
+  assert.deepStrictEqual([!!after.acks[key('src/Lots.mqh')], after.changes[key('src/Lots.mqh')]], [true, undefined], 'acknowledged by its pair');
 });
 
 test('the plan gate accepts only the text reviewed, or a plan skipped with its reason', async () => {

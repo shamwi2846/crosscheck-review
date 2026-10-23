@@ -43,6 +43,7 @@ const SCHEMAS = {
   testplan: object({
     cases: list(object({ id: text, severity: oneOf('CRITICAL', 'HIGH', 'MEDIUM'), covers: list(text), reqs: list(text), input: text, expected: text,
       test_file: text, test_name: text })),
+    no_case: list(object({ target: text, why: text })),
     not_worth_testing: text,
   }),
   idea: object({ verdict: oneOf('SOUND', 'CHANGES_RECOMMENDED', 'AGAINST'), recommendation: text,
@@ -122,8 +123,19 @@ function read(kind, answerText, asked) {
   }
   if (kind === 'testplan') {
     // (`asked.targets`: the target paths exactly as the prompt listed them; a test file must be inside the project)
-    if (!answer.cases.length || answer.cases.length > 5) problems.push(`a plan has 1 to 5 cases, not ${answer.cases.length}`);
+    if (answer.cases.length > 5) problems.push(`a plan has at most 5 cases, not ${answer.cases.length}`);
     exactlyOnce(answer.cases.map(c => c.id), answer.cases.map((c, i) => `T${i + 1}`), 'case');
+    // (every target has a case, or GPT's reason it needs none: a plan never counts for a file nobody judged)
+    const covered = asked.targets.filter(t => answer.cases.some(c => c.covers.includes(t)));
+    for (const n of answer.no_case) {
+      if (!asked.targets.includes(n.target)) problems.push(`no_case names ${n.target}: name targets exactly as listed`);
+      else if (covered.includes(n.target)) problems.push(`${n.target} has a case, so it takes no no_case reason`);
+      if (!n.why.trim()) problems.push(`no_case for ${n.target} gives no reason`);
+    }
+    for (const t of asked.targets) {
+      const reasons = answer.no_case.filter(n => n.target === t).length;
+      if (!covered.includes(t) && reasons !== 1) problems.push(`${t} needs a case, or one no_case reason, not ${reasons}`);
+    }
     for (const c of answer.cases) {
       if (!c.covers.length) problems.push(`${c.id} covers no target`);
       for (const p of c.covers) if (!asked.targets.includes(p)) problems.push(`${c.id} covers ${p}: covers must name targets exactly as listed`);
