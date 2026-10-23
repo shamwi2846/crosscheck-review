@@ -129,6 +129,43 @@ test('a commit is refused while the chosen repository has unreviewed changes or 
   assert.strictEqual(commit(), null);
 });
 
+test('a Git Bash leading cd cannot bypass the target repository\'s commit guard on Windows', { skip: process.platform !== 'win32' && 'Git Bash drive paths are Windows-only' }, () => {
+  const a = project('t3g a');
+  const b = project('t3g b with spaces', { 'src/old.js': 'old\n' });
+  fs.writeFileSync(path.join(b, 'src/old.js'), 'changed by Claude\n');
+  seed(b, s => {
+    s.acks = { [key('src/old.js')]: sha('old\n') };
+    s.chains = { C1: { closed: false, files: { [key('src/old.js')]: 'src/old.js' }, findings: { F1: { label: 'BUG', status: 'open', location: 'src/old.js:1', title: 'loses data' } } } };
+  });
+  const gitBash = p => `/${p[0].toLowerCase()}${p.slice(2).replace(/\\/g, '/')}`; // (C:\x\y as Git Bash spells it: /c/x/y)
+  const fromProfile = path.relative(os.homedir(), b).replace(/\\/g, '/');
+  // [tool, command]: Git Bash's ~ is its HOME (here a folder other than the profile), PowerShell's ~ the profile folder
+  const forms = [['Bash', `cd "${gitBash(b)}" && git commit -m change`], ['Bash', `git -C "${gitBash(b)}" commit -m change`],
+    ['Bash', `cd ~/"${path.basename(b)}" && git commit -m change`], ['Bash', `git -C ~/"${path.basename(b)}" commit -m change`],
+    ...(fromProfile.startsWith('..') ? [] : [['PowerShell', `cd ~/"${fromProfile}"; git commit -m change`]])];
+  const HOME_BEFORE = process.env.HOME;
+  process.env.HOME = gitBash(path.dirname(b));
+  try {
+    const commit = ([tool, command]) => hook.handle('bash', { session_id: 'S', cwd: a, tool_name: tool, tool_input: { command } });
+    for (const form of forms) {
+      const first = denial(commit(form));
+      assert.match(first || '', /src\/old\.js/, form[1]);
+      assert.match(first, /open BUG/, form[1]);
+    }
+    // (a long path in an earlier git -C made a nested pattern take exponential time, so the guard timed out and let it through)
+    const started = Date.now();
+    assert.match(denial(commit(['Bash', `git -C C:/${'a'.repeat(40)} status && git -C "${gitBash(b)}" commit -m change`])) || '', /src\/old\.js/);
+    assert.ok(Date.now() - started < 2000, `the guard answered in ${Date.now() - started} ms`);
+    seed(b, s => { s.acks[key('src/old.js')] = sha('changed by Claude\n'); });
+    for (const form of forms) assert.doesNotMatch(denial(commit(form)) || 'allowed', /differ from their last reviewed version/, form[1]);
+    for (const form of forms) assert.match(denial(commit(form)) || '', /open BUG/, `${form[1]}: the BUG still blocks`);
+    seed(b, s => { s.chains.C1.findings.F1.status = 'resolved'; });
+    for (const form of forms) assert.strictEqual(commit(form), null, form[1]);
+  } finally {
+    if (HOME_BEFORE === undefined) delete process.env.HOME; else process.env.HOME = HOME_BEFORE;
+  }
+});
+
 test('leaving plan mode needs a review or skip of the plan presented', () => {
   const reviewed = '# Plan\n\nStep one.\nStep two.\n';
   const file = path.join(HOME, 't4-plan.md');
