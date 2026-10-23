@@ -48,7 +48,7 @@ function targetsOf(root, taskFile, files) {
 }
 
 const TESTPLAN_RULES = `You design the test cases for a change before its code is written, for the project in the current folder (read-only). Read the target files (some may not exist yet), the context files and the project's existing tests yourself.
-A case is a realistic way the change could lose money, lose data or open a security hole (rare ones included) that no existing test already catches. At most 5, and only as many as earn their cost: none is a fine answer. No case for a path that can't cause that harm, for logging or formatting, or for a variant of another case.
+A case is a realistic way the change could lose money, lose data or open a security hole (rare ones included) that no existing test already catches. At most 5, and only as many as earn their cost: none is a fine answer. No case for a path that can't cause that harm (most logging and formatting), or for a variant of another case.
 Each case: id (T1, T2, ... in order); severity (CRITICAL, HIGH or MEDIUM); covers: the target paths it tests, written exactly as listed below; reqs: the requirement ids it serves; input; expected; test_file (a path inside the project) and test_name: the smallest test that really catches the failure (a function's own test where that reproduces it; an end-to-end run, such as the Strategy Tester, only where the risk lies in that boundary).
 no_case: each target no case covers, with the concrete reason it needs none (its change can't cause that harm, or the existing tests you name already catch it).
 not_worth_testing: one line on what you left out and why.`;
