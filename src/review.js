@@ -224,6 +224,10 @@ function callersOf(root, riskyPaths, reviewedKeys) {
   });
 }
 
+// (a plan may name existing tests or none at all, and a fix may rely on a test already there, so the reviewers check
+// that those tests really catch the failure)
+const TESTS_CHECK = 'Tests: check that each test-plan case\'s test (new or existing) would catch the failure it names, that a target planned with no case has a reason that holds, and that each fixed BUG has a test that would catch it again (an existing or planned one counts, and one test may cover related BUGs; a BUG that only records an unmet requirement needs one only when money, data or security depends on it). A risk to money, data or security left untested is a finding.';
+
 const RULES = `You review a code change for the project in the current folder, which you may read (read-only) for context.
 The reviewed files may change while you work: read a reviewed file only from its frozen copy, listed under "Frozen copies".
 When the change alters what a function takes, returns or promises, search the project for every caller and check each one against it; report a broken caller at the changed function.
@@ -231,7 +235,8 @@ Report every real problem as a finding:
 - BUG: it can really happen in normal use (a real caller, input or user action) and cause real harm: a wrong result, lost data, lost money or a security hole. In money or trading code, an unlikely trigger with a big possible loss is a BUG too.
 - GAP: anything else worth recording. No style remarks.
 Before reporting a finding, re-read the lines and confirm its trigger can really happen: a caller, input, user action or the platform reaches the path, the value can really be that, and that path really produces the claimed failure.
-Each finding: severity; title; location: one of the reviewed paths below exactly, optionally with :line or :line-line, or "-" for the task as a whole; trigger; harm; failure; fix: the smallest change that works, with no option, layer or config the problem doesn't need; test (required for CRITICAL and HIGH, else null); label; reqs: the requirement ids it shows unmet.
+Each finding: severity; title; location: one of the reviewed paths below exactly, optionally with :line or :line-line, or "-" for the task as a whole; trigger; harm; failure; fix: the smallest change that works, with no option, layer or config the problem doesn't need; test (the test that would catch it again, new or existing) required for CRITICAL and HIGH, else null; label; reqs: the requirement ids it shows unmet.
+${TESTS_CHECK}
 Rate every requirement once: MET (with evidence as path:line), PARTIAL, NOT_MET, or NOT_IN_THIS_CHANGE.
 possibly_missing: requirements the work clearly needs that the list lacks (suggestions only).
 class: none (no behavior change), normal, or risky (money and payments, deleting or migrating data, security, anything that can't be undone; in trading code orders, lots, SL/TP, risk, EA inputs and .set presets; or code risky code uses), with the files it applies to and why. List a file as risky only when its own change can cause that harm: a test, doc or config file is not risky just because it sits next to risky code.
@@ -242,7 +247,8 @@ const FOLLOWUP_RULES = `This is a follow-up round of your review of the project 
 The reviewed files may change while you work: read a reviewed file only from its frozen copy, listed under "Frozen copies".
 A file shown as unchanged since the last round is the version that round reviewed: read its frozen copy whenever an open finding, a changed requirement or a caller needs it.
 Answer every open finding once, by id: RESOLVED (the code now fixes it), MAINTAIN (it still stands) or CONCEDE (it was never real), with your reason.
-Report a new finding only for a real problem in the changed lines or the code that calls them, of MEDIUM severity or above (a LOW one is recorded as a gap). Its fields and labels are those of a review: BUG when it can really happen in normal use and cause real harm (in money or trading code, an unlikely trigger with a big possible loss too), else GAP; location: one of the reviewed paths exactly, optionally with :line or :line-line, or "-" for the task as a whole; test required for CRITICAL and HIGH.
+Report a new finding only for a real problem in the changed lines or the code that calls them, of MEDIUM severity or above (a LOW one is recorded as a gap). Its fields and labels are those of a review: BUG when it can really happen in normal use and cause real harm (in money or trading code, an unlikely trigger with a big possible loss too), else GAP; location: one of the reviewed paths exactly, optionally with :line or :line-line, or "-" for the task as a whole; test (the test that would catch it again, new or existing) required for CRITICAL and HIGH.
+${TESTS_CHECK}
 Rate only the requirements under "Changed requirements" (none: no rows). A finding may name any requirement of the task.
 class: none, normal or risky for the changed code, with its files (only those whose own change can cause the harm) and why. coverage: one line.
 verdict: ISSUES_REMAIN when a finding is maintained, a new finding is reported or a rated requirement is unmet, else RESOLVED.`;
@@ -280,10 +286,12 @@ function freeze(root, { attempt, session, names = [], files, admittedAt, rev, ta
     if (addWhole) code.push(`### ${f.path} (whole file, read in full)\n${fence(snapText(root, f.frozen))}`);
     if (paired && (riskyKeys.includes(key) || shown.whole)) wholeKeys.push(key);
   }
-  // A plan counts only for this task and its current requirements; the cases and the frozen tests go to GPT.
+  // A plan counts only for this task and its current requirements; the cases (or GPT's reason for none) and the frozen
+  // tests go to GPT.
   const current = Object.fromEntries(Object.entries(plans).filter(([, p]) => p.task === taskId && p.reqHash === task.reqHash));
-  const planText = Object.entries(current).map(([key, p]) => `### Test plan of ${files[key].path}\n${(p.cases || []).map(c => `- ${c.id}: ${c.text} (test: ${c.test})`).join('\n')}\n`
-    + (p.tests || []).map(t => { const bytes = bytesOf(path.join(root, t)); return `- frozen test ${t}: ${bytes === null ? '(missing)' : snapFile(root, snapshot(root, bytes))}`; }).join('\n')).join('\n\n');
+  const planText = Object.entries(current).map(([key, p]) => [`### Test plan of ${files[key].path}`,
+    ...(p.cases || []).map(c => `- ${c.id}: ${c.text} (test: ${c.test})`), ...(p.why ? [`- no case: ${p.why}`] : []),
+    ...(p.tests || []).map(t => { const bytes = bytesOf(path.join(root, t)); return `- frozen test ${t}: ${bytes === null ? '(missing)' : snapFile(root, snapshot(root, bytes))}`; })].join('\n')).join('\n\n');
   const callers = paired ? callersOf(root, riskyKeys.map(k => files[k].path), new Set(Object.keys(files))) : [];
   const callerText = callers.slice(0, 20).map(p => `- ${p}: ${snapFile(root, snapshot(root, fs.readFileSync(path.join(root, p))))}`).join('\n')
     + (callers.length > 20 ? `\n(${callers.length - 20} more not shown)` : '');

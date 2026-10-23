@@ -254,7 +254,7 @@ function stop(inp) {
   }
   if (problems.length) log(`state can't be read: ${problems.join('; ')}`);
   if (bugs.length && !inp.stop_hook_active) {
-    return { decision: 'block', reason: `Open BUG findings: ${listed(bugs)}. Fix each one with a regression test and run the follow-up (${CLI} review --followup <chain> --file <response.md>), or close the chain with a reason per BUG (${CLI} close <chain> --note "...").` };
+    return { decision: 'block', reason: `Open BUG findings: ${listed(bugs)}. Fix each one with a regression test that would catch it again (an existing or planned one that does counts; a BUG that only records an unmet requirement needs one only when money, data or security depends on it) and run the follow-up (${CLI} review --followup <chain> --file <response.md>), or close the chain with a reason per BUG (${CLI} close <chain> --note "...").` };
   }
   const notes = [];
   if (pending.length) notes.push(`crosscheck: unreviewed changes: ${listed(pending)}.`);

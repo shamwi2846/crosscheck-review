@@ -325,3 +325,21 @@ Findings left unfixed on purpose. Entries are never deleted, only marked fixed.
 - Fix: -
 - Log: recorded by hand
 - Why skipped: An existing limitation of the quote reading, not made realistic by reading Set-Location: no project path here has an apostrophe or a wildcard character, and the guard is a backstop against slipping, not a shell parser.
+
+## G37 · fixed · 2026-10-23 · LOW
+- Task: Fewer useless tests: test plans and bug fixes ask only for tests that protect something
+- Where: src/hook.js:257
+- Problem: F1: Stop reminder omits the harmless unmet-requirement exception
+- Trigger: A harmless unmet requirement becomes an automatic BUG through findingsOf(), then the Stop hook runs.
+- Fix: Add that a BUG recording only an unmet requirement needs a test only when money, data or security depends on it.
+- Log: 20261023192146-f048fa
+- Why skipped: pair: both
+
+## G38 · open · 2026-10-23 · LOW
+- Task: -
+- Where: tests/screen.test.js:129
+- Problem: Under the full suite's parallel load, 'a worker started late by a helper keeps the desktop after its driver and its helper are gone' failed once (2026-10-23): the next computer run was refused because GPT's earlier run still held the desktop. It passes alone (3 of 3) and in the full runs before and after.
+- Trigger: -
+- Fix: -
+- Log: recorded by hand
+- Why skipped: Not caused by the test-plan change (it touches no screen code); like G34, finding the cause needs a failing loaded run's details, so it gets its own look rather than holding up this change.

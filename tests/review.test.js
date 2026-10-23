@@ -313,19 +313,31 @@ test('named files without a hook record stay pending when edited, and are next d
   assert.match(prompt, /Supplied by Claude and unverified; STALE: it is older than the last change to a reviewed file/);
 });
 
-test('review instructions require proof of the claimed failure', async () => {
+test('review instructions require proof of the claimed failure, and tests that catch it', async () => {
   const { root, taskFile } = project('t7', { 'src/q.js': 'q0\n' });
   fs.writeFileSync(path.join(root, 'src/q.js'), 'q1\n');
-  setSpec({ exec: [{ text: answerOf() }] });
+  const followed = JSON.stringify({ verdict: 'RESOLVED', followups: [], findings: [], requirements: [], possibly_missing: [], class: { level: 'normal', files: [], why: 'plain' }, coverage: 'c' });
+  setSpec({ exec: [{ text: answerOf() }, { text: followed }] });
   const r = await review.review(root, { files: ['src/q.js'], taskFile });
   assert.strictEqual(r.status, 'DONE', r.text);
-  // (what GPT was sent, and what the fallback reviewer would read)
-  for (const prompt of [execCalls()[0].prompt, fs.readFileSync(path.join(r.bundle, 'prompt.md'), 'utf8')]) {
+  const responseFile = path.join(HOME, 't7-response.md');
+  fs.writeFileSync(responseFile, 'nothing open');
+  const next = await review.followup(root, { chain: r.chain, responseFile });
+  assert.strictEqual(next.status, 'DONE', next.text);
+  // (what GPT was sent, and what the fallback reviewer would read, in a review and in a follow-up)
+  const [fresh, round] = execCalls().map(c => c.prompt);
+  const bundled = bundle => fs.readFileSync(path.join(bundle, 'prompt.md'), 'utf8');
+  for (const prompt of [fresh, bundled(r.bundle)]) {
     assert.ok(prompt.startsWith('You review a code change for the project in the current folder'));
     assert.match(prompt, /confirm its trigger can really happen: [^\n]*, and that path really produces the claimed failure\.\n/);
     assert.doesNotMatch(prompt, /the path really runs/);
     assert.match(prompt, /- BUG: it can really happen in normal use \(a real caller, input or user action\)/);
     assert.doesNotMatch(prompt, /not instructions/);
+  }
+  // (a plan's tests and a fixed BUG's test must catch the failure; a reason for no case must hold)
+  for (const prompt of [fresh, bundled(r.bundle), round, bundled(next.bundle)]) {
+    assert.match(prompt, /Tests: check that each test-plan case's test \(new or existing\) would catch the failure it names, that a target planned with no case has a reason that holds, and that each fixed BUG has a test that would catch it again \(an existing or planned one counts, and one test may cover related BUGs; a BUG that only records an unmet requirement needs one only when money, data or security depends on it\)\. A risk to money, data or security left untested is a finding\./);
+    assert.match(prompt, /test \(the test that would catch it again, new or existing\) required for CRITICAL and HIGH/);
   }
 });
 

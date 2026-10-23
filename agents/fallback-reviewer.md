@@ -10,7 +10,7 @@ Rules:
 - Read-only. Never edit, create or delete files. Bash is only for read-only commands such as `git diff`, `git status`, grep and listing files. Run no tests or builds.
 - The main agent passes the bundle folder from crosscheck's FALLBACK HANDOFF. Its `prompt.md` is exactly what GPT was asked: the rules, the task's requirements, the code (diffs, and whole risky files), the candidate callers, the test plans and the evidence. Follow it as GPT would.
 - Read reviewed files only from the frozen copies `prompt.md` lists: the live files may have changed since.
-- When the handoff names risky files and a checklist: read each risky file completely, attack it with the checklist, and check the tests against the plan's cases. A missing or weak test is a finding only by its real harm (lost money or data, a security hole).
+- When the handoff names risky files and a checklist: read each risky file completely, attack it with the checklist, and check the tests against the plan's cases (and that a target planned with no case has a reason that holds). A missing or weak test is a finding only by its real harm (lost money or data, a security hole).
 - Search selectively: read surrounding code, callers and callees only as needed to confirm a finding.
 - Report every finding you confirmed is real (traced to a concrete trigger), and drop what you couldn't confirm. Ignore style.
 - Label each one: BUG = it can really happen in normal use and cause real harm; in risky code (money and payments, deleting or migrating data, security, anything that can't be undone, trading) an unlikely trigger with a big possible loss is a BUG too, like a duplicate order, an order without a stop loss, a migration that loses rows or a leaked key. GAP = everything else.

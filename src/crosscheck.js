@@ -24,7 +24,7 @@ const USAGE = `Usage: crosscheck <command>
   lesson --text "..."
   on | off                                         (only when the user asks)
   fast on | fast off                               (Codex's Fast tier for every GPT run: faster, higher usage)
-  testplan --files a,b [--context c,d]             (at most 5 cases, stored as the files' plan for this task)
+  testplan --files a,b [--context c,d]             (at most 5 cases, or GPT's reason for none, stored as the files' plan for this task)
   skip --files a,b --why "..."                     (no test plan needed for these files in this task)
   plan --file plan.md [--risky] | plan --skip --why "..." --file plan.md
   idea --file draft.md | research --question "..." | write --brief brief.md
