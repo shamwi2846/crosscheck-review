@@ -119,14 +119,17 @@ const drivePath = p => {
   const drive = process.platform === 'win32' && p.match(/^\/([a-z])(?=\/|$)/i);
   return drive ? `${drive[1].toUpperCase()}:${p.slice(2) || '/'}` : p;
 };
-// A folder as a shell command names it: `~` is Git Bash's HOME, or for PowerShell the user's profile folder. (Read as
-// a plain path, a Git Bash or home path named a folder that doesn't exist, so the guard found no project and let the
-// commit through.)
-function shellPath(place, tool) {
-  const p = unquote(place);
-  if (!/^~(?=[\\/]|$)/.test(p)) return drivePath(p);
+// A folder as a shell command names it (`cd` its target, or else a program's argument such as git -C): `~` is Git
+// Bash's HOME, or for PowerShell the user's profile folder. PowerShell's cd reads a leading ~ even inside quotes, while
+// Bash and a program's argument read only an unquoted one (a quoted "~" is then a folder named ~). (Read as a plain
+// path, a Git Bash or home path named a folder that doesn't exist, so the guard found no project and let the commit
+// through.)
+function shellPath(place, tool, isCd) {
+  const quotedHome = tool === 'PowerShell' && isCd;
+  const word = quotedHome ? unquote(place) : place;
+  if (!/^~(?=[\\/]|$)/.test(word)) return drivePath(unquote(place));
   const home = tool !== 'PowerShell' && process.env.HOME ? drivePath(process.env.HOME) : os.homedir();
-  return path.join(home, p.slice(1));
+  return path.join(home, quotedHome ? word.slice(1) : unquote(word.slice(1))); // (unquoted once: O'Brien's stays whole)
 }
 
 // Before a shell command: on `git commit` only, refuses while a changed file differs from its last reviewed version
@@ -137,9 +140,12 @@ function bash(inp) {
   const commit = command.match(COMMIT);
   if (!commit) return null;
   const cd = command.match(new RegExp(`^\\s*cd\\s+${PLACE}\\s*(?:&&|;)`));
-  let dir = path.resolve(inp.cwd || '.', cd ? shellPath(cd[1], inp.tool_name) : '.');
+  const start = path.resolve(inp.cwd || '.');
+  let dir = cd ? path.resolve(start, shellPath(cd[1], inp.tool_name, true)) : start;
+  // (a cd into a folder that doesn't exist fails, and a commit after `;` then runs where the shell already was)
+  if (!fs.existsSync(dir)) dir = start;
   // (option by option, so a -C inside a quoted -c value is never taken for one)
-  for (const [, flag, value] of commit[1].matchAll(new RegExp(`-([Cc])\\s+${PLACE}`, 'g'))) if (flag === 'C') dir = path.resolve(dir, shellPath(value, inp.tool_name));
+  for (const [, flag, value] of commit[1].matchAll(new RegExp(`-([Cc])\\s+${PLACE}`, 'g'))) if (flag === 'C') dir = path.resolve(dir, shellPath(value, inp.tool_name, false));
   const root = state.projectRoot(dir);
   if (!root) return null;
   const s = review.stateOf(root);
