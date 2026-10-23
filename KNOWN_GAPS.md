@@ -298,3 +298,21 @@ Findings left unfixed on purpose. Entries are never deleted, only marked fixed.
 - Fix: -
 - Log: recorded by hand
 - Why skipped: Can't realistically happen: only install writes crosscheck's import line, and its read and write of CLAUDE.md run under the same config lock, so a second install sees the line and leaves the file alone; personal edits go to an imported CLAUDE.md, which install never writes. A file without the line is replaced by design, and the confirmation shows the new text.
+
+## G34 · open · 2026-10-23 · LOW
+- Task: -
+- Where: tests/cli.test.js:107
+- Problem: Under the full suite's parallel load, the test 'an unavailable pair hands its bundle to the fallback...' fails now and then: review --fallback exits 1 with empty stdout (seen twice in about eight full runs on 2026-10-23; it passes alone, 6 of 6). The cause isn't known yet: it could be the test's timing or a real failure of the fallback path under load.
+- Trigger: -
+- Fix: -
+- Log: recorded by hand
+- Why skipped: Not caused by the commit-guard change (that test never reaches it); finding the cause needs the CLI's stderr from a failing loaded run, so it gets its own look rather than holding up the guard fix.
+
+## G35 · open · 2026-10-23 · LOW
+- Task: -
+- Where: src/hook.js:128
+- Problem: For PowerShell's git -C, the guard always expands an unquoted ~ to the profile folder; where PowerShell's native-command tilde expansion is off (Windows PowerShell 5.1, or the feature disabled), PowerShell passes ~/repo literally (CodeRabbit on PR 20).
+- Trigger: -
+- Fix: -
+- Log: recorded by hand
+- Why skipped: Doesn't apply here: Claude Code's PowerShell tool runs PowerShell 7.6.6 on this PC, which expands an unquoted ~ for native commands (measured: ~/x became C:\Users\<user>/x), and a wrong pick would also need a repository inside a folder literally named ~; detecting PowerShell's feature state would be machinery for that.

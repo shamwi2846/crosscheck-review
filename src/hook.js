@@ -4,6 +4,7 @@
 'use strict';
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const crypto = require('crypto');
 const { spawnSync } = require('child_process');
 const state = require('./state');
@@ -108,9 +109,28 @@ function noteProject(session, root) {
 
 // ---- Commits ----
 
-const PLACE = '("[^"]*"|\'[^\']*\'|[^\\s;&|]+)';
+// (one shell word: unquoted characters and quoted parts together, as in ~/"a folder"; one character at a time, since
+// a repetition inside the repetition makes a long path take exponential time and the guard time out)
+const PLACE = '((?:"[^"]*"|\'[^\']*\'|[^\\s;&|"\'])+)';
 const COMMIT = new RegExp(`\\bgit((?:\\s+-[Cc]\\s+${PLACE})*)\\s+commit\\b`);
-const unquote = s => s.replace(/^(["'])(.*)\1$/, '$2');
+const unquote = s => s.replace(/"([^"]*)"|'([^']*)'/g, '$1$2');
+// On Windows, Git Bash spells C:\ as /c/.
+const drivePath = p => {
+  const drive = process.platform === 'win32' && p.match(/^\/([a-z])(?=\/|$)/i);
+  return drive ? `${drive[1].toUpperCase()}:${p.slice(2) || '/'}` : p;
+};
+// A folder as a shell command names it (`cd` its target, or else a program's argument such as git -C): `~` is Git
+// Bash's HOME, or for PowerShell the user's profile folder. PowerShell's cd reads a leading ~ even inside quotes, while
+// Bash and a program's argument read only an unquoted one (a quoted "~" is then a folder named ~). (Read as a plain
+// path, a Git Bash or home path named a folder that doesn't exist, so the guard found no project and let the commit
+// through.)
+function shellPath(place, tool, isCd) {
+  const quotedHome = tool === 'PowerShell' && isCd;
+  const word = quotedHome ? unquote(place) : place;
+  if (!/^~(?=[\\/]|$)/.test(word)) return drivePath(unquote(place));
+  const home = tool !== 'PowerShell' && process.env.HOME ? drivePath(process.env.HOME) : os.homedir();
+  return path.join(home, quotedHome ? word.slice(1) : unquote(word.slice(1))); // (unquoted once: O'Brien's stays whole)
+}
 
 // Before a shell command: on `git commit` only, refuses while a changed file differs from its last reviewed version
 // or a BUG is open. A backstop against slipping, so it reads no commit flags and compares no staged contents.
@@ -120,9 +140,12 @@ function bash(inp) {
   const commit = command.match(COMMIT);
   if (!commit) return null;
   const cd = command.match(new RegExp(`^\\s*cd\\s+${PLACE}\\s*(?:&&|;)`));
-  let dir = path.resolve(inp.cwd || '.', cd ? unquote(cd[1]) : '.');
+  const start = path.resolve(inp.cwd || '.');
+  let dir = cd ? path.resolve(start, shellPath(cd[1], inp.tool_name, true)) : start;
+  // (a cd into a folder that doesn't exist fails, and a commit after `;` then runs where the shell already was)
+  if (!fs.existsSync(dir)) dir = start;
   // (option by option, so a -C inside a quoted -c value is never taken for one)
-  for (const [, flag, value] of commit[1].matchAll(new RegExp(`-([Cc])\\s+${PLACE}`, 'g'))) if (flag === 'C') dir = path.resolve(dir, unquote(value));
+  for (const [, flag, value] of commit[1].matchAll(new RegExp(`-([Cc])\\s+${PLACE}`, 'g'))) if (flag === 'C') dir = path.resolve(dir, shellPath(value, inp.tool_name, false));
   const root = state.projectRoot(dir);
   if (!root) return null;
   const s = review.stateOf(root);
