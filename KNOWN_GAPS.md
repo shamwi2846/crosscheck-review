@@ -316,3 +316,12 @@ Findings left unfixed on purpose. Entries are never deleted, only marked fixed.
 - Fix: -
 - Log: recorded by hand
 - Why skipped: Doesn't apply here: Claude Code's PowerShell tool runs PowerShell 7.6.6 on this PC, which expands an unquoted ~ for native commands (measured: ~/x became C:\Users\<user>/x), and a wrong pick would also need a repository inside a folder literally named ~; detecting PowerShell's feature state would be machinery for that.
+
+## G36 · open · 2026-10-23 · LOW
+- Task: -
+- Where: src/hook.js:116
+- Problem: The guard unquotes a PowerShell single-quoted folder by dropping every quote, so a doubled apostrophe ('C:/O''Brien/repo', PowerShell's O'Brien) becomes OBrien and names no repository; Set-Location -Path also expands wildcards ([ ] * ?), which the guard reads literally (GPT's idea check on the Set-Location change).
+- Trigger: -
+- Fix: -
+- Log: recorded by hand
+- Why skipped: An existing limitation of the quote reading, not made realistic by reading Set-Location: no project path here has an apostrophe or a wildcard character, and the guard is a backstop against slipping, not a shell parser.

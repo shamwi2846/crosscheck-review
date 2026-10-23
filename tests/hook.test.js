@@ -129,6 +129,35 @@ test('a commit is refused while the chosen repository has unreviewed changes or 
   assert.strictEqual(commit(), null);
 });
 
+test('a PowerShell leading location change cannot bypass the destination repository\'s commit guard', () => {
+  const a = project('t3s a');
+  const b = project('t3s b', { 'src/payments.js': 'old\n' });
+  fs.writeFileSync(path.join(b, 'src/payments.js'), 'changed by Claude\n');
+  seed(b, s => {
+    s.acks = { [key('src/payments.js')]: sha('old\n') };
+    s.chains = { C1: { closed: false, files: { [key('src/payments.js')]: 'src/payments.js' }, findings: { F1: { label: 'BUG', status: 'open', location: 'src/payments.js:1', title: 'loses money' } } } };
+  });
+  // [tool, command]: Set-Location by any of its names and in any letter case, with or without -Path or -LiteralPath;
+  // a new line ends the folder change as ; and && do, for Bash's cd too
+  const forms = [['PowerShell', `Set-Location '${b}'; git commit -m change`], ['PowerShell', `sl -LiteralPath "${b}" && git commit -m change`],
+    ['PowerShell', `CHDIR -path '${b}'\ngit commit -m change`], ['PowerShell', `Cd '${b}'; git commit -m change`],
+    ['Bash', `cd "${b}"\ngit commit -m change`]];
+  const commit = ([tool, command]) => hook.handle('bash', { session_id: 'S', cwd: a, tool_name: tool, tool_input: { command } });
+  for (const form of forms) {
+    const first = denial(commit(form));
+    assert.match(first || '', /src\/payments\.js/, form[1]);
+    assert.match(first, /open BUG/, form[1]);
+  }
+  // (Bash has no Set-Location: there that command fails, and the commit after `;` runs in B itself)
+  const bash = hook.handle('bash', { session_id: 'S', cwd: b, tool_name: 'Bash', tool_input: { command: `Set-Location '${a}'; git commit -m change` } });
+  assert.match(denial(bash) || '', /src\/payments\.js/);
+  seed(b, s => { s.acks[key('src/payments.js')] = sha('changed by Claude\n'); });
+  for (const form of forms) assert.doesNotMatch(denial(commit(form)) || 'allowed', /differ from their last reviewed version/, form[1]);
+  for (const form of forms) assert.match(denial(commit(form)) || '', /open BUG/, `${form[1]}: the BUG still blocks`);
+  seed(b, s => { s.chains.C1.findings.F1.status = 'resolved'; });
+  for (const form of forms) assert.strictEqual(commit(form), null, form[1]);
+});
+
 test('a Git Bash leading cd cannot bypass the target repository\'s commit guard on Windows', { skip: process.platform !== 'win32' && 'Git Bash drive paths are Windows-only' }, () => {
   const a = project('t3g a');
   const b = project("t3g O'Brien's b", { 'src/old.js': 'old\n' }); // (spaces and apostrophes, unquoted only once)

@@ -113,6 +113,13 @@ function noteProject(session, root) {
 // a repetition inside the repetition makes a long path take exponential time and the guard time out)
 const PLACE = '((?:"[^"]*"|\'[^\']*\'|[^\\s;&|"\'])+)';
 const COMMIT = new RegExp(`\\bgit((?:\\s+-[Cc]\\s+${PLACE})*)\\s+commit\\b`);
+// A leading change of folder, ended by &&, ; or a new line: Bash's cd, or PowerShell's Set-Location by any of its
+// names, in any letter case, with or without -Path or -LiteralPath. (Each shell's own: in Bash, Set-Location fails, and
+// the commit after it runs where the shell already was.)
+const LEADING_CD = {
+  Bash: new RegExp(`^\\s*cd\\s+${PLACE}\\s*(?:&&|;|\\n)`),
+  PowerShell: new RegExp(`^\\s*(?:cd|chdir|sl|set-location)(?:\\s+-(?:literal)?path)?\\s+${PLACE}\\s*(?:&&|;|\\n)`, 'i'),
+};
 const unquote = s => s.replace(/"([^"]*)"|'([^']*)'/g, '$1$2');
 // On Windows, Git Bash spells C:\ as /c/.
 const drivePath = p => {
@@ -139,7 +146,7 @@ function bash(inp) {
   const command = String((inp.tool_input || {}).command || '');
   const commit = command.match(COMMIT);
   if (!commit) return null;
-  const cd = command.match(new RegExp(`^\\s*cd\\s+${PLACE}\\s*(?:&&|;)`));
+  const cd = command.match(inp.tool_name === 'PowerShell' ? LEADING_CD.PowerShell : LEADING_CD.Bash);
   const start = path.resolve(inp.cwd || '.');
   let dir = cd ? path.resolve(start, shellPath(cd[1], inp.tool_name, true)) : start;
   // (a cd into a folder that doesn't exist fails, and a commit after `;` then runs where the shell already was)
