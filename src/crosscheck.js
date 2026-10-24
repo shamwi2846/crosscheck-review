@@ -43,6 +43,7 @@ function parse(argv) {
   for (let i = 0; i < argv.length; i++) {
     const option = argv[i].match(/^--([a-z-]+)$/);
     if (!option && argv[i].startsWith('-')) throw new Usage(`${argv[i]}: write options as --name value`);
+    if (option && option[1] in args) throw new Usage(`--${option[1]} is given twice: write a list as a,b`); // (the first would be lost)
     if (!option) args._.push(argv[i]);
     else if (FLAGS.has(option[1])) args[option[1]] = true;
     // (an option where its value should be means the value was left out, never that the option is the value)
@@ -155,12 +156,12 @@ function gapCommand(args) {
   const id = args._[1] && args._[1] !== 'list' ? args._[1] : null;
   if (id) {
     if (!args.fixed) throw new Usage('gap <id> needs --fixed (with --real-bug when it was a real bug)');
-    return done(gaps.mark(root, id, args['real-bug'] ? 'fixed — was a real bug' : 'fixed'), `${id} marked fixed`);
+    return done(gaps.mark(root, id, args['real-bug'] ? 'fixed — was a real bug' : 'fixed', review.acknowledgeGaps(root)), `${id} marked fixed`);
   }
   if (args.add) {
     if (!args.where || !args.problem || !args.why) throw new Usage('gap --add needs --where, --problem and --why');
     const added = gaps.add(root, [{ task: args.task || '-', where: listOf(args.where), problem: args.problem, trigger: args.trigger || '-',
-      severity: args.severity || 'LOW', fix: args.fix || '-', test: null, log: args.log || 'recorded by hand', why: args.why }]);
+      severity: args.severity || 'LOW', fix: args.fix || '-', test: null, log: args.log || 'recorded by hand', why: args.why }], review.acknowledgeGaps(root));
     return done(added, `recorded: ${(added.ids || []).join(', ') || 'it was already recorded'}`);
   }
   const known = gaps.list(root);
@@ -195,7 +196,6 @@ async function computerCommand(args) {
 const allowScreenCommand = args => reported(modes.allowScreen({ session: process.env.CLAUDE_CODE_SESSION_ID || null, why: args.why }), false);
 
 async function doctorCommand(args) {
-  if (args._.length > 1) throw new Usage(`doctor takes no ${args._.slice(1).join(' ')}`);
   const r = await require('./doctor').doctor({ live: !!args.live });
   return { code: r.ok ? 0 : 1, text: r.text };
 }
@@ -260,6 +260,9 @@ const OPTIONS = {
   testplan: ['files', 'context', 'task'], skip: ['files', 'why', 'task'], plan: ['file', 'risky', 'skip', 'why', 'task'],
   idea: ['file'], digest: ['files', 'dir', 'question'], research: ['question'], write: ['brief'], computer: ['task'], 'allow-screen': ['why'], doctor: ['live'],
 };
+// The plain words a command takes after its name; any other is wrong usage too (`skip --files a b` once skipped
+// only a).
+const WORDS = { close: 1, gap: 1, fast: 1 };
 
 // Runs one command line. Returns { code, text }; it never throws.
 async function main(argv) {
@@ -269,6 +272,8 @@ async function main(argv) {
     if (!command) throw new Usage(args._[0] ? `unknown command ${args._[0]}` : 'no command given');
     const unknown = Object.keys(args).filter(k => k !== '_' && !OPTIONS[args._[0]].includes(k));
     if (unknown.length) throw new Usage(`${args._[0]} doesn't take ${unknown.map(k => `--${k}`).join(', ')}`);
+    const extra = args._.slice(1 + (WORDS[args._[0]] || 0));
+    if (extra.length) throw new Usage(`${args._[0]} doesn't take ${extra.join(' ')} (write a list as a,b)`);
     return await command(args);
   } catch (e) {
     if (e instanceof Usage) return { code: 2, text: `${e.message}\n\n${USAGE}` };

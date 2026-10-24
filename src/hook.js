@@ -172,6 +172,7 @@ function bash(inp) {
   return deny([
     unreviewed.length ? `Not committed: these files differ from their last reviewed version: ${listed(unreviewed)}. Review them first: ${CLI} review (add shell-made changes with --files "a,b").` : '',
     bugs.length ? `Not committed: open BUG findings: ${listed(bugs)}. Fix them and run the follow-up, or close the chain with a reason per BUG.` : '',
+    'This check runs before the shell command, so a review, skip, close or gap command in it never ran: run that on its own first, then commit.',
   ].filter(Boolean).join('\n'));
 }
 

@@ -341,6 +341,28 @@ test('review instructions require proof of the claimed failure, and tests that c
   }
 });
 
+test('a round says its chain can be closed only when nothing in the whole chain is left open', async () => {
+  const { root, taskFile } = project('t9', { 'src/a.js': 'a0\n', 'src/b.js': 'b0\n' });
+  fs.writeFileSync(path.join(root, 'src/a.js'), 'a1\n');
+  fs.writeFileSync(path.join(root, 'src/b.js'), 'b1\n');
+  const followed = JSON.stringify({ verdict: 'RESOLVED', followups: [], findings: [], requirements: [], possibly_missing: [], class: { level: 'normal', files: [], why: '-' }, coverage: 'c' });
+  setSpec({ exec: [{ text: answerOf({ class: { level: 'risky', files: ['src/b.js'], why: 'it moves money' } }) }, { text: followed }] });
+  const first = await review.review(root, { files: ['src/a.js', 'src/b.js'], taskFile });
+  assert.strictEqual(first.status, 'DONE', first.text);
+  assert.ok(stateOf(root).escalations[key('src/b.js')], 'b.js waits for its own paired review');
+  assert.doesNotMatch(first.text, /nothing is left open/);
+  const responseFile = path.join(HOME, 't9-response.md');
+  fs.writeFileSync(responseFile, 'nothing to fix');
+  const next = await review.followup(root, { chain: first.chain, responseFile });
+  assert.strictEqual(next.status, 'DONE', next.text);
+  assert.doesNotMatch(next.text, /nothing is left open/, 'the follow-up left out the escalated file, which still waits');
+  const { root: clean, taskFile: cleanTask } = project('t9b', { 'src/c.js': 'c0\n' });
+  fs.writeFileSync(path.join(clean, 'src/c.js'), 'c1\n');
+  setSpec({ exec: [{ text: answerOf() }] });
+  const done = await review.review(clean, { files: ['src/c.js'], taskFile: cleanTask });
+  assert.ok(done.text.includes(`nothing is left open in chain ${done.chain}: close it (node "`) && done.text.includes(`crosscheck.js" close ${done.chain})`), done.text);
+});
+
 test('an automatic gap write cannot acknowledge a shell edit made during the review', async () => {
   const before = '# Known gaps\n\nFindings left unfixed on purpose. Entries are never deleted, only marked fixed.\n\n## G1 · open · 2026-10-01 · LOW\n- Where: src/old.js\n- Problem: older\n';
   const { root, taskFile } = project('t8', { 'src/q.js': 'q0\n', [gaps.NAME]: before });

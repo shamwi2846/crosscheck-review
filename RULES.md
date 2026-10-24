@@ -58,7 +58,7 @@ When an external tool's behavior matters and is uncertain, check its docs and ru
 - A pull request is done when its final head commit is green and every CodeRabbit comment is handled; a new push starts that again.
 
 ## Working with GPT
-- GPT runs in the background. Never poll: work on something else (never the files under review) or end the turn. A big review can be split into parallel runs over different files.
+- GPT runs in the background. Never poll: work on something else (never the files under review) or end the turn.
 - If GPT is unavailable, run the fallback-reviewer agent on the handed-off bundle, record its answer, and tell the user. A risky file still waits for a paired review once GPT is back.
 - Screen: avoid it (files, logs, CLI tools and APIs first; MT5 logs and tester reports are files). Delegate screen control to GPT; use your own screen tools only when delegating is clearly worse, in a window you open with its reason.
 - Long documents are drafted by GPT and checked by you; short texts you write yourself.

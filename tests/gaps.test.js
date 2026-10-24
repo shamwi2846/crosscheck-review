@@ -153,4 +153,68 @@ test('a home folder at the filesystem root leaves paths readable', () => {
   assert.deepStrictEqual(gaps.openFor(root, path.join(root, 'src', 'state.js')).map(e => e.id), ['G1']);
 });
 
+test('gap bookkeeping counts as reviewed only from the reviewed text it changed, after its state write', () => {
+  const review = require('../src/review');
+  const sha = text => require('crypto').createHash('sha256').update(text).digest('hex');
+  const key = state.pathKey(gaps.NAME);
+  const stateOf = root => state.read(state.files.project(root)).data;
+  const handEdited = LEGACY.replace(/## G2 [\s\S]*?\r\n\r\n/, ''); // (a hand edit deletes G2's HIGH finding)
+  const chain = { rev: 1, began: 1, rounds: ['r1'], closed: false, files: {}, frozen: {}, task: { title: 'task' },
+    findings: { F1: { label: 'BUG', status: 'open', severity: 'MEDIUM', title: 'off by one', location: 'src/a.js:1', trigger: 't', harm: 'h', fix: 'f', test: null } } };
+  const reviewed = (name, more = () => {}) => {
+    const root = project(name);
+    fs.writeFileSync(gapsFile(root), LEGACY);
+    assert.ok(state.update(state.files.project(root), s => { s.acks = { [key]: sha(LEGACY) }; s.chains = { C1: JSON.parse(JSON.stringify(chain)) }; more(s); }).ok);
+    return root;
+  };
+  const writers = { // (gap --add and gap --fixed as the CLI runs them, and a close that records a BUG as a gap)
+    add: root => gaps.add(root, [finding('new problem')], review.acknowledgeGaps(root)),
+    mark: root => gaps.mark(root, 'G12', 'fixed', review.acknowledgeGaps(root)),
+    close: root => review.close(root, { chain: 'C1', notes: { F1: 'gap: the feature is off' }, rev: 1 }),
+  };
+  for (const [name, write] of Object.entries(writers)) {
+    const clean = reviewed(`t7-${name}-clean`);
+    write(clean);
+    assert.notStrictEqual(fs.readFileSync(gapsFile(clean), 'utf8'), LEGACY, `${name} wrote`);
+    assert.strictEqual(stateOf(clean).acks[key], sha(fs.readFileSync(gapsFile(clean))), `${name}: its own write counts as reviewed`);
+    // (the writer reads a hand edit, then the file is restored to its reviewed bytes, so a second read would match)
+    const raced = reviewed(`t7-${name}-raced`);
+    fs.writeFileSync(gapsFile(raced), handEdited);
+    const realRead = fs.readFileSync;
+    let restored = false;
+    fs.readFileSync = (p, ...rest) => {
+      const out = realRead(p, ...rest);
+      if (!restored && p === gapsFile(raced)) { restored = true; fs.writeFileSync(p, LEGACY); }
+      return out;
+    };
+    try {
+      write(raced);
+    } finally {
+      fs.readFileSync = realRead;
+    }
+    assert.ok(restored && !fs.readFileSync(gapsFile(raced), 'utf8').includes('## G2 '), `${name} kept the text it read`);
+    assert.strictEqual(stateOf(raced).acks[key], sha(LEGACY), `${name}: the hand deletion is never acknowledged`);
+    // (a pending change keeps the file pending, even one whose text matches its reviewed version)
+    const held = reviewed(`t7-${name}-pending`, s => { s.changes = { [key]: { path: gaps.NAME, session: 'A', at: 1, baseline: sha(LEGACY) } }; });
+    write(held);
+    assert.deepStrictEqual([stateOf(held).acks[key], !!stateOf(held).changes[key]], [sha(LEGACY), true], `${name}: still pending`);
+  }
+  const fresh = project('t7-fresh'); // (a file crosscheck creates has no reviewed version: it stays unreviewed)
+  gaps.add(fresh, [finding('first')], review.acknowledgeGaps(fresh));
+  assert.strictEqual((stateOf(fresh).acks || {})[key], undefined);
+  const failing = reviewed('t7-failing');
+  const realRename = fs.renameSync;
+  fs.renameSync = (from, to) => {
+    if (to === state.files.project(failing)) throw Object.assign(new Error('busy'), { code: 'EACCES' });
+    return realRename(from, to);
+  };
+  try {
+    assert.throws(() => gaps.add(failing, [finding('later')], review.acknowledgeGaps(failing)), /busy/);
+  } finally {
+    fs.renameSync = realRename;
+  }
+  assert.match(fs.readFileSync(gapsFile(failing), 'utf8'), /- Problem: later/);
+  assert.strictEqual(stateOf(failing).acks[key], sha(LEGACY), 'a failed state write leaves the new text unreviewed');
+});
+
 test.after(() => fs.rmSync(HOME, { recursive: true, force: true }));
