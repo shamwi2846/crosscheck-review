@@ -343,3 +343,21 @@ Findings left unfixed on purpose. Entries are never deleted, only marked fixed.
 - Fix: -
 - Log: recorded by hand
 - Why skipped: Not caused by the test-plan change (it touches no screen code); like G34, finding the cause needs a failing loaded run's details, so it gets its own look rather than holding up this change.
+
+## G39 · fixed · 2026-10-24 · LOW
+- Task: Fixes from the 2026-10-24 review of the chats: gap bookkeeping, split-review advice, commit refusal text, CLI words, open chains
+- Where: src/hook.js:173-174
+- Problem: F2: Include the pre-command explanation in BUG-only refusals
+- Trigger: All changed files are acknowledged, but an open BUG blocks a shell command containing close or follow-up followed by git commit.
+- Fix: Append the pre-command explanation once to every commit refusal, outside the conditional branches.
+- Log: 20261024234410-f7801d
+- Why skipped: pair: both
+
+## G40 · fixed · 2026-10-24 · LOW
+- Task: Fixes from the 2026-10-24 review of the chats: gap bookkeeping, split-review advice, commit refusal text, CLI words, open chains
+- Where: DESIGN.md:162
+- Problem: F3: Remove the contradictory description of gap commands
+- Trigger: A reader consults the detailed KNOWN_GAPS.md behavior after using gap --add or gap --fixed.
+- Fix: Include gap-command writes in the automatically acknowledged bookkeeping description and reserve the hand-change rule for edits.
+- Log: 20261024234410-f7801d
+- Why skipped: pair: confirmed by B

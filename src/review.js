@@ -13,6 +13,7 @@ const answer = require('./answer');
 const gaps = require('./gaps');
 const pair = require('./pair');
 
+const CLI = `node "${path.join(__dirname, 'crosscheck.js')}"`;
 const DELETED = 'deleted'; // the frozen version of a file that doesn't exist
 const RISKY_FILE = /\.(mq5|mqh|set)$/i; // trading files: always reviewed in pairs (step 3)
 const MAPS = ['changes', 'acks', 'running', 'applied', 'chains', 'escalations', 'plans', 'skips', 'needsPlan', 'riskyReviews'];
@@ -398,12 +399,26 @@ function findingsOf(a) {
 const gapItem = (task, log, fid, f, why) => ({ task: task.title, where: [f.location], problem: `${fid}: ${f.title}`, trigger: f.trigger,
   severity: f.severity, fix: f.fix, test: f.test, log, why });
 
-// Whether KNOWN_GAPS.md is at its last reviewed version with no pending change. Then crosscheck's own write of a
-// review's findings counts as reviewed too, and no hand edit can ride along with it.
-function gapsAsReviewed(root, s) {
+// Whether KNOWN_GAPS.md was at its last reviewed version with no pending change, judged on `text`, the very text
+// crosscheck's own write changes (a second read could see the file restored meanwhile). Then that write counts as
+// reviewed too, and no hand edit can ride along with it.
+function gapsAsReviewed(s, text) {
   const key = state.pathKey(gaps.NAME);
-  return !s.changes[key] && s.acks[key] !== undefined && s.acks[key] === versionOf(root, gaps.NAME);
+  return !s.changes[key] && s.acks[key] !== undefined && s.acks[key] === sha(Buffer.from(text));
 }
+
+// For crosscheck's own write of KNOWN_GAPS.md outside a review (gap --add, gap --fixed), run under the project lock
+// once the file holds `after`: as with a review's gap write, it counts as reviewed when `before` did. (Without it,
+// marking a gap fixed made the next commit wait for a review of crosscheck's own bookkeeping.)
+const acknowledgeGaps = root => (write, before, after) => {
+  const stateFile = state.files.project(root);
+  const current = state.read(stateFile);
+  if (current.unreadable) return; // (the file stays unreviewed, as an edit would)
+  const s = withMaps(current.data);
+  if (!gapsAsReviewed(s, before)) return;
+  s.acks[state.pathKey(gaps.NAME)] = snapshot(root, Buffer.from(after));
+  write(stateFile, JSON.stringify(s, null, 2)); // (if it fails, the file differs from its acknowledgement: unreviewed)
+};
 
 // Applies a checked answer in one locked write of the project state; KNOWN_GAPS.md changes under the same lock (the
 // round's new GAP findings before the state write, resolved or conceded ones marked fixed after it). A follow-up
@@ -514,7 +529,7 @@ function apply(root, manifest, result) {
     if (newGaps.length || fixedGaps.length) {
       const known = gaps.readFile(root);
       if (known.unreadable) return { refused: `KNOWN_GAPS.md can't be read (${known.unreadable}), so nothing was applied` };
-      const own = gapsAsReviewed(root, s);
+      const own = gapsAsReviewed(s, known.text);
       const composed = gaps.compose(root, known.text, newGaps.map(fid => gapItem(manifest.task, manifest.attempt, fid, chain.findings[fid],
         chain.findings[fid].agreement ? `pair: ${chain.findings[fid].agreement}` : `labelled GAP by the reviewer; harm: ${chain.findings[fid].harm}`)));
       newGaps.forEach((fid, i) => { chain.findings[fid].gap = composed.ids[i]; });
@@ -531,7 +546,10 @@ function apply(root, manifest, result) {
     s.chains[id] = chain;
     if (!write(stateFile, JSON.stringify(s, null, 2))) return { refused: 'the lock was taken over, so the state was not changed' };
     if (marked !== gapText) write(gapsFile, marked); // (if it fails, the file differs from its acknowledgement: unreviewed)
-    return { chain: id, added: Object.fromEntries(added.map(fid => [fid, chain.findings[fid]])), acked, pending, escalated, unplanned, taskChanged };
+    // (the whole chain: a follow-up leaves out a file that waits for its own paired review)
+    const unsettled = Object.values(chain.findings).some(f => f.label === 'BUG' && f.status === 'open')
+      || Object.keys(chain.files).some(k => s.changes[k] || s.escalations[k]);
+    return { chain: id, added: Object.fromEntries(added.map(fid => [fid, chain.findings[fid]])), acked, pending, escalated, unplanned, taskChanged, unsettled };
   });
   return done.ok === false ? { refused: done.why } : done;
 }
@@ -545,6 +563,8 @@ function summary(a, applied) {
   if (applied.escalated.length) lines.push(`rated risky by GPT, or risky without a completed pair, so they need a test plan and a paired review: ${applied.escalated.join(', ')}`);
   if (applied.unplanned.length) lines.push(`not acknowledged until they have a current test plan (a trading file not rated risky may have a skip): ${applied.unplanned.join(', ')}`);
   if (applied.taskChanged) lines.push('the task\'s requirements changed during the review, so nothing was acknowledged: run the review again');
+  // (chats left finished chains open for days: status kept listing them, and their bundles were never cleaned up)
+  if (!applied.unsettled) lines.push(`nothing is left open in chain ${applied.chain}: close it (${CLI} close ${applied.chain})`);
   return lines.join('\n');
 }
 
@@ -638,7 +658,7 @@ function close(root, { chain: id, notes = {}, rev }) {
     if (relabel.length) {
       const known = gaps.readFile(root);
       if (known.unreadable) return { refused: `KNOWN_GAPS.md can't be read (${known.unreadable}), so nothing was closed` };
-      const own = gapsAsReviewed(root, s);
+      const own = gapsAsReviewed(s, known.text);
       const composed = gaps.compose(root, known.text, relabel.map(([fid, f, why]) => gapItem(c.task, c.rounds[c.rounds.length - 1], fid, f, why)));
       if (composed.added.length && !write(path.join(root, gaps.NAME), composed.text)) return { refused: 'the lock was taken over, so nothing was closed' };
       if (own && composed.added.length) s.acks[state.pathKey(gaps.NAME)] = snapshot(root, Buffer.from(composed.text));
@@ -743,6 +763,6 @@ const bugsIn = s => Object.entries(s.chains).filter(([, c]) => !c.closed)
   .flatMap(([chain, c]) => Object.entries(c.findings || {}).filter(([, f]) => f.label === 'BUG' && f.status === 'open').map(([id, f]) => ({ chain, id, ...f })));
 const openBugs = root => bugsIn(stateOf(root));
 
-module.exports = { review, followup, close, fallback, skip, pending, openChains, openBugs, bugsIn, DELETED,
+module.exports = { review, followup, close, fallback, skip, pending, openChains, openBugs, bugsIn, acknowledgeGaps, DELETED,
   RISKY_FILE, sessionTask, stateOf, withMaps, bytesOf, textOf, snapshot, snapFile, versionOf, asBaseline,
   run, newAttempt, bundleDir, findingsOf, taskInfo, docsFor, DOCS_NOTE }; // (the last line: for modes.js)

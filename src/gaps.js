@@ -101,14 +101,16 @@ function compose(root, text, items) {
   return { text: added.length ? (text || HEAD.replace(/\n/g, eol)) + more : text, ids, added };
 }
 
-// Adds findings left unfixed (see compose). Returns { ok, ids } (the new entries) or { ok: false, why }.
-function add(root, items) {
+// Adds findings left unfixed (see compose). `acknowledge(write, before, after)`, when given, runs under the same lock
+// once the file holds the new text. Returns { ok, ids } (the new entries) or { ok: false, why }.
+function add(root, items, acknowledge = null) {
   return state.withLock(state.files.project(root), write => {
     const current = readFile(root);
     if (current.unreadable) return { ok: false, why: `${NAME} can't be read (${current.unreadable}), so nothing was added` };
     const result = compose(root, current.text, items);
     if (!result.added.length) return { ok: true, ids: [] };
     if (!write(fileOf(root), result.text)) return { ok: false, why: `another process took over the lock, so nothing was added to ${NAME}` };
+    if (acknowledge) acknowledge(write, current.text, result.text);
     return { ok: true, ids: result.added };
   });
 }
@@ -120,15 +122,17 @@ function composeMark(text, id, status) {
   return text.replace(header, (all, old, date, severity, cr) => `## ${id} · ${status} · ${date} · ${severity}${cr}`);
 }
 
-// Marks entry `id` 'fixed' or 'fixed — was a real bug'.
-function mark(root, id, status) {
+// Marks entry `id` 'fixed' or 'fixed — was a real bug' (`acknowledge` as for add).
+function mark(root, id, status, acknowledge = null) {
   if (!STATUSES.includes(status)) return { ok: false, why: `the status must be one of: ${STATUSES.join(', ')}` };
   return state.withLock(state.files.project(root), write => {
     const current = readText(fileOf(root));
     if (current.unreadable) return { ok: false, why: `${NAME} can't be read (${current.unreadable})` };
     const text = composeMark(current.text, id, status);
     if (text === null) return { ok: false, why: `${NAME} has no entry ${id}` };
-    return write(fileOf(root), text) ? { ok: true } : { ok: false, why: `another process took over the lock, so ${id} wasn't changed` };
+    if (!write(fileOf(root), text)) return { ok: false, why: `another process took over the lock, so ${id} wasn't changed` };
+    if (acknowledge) acknowledge(write, current.text, text);
+    return { ok: true };
   });
 }
 

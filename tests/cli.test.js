@@ -211,6 +211,23 @@ test('a review skip needs its reason, and records only the chosen files\' curren
   assert.strictEqual(calls(), 0);
 });
 
+test('plain words a command doesn\'t take and options given twice are wrong usage, refused before anything runs', () => {
+  const { root } = project('t7w', { 'README.md': 'r0\n', 'docs/a.md': 'a0\n' });
+  change(root, 'README.md', 'r1\n');
+  change(root, 'docs/a.md', 'a1\n');
+  seed(root, s => { s.changes = { [key('README.md')]: pending('README.md'), [key('docs/a.md')]: pending('docs/a.md') }; });
+  const now = () => JSON.stringify([stateOf(root), state.read(state.files.global()).data]);
+  const before = now();
+  // (each would once have run with a word or a value lost: crosscheck switched off, one file of two skipped, ...)
+  for (const args of [['off', 'unexpected'], ['skip', '--files', 'README.md', 'docs/a.md', '--why', 'docs'], ['allow-screen', '--why', 'inspect', '--why', 'second reason'],
+    ['review', '--skip', '--skip', '--why', 'docs only'], ['review', '--skip', '--why', 'docs', '--files', 'README.md', '--files', 'docs/a.md']]) {
+    const r = cli(root, args);
+    assert.strictEqual(r.status, 2, `${args.join(' ')}: ${r.stdout}`);
+    assert.match(r.stdout, /^Usage: crosscheck/m, args.join(' '));
+  }
+  assert.strictEqual(now(), before, 'nothing changed');
+});
+
 test('crosscheck\'s own gap writes through the CLI stay acknowledged, never a shell edit made during a review', async () => {
   const older = '# Known gaps\n\nFindings left unfixed on purpose. Entries are never deleted, only marked fixed.\n\n## G1 · open · 2026-10-01 · LOW\n- Where: src/old.js\n- Problem: older\n';
   const { root } = project('t7', { 'src/a.js': 'a0\n', [gaps.NAME]: older });
@@ -235,6 +252,11 @@ test('crosscheck\'s own gap writes through the CLI stay acknowledged, never a sh
   assert.strictEqual(closed.status, 0, closed.stdout);
   acknowledged('a close');
   assert.strictEqual(commitRefusal(root), null, 'the closed chain lets the commit through');
+  // (crosscheck's own gap commands too: marking a gap fixed once made the next commit wait for a review)
+  assert.strictEqual(cli(root, ['gap', 'G1', '--fixed']).status, 0);
+  assert.strictEqual(cli(root, ['gap', '--add', '--where', 'src/a.js', '--problem', 'left as it is', '--why', 'harmless']).status, 0);
+  acknowledged('the gap commands');
+  assert.strictEqual(commitRefusal(root), null, 'the gap commands let the commit through');
   // a held review during which a shell edits KNOWN_GAPS.md
   const ack = stateOf(root).acks[key(gaps.NAME)];
   change(root, 'src/a.js', 'a2\n');
