@@ -229,12 +229,16 @@ function callersOf(root, riskyPaths, reviewedKeys) {
 // that those tests really catch the failure)
 const TESTS_CHECK = 'Tests: check that each test-plan case\'s test (new or existing) would catch the failure it names, that a target planned with no case has a reason that holds, and that each fixed BUG has a test that would catch it again (an existing or planned one counts, and one test may cover related BUGs; a BUG that only records an unmet requirement needs one only when money, data or security depends on it). A risk to money, data or security left untested is a finding.';
 
+// (reviews never saw the gaps on record, so they found the same known gap again in every review of its file)
+const KNOWN_RULE = 'Known gaps, listed below when the reviewed files have any, were left unfixed on purpose: report one again only when this change makes it worse or newly realistic, the task asks to fix it, or you have concrete evidence that its recorded reason is wrong, and then name its id in the title.';
+
 const RULES = `You review a code change for the project in the current folder, which you may read (read-only) for context.
 The reviewed files may change while you work: read a reviewed file only from its frozen copy, listed under "Frozen copies".
 When the change alters what a function takes, returns or promises, search the project for every caller and check each one against it; report a broken caller at the changed function.
 Report every real problem as a finding:
 - BUG: it can really happen in normal use (a real caller, input or user action) and cause real harm: a wrong result, lost data, lost money or a security hole. In money or trading code, an unlikely trigger with a big possible loss is a BUG too.
 - GAP: anything else worth recording. No style remarks.
+${KNOWN_RULE}
 Before reporting a finding, re-read the lines and confirm its trigger can really happen: a caller, input, user action or the platform reaches the path, the value can really be that, and that path really produces the claimed failure.
 Each finding: severity; title; location: one of the reviewed paths below exactly, optionally with :line or :line-line, or "-" for the task as a whole; trigger; harm; failure; fix: the smallest change that works, with no option, layer or config the problem doesn't need; test (the test that would catch it again, new or existing) required for CRITICAL and HIGH, else null; label; reqs: the requirement ids it shows unmet.
 ${TESTS_CHECK}
@@ -249,6 +253,7 @@ The reviewed files may change while you work: read a reviewed file only from its
 A file shown as unchanged since the last round is the version that round reviewed: read its frozen copy whenever an open finding, a changed requirement or a caller needs it.
 Answer every open finding once, by id: RESOLVED (the code now fixes it), MAINTAIN (it still stands) or CONCEDE (it was never real), with your reason.
 Report a new finding only for a real problem in the changed lines or the code that calls them, of MEDIUM severity or above (a LOW one is recorded as a gap). Its fields and labels are those of a review: BUG when it can really happen in normal use and cause real harm (in money or trading code, an unlikely trigger with a big possible loss too), else GAP; location: one of the reviewed paths exactly, optionally with :line or :line-line, or "-" for the task as a whole; test (the test that would catch it again, new or existing) required for CRITICAL and HIGH.
+${KNOWN_RULE}
 ${TESTS_CHECK}
 Rate only the requirements under "Changed requirements" (none: no rows). A finding may name any requirement of the task.
 class: none, normal or risky for the changed code, with its files (only those whose own change can cause the harm) and why. coverage: one line.
@@ -312,8 +317,10 @@ function freeze(root, { attempt, session, names = [], files, admittedAt, rev, ta
     evidence = `Supplied by Claude and unverified${stale}.\n${fence(textOf(bytes))}`;
   }
   const lessons = gaps.lessons(root).trim() || 'None.';
+  const known = new Map(Object.values(files).flatMap(f => gaps.openFor(root, path.join(root, f.path))).map(e => [e.id, e]));
+  const knownText = [...known.values()].map(e => `- ${e.id} [${e.severity}] ${e.fields.Where}: ${e.fields.Problem} (trigger: ${e.fields.Trigger || '-'}; left because: ${e.fields['Why skipped'] || '-'})`).join('\n');
   const copies = Object.values(files).map(f => `- ${f.path}: ${f.frozen === DELETED ? '(deleted)' : snapFile(root, f.frozen)}`).join('\n');
-  const tail = `## Project lessons (confirmed past mistakes)\n${lessons}\n\n## Reviewed files\n${code.join('\n\n')}\n\n`
+  const tail = `## Project lessons (confirmed past mistakes)\n${lessons}\n\n${knownText ? `## Known gaps (left unfixed on purpose)\n${knownText}\n\n` : ''}## Reviewed files\n${code.join('\n\n')}\n\n`
     + `## Frozen copies (the reviewed versions, whole)\n${copies}\n\n## Evidence\n${evidence}\n`;
   const rowIds = chain ? task.ids.filter(id => (chain.task.reqs || {})[id] !== task.reqs[id]) : task.ids;
   const prompt = chain

@@ -112,7 +112,15 @@ function noteProject(session, root) {
 // (one shell word: unquoted characters and quoted parts together, as in ~/"a folder"; one character at a time, since
 // a repetition inside the repetition makes a long path take exponential time and the guard time out)
 const PLACE = '((?:"[^"]*"|\'[^\']*\'|[^\\s;&|"\'])+)';
-const COMMIT = new RegExp(`\\bgit((?:\\s+-[Cc]\\s+${PLACE})*)\\s+commit\\b`);
+// git (git.exe, maybe at the end of a quoted path) with its own options before the subcommand: -C or -c and their
+// value, a one-letter flag such as -p, or a long one such as --no-pager, --git-dir=x or --work-tree x (`git --no-pager
+// commit` once wasn't seen as a commit at all). (Each option parses one way, or fails at once, so the time stays linear.)
+const GIT = `\\bgit(?:\\.exe)?["']?((?:\\s+(?:-[Cc]\\s+${PLACE}|-(?![Cc]\\b)[A-Za-z](?![\\w-])|--[A-Za-z][\\w-]*(?:=\\S+|\\s+(?!-)${PLACE})?))*)\\s+`;
+const COMMIT = new RegExp(`${GIT}commit\\b`);
+// (anywhere in the command, a commit message's words included: every way of leaving a message out let staging escape,
+// as in `cat <<'EOF' && git add ...`, PowerShell's `\$(git add ...)` or `-m "$(bash -cm 'git add -A')"`, while a match
+// only adds untracked files to the check)
+const STAGE = new RegExp(`${GIT}(?:add|stage)\\b`);
 // A leading change of folder, ended by &&, ; or a new line: Bash's cd, or PowerShell's Set-Location by any of its
 // names, in any letter case, with or without -Path or -LiteralPath. (Each shell's own: in Bash, Set-Location fails, and
 // the commit after it runs where the shell already was.)
@@ -146,6 +154,9 @@ function bash(inp) {
   const command = String((inp.tool_input || {}).command || '');
   const commit = command.match(COMMIT);
   if (!commit) return null;
+  // (git status runs before the command, so what the command itself stages is still untracked: a new file made by a
+  // shell once went into a commit unchecked; a command that stages has its untracked files checked too)
+  const stages = STAGE.test(command);
   const cd = command.match(inp.tool_name === 'PowerShell' ? LEADING_CD.PowerShell : LEADING_CD.Bash);
   const start = path.resolve(inp.cwd || '.');
   let dir = cd ? path.resolve(start, shellPath(cd[1], inp.tool_name, true)) : start;
@@ -154,9 +165,11 @@ function bash(inp) {
   // (option by option, so a -C inside a quoted -c value is never taken for one)
   for (const [, flag, value] of commit[1].matchAll(new RegExp(`-([Cc])\\s+${PLACE}`, 'g'))) if (flag === 'C') dir = path.resolve(dir, shellPath(value, inp.tool_name, false));
   const root = state.projectRoot(dir);
+  // (`git init` in the same command makes a repository whose first commit takes every file unchecked)
+  if (!root && stages) return deny('Not committed: this command stages files and commits in a folder that isn\'t a git repository yet, so they can\'t be checked: run git init and git add on their own first, then commit.');
   if (!root) return null;
   const s = review.stateOf(root);
-  const r = spawnSync('git', ['status', '--porcelain=v1', '-z', '--untracked-files=no'], { cwd: root, encoding: 'utf8', windowsHide: true });
+  const r = spawnSync('git', ['status', '--porcelain=v1', '-z', `--untracked-files=${stages ? 'all' : 'no'}`], { cwd: root, encoding: 'utf8', windowsHide: true });
   if (r.status !== 0) throw new Error(`git status failed in ${root}: ${String(r.stderr).trim()}`);
   const files = new Map(Object.values(s.changes).map(c => [state.pathKey(c.path), c.path]));
   const entries = r.stdout.split('\0');
@@ -341,7 +354,8 @@ function handle(name, raw) {
   event = name;
   try {
     if (!EVENTS[name]) throw new Error(`unknown hook event ${name}`);
-    return EVENTS[name](typeof raw === 'string' ? JSON.parse(raw || '{}') : raw);
+    // (an input that once began with a byte-order mark failed to parse, and a failed edit or commit check lets it through)
+    return EVENTS[name](typeof raw === 'string' ? JSON.parse(raw.replace(/^﻿/, '') || '{}') : raw);
   } catch (e) {
     log(e.stack || e);
     if (name === 'screen') return deny(`The desktop owner could not be checked (${e.message}), so the screen tool is refused. Retry; if it persists, run ${CLI} doctor.`);

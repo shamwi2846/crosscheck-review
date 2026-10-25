@@ -183,7 +183,10 @@ function render(answer) {
     lines.push(`  trigger: ${f.trigger}`, `  harm: ${f.harm}`, `  fix: ${f.fix}${f.test ? ` · test: ${f.test}` : ''}`);
     if (f.agreement) lines.push(`  pair: ${f.agreement}`); // (a paired review: who found it, and any dispute's evidence)
   }
-  for (const r of answer.requirements) lines.push(`${r.id} ${r.status.replace(/_/g, ' ')}: ${r.evidence}`);
+  // (the requirements this change doesn't touch share a line: a long task's rows once pushed the findings out of view)
+  const untouched = answer.requirements.filter(r => r.status === 'NOT_IN_THIS_CHANGE').map(r => r.id);
+  for (const r of answer.requirements) if (r.status !== 'NOT_IN_THIS_CHANGE') lines.push(`${r.id} ${r.status.replace(/_/g, ' ')}: ${r.evidence}`);
+  if (untouched.length) lines.push(`not in this change: ${untouched.join(', ')}`);
   for (const p of answer.possibly_missing) lines.push(`possibly missing: ${p}`);
   lines.push(`coverage: ${answer.coverage}`);
   return lines.join('\n');

@@ -129,6 +129,54 @@ test('a commit is refused while the chosen repository has unreviewed changes or 
   assert.strictEqual(commit(), null);
 });
 
+test('a command that stages and commits has its untracked files checked, an unreviewed new file included', () => {
+  const root = project('t3st');
+  fs.writeFileSync(path.join(root, 'src/payout.js'), 'pay()\n'); // (made by a shell: untracked, with no change record)
+  const run = (tool, command) => hook.handle('bash', { session_id: 'S', cwd: root, tool_name: tool, tool_input: { command } });
+  // (git's own options, an environment setting before git, git.exe, git stage, a quoted shell, and a message that
+  // could run git add)
+  const staging = [['Bash', 'git add -A && git commit -m change'], ['PowerShell', 'git add -A; git commit -m change'],
+    ['Bash', 'git add src/payout.js && git commit -m change'], ['Bash', 'git --literal-pathspecs add src/payout.js && git commit -m change'],
+    ['PowerShell', 'git --no-pager add -A; git commit -m change'], ['Bash', 'git add -A && git --no-pager commit -m change'],
+    ['Bash', 'git --work-tree . add -A && git commit -m change'], ['Bash', 'git -p add -A && git --work-tree . commit -m change'],
+    ['Bash', 'LC_ALL=C git add src/payout.js && git commit -m change'], ['PowerShell', 'git.exe add -A; git.exe commit -m change'],
+    ['Bash', 'git stage -A && git commit -m change'], ['Bash', 'bash -c "git add -A && git commit -m change"'],
+    ['Bash', 'git commit -m "$(git add -A; echo change)"'], ['PowerShell', 'git commit -m "\\$(git add -A; \'change\')"'],
+    ['Bash', 'bash -c "git commit -m \'$(git add -A; echo change)\'"'], ['Bash', 'bash -cm "git add -A && git commit -m change"'],
+    ['Bash', 'git commit -m "change $(bash -cm \'git add -A\')"'], ['Bash', "cat <<'EOF' && git add src/payout.js && git commit -m change\nbody\nEOF"],
+    // (a message is read too, since leaving any of it out let staging escape: naming git add only adds the check)
+    ['Bash', 'git commit -m "Fix guard; git add must run first"'], ['PowerShell', "git commit -m 'Run git add on its own'"],
+    ['Bash', "git commit -q -F - <<'EOF'\nRun git add on its own first\nEOF"], ['PowerShell', "@'\nRun git add on its own first\n'@ | git commit -F -"]];
+  for (const [tool, command] of staging) assert.match(denial(run(tool, command)) || '', /differ from their last reviewed version: src\/payout\.js/, command);
+  // (a commit that stages nothing leaves untracked files alone)
+  for (const [tool, command] of [['Bash', 'git commit -m change'], ['PowerShell', "git commit -m 'Add the payout report'"]]) assert.strictEqual(run(tool, command), null, command);
+  assert.strictEqual(run('Bash', 'git add -A'), null, 'staging alone is no commit');
+  // (in a folder that isn't a repository yet, git init makes one, and its first commit would take the files unchecked)
+  const plain = path.join(HOME, 't3st-new');
+  fs.mkdirSync(plain, { recursive: true });
+  const first = hook.handle('bash', { session_id: 'S', cwd: plain, tool_name: 'Bash', tool_input: { command: 'git init && git add -A && git commit -m initial' } });
+  assert.match(denial(first) || '', /isn't a git repository yet/);
+  seed(root, s => { s.acks = { [key('src/payout.js')]: sha('pay()\n') }; }); // (once reviewed, every form goes through)
+  for (const [tool, command] of staging) assert.strictEqual(run(tool, command), null, `${command}: reviewed`);
+  fs.writeFileSync(path.join(root, 'src/payout.js'), 'pay twice()\n');
+  spawnSync('git', ['add', '-A'], { cwd: root }); // (staged on its own, a changed file is a change the guard sees)
+  assert.match(denial(run('Bash', 'git --no-pager commit -m change')) || '', /src\/payout\.js/, 'git\'s own options don\'t hide a commit');
+});
+
+test('hook input that starts with a byte-order mark is checked like plain input', () => {
+  const root = project('t3bom', { 'src/payout.js': 'pay\n' });
+  fs.writeFileSync(path.join(root, 'src/payout.js'), 'pay twice\n');
+  seed(root, s => { s.acks = { [key('src/payout.js')]: sha('pay\n') }; });
+  const requests = [['bash', { session_id: 'S', cwd: root, tool_name: 'Bash', tool_input: { command: 'git commit -m change' } }],
+    ['edit', { session_id: 'S', cwd: root, tool_name: 'Write', tool_input: { file_path: path.join(root, 'src/EA.mq5'), content: 'x' } }]];
+  for (const [event, input] of requests) {
+    const plain = hook.handle(event, JSON.stringify(input));
+    assert.ok(denial(plain), `${event}: refused`);
+    assert.deepStrictEqual(hook.handle(event, `﻿${JSON.stringify(input)}`), plain, `${event}: the same refusal with a byte-order mark`);
+  }
+  assert.strictEqual((stateOf(root).changes || {})[key('src/EA.mq5')], undefined, 'the refused edit records nothing');
+});
+
 test('a PowerShell leading location change cannot bypass the destination repository\'s commit guard', () => {
   const a = project('t3s a');
   const b = project('t3s b', { 'src/payments.js': 'old\n' });
