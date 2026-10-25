@@ -113,14 +113,26 @@ function noteProject(session, root) {
 // a repetition inside the repetition makes a long path take exponential time and the guard time out)
 const PLACE = '((?:"[^"]*"|\'[^\']*\'|[^\\s;&|"\'])+)';
 // git (git.exe, maybe at the end of a quoted path) with its own options before the subcommand: -C or -c and their
-// value, a one-letter flag such as -p, or a long one such as --no-pager, --git-dir=x or --work-tree x (`git --no-pager
-// commit` once wasn't seen as a commit at all). (Each option parses one way, or fails at once, so the time stays linear.)
-const GIT = `\\bgit(?:\\.exe)?["']?((?:\\s+(?:-[Cc]\\s+${PLACE}|-(?![Cc]\\b)[A-Za-z](?![\\w-])|--[A-Za-z][\\w-]*(?:=\\S+|\\s+(?!-)${PLACE})?))*)\\s+`;
+// value (-C. too), a one-letter flag such as -p, or a long one such as --no-pager, --git-dir=x or --work-tree x (`git
+// --no-pager commit` once wasn't seen as a commit at all). (Each option parses one way, or fails at once, so the time
+// stays linear.)
+const GIT = `\\bgit(?:\\.exe)?["']?((?:\\s+(?:-[Cc]\\s*${PLACE}|-(?![Cc])[A-Za-z](?![\\w-])|--[A-Za-z][\\w-]*(?:=\\S+|\\s+(?!-)${PLACE})?))*)\\s+`;
 const COMMIT = new RegExp(`${GIT}commit\\b`);
-// (anywhere in the command, a commit message's words included: every way of leaving a message out let staging escape,
-// as in `cat <<'EOF' && git add ...`, PowerShell's `\$(git add ...)` or `-m "$(bash -cm 'git add -A')"`, while a match
-// only adds untracked files to the check)
-const STAGE = new RegExp(`${GIT}(?:add|stage)\\b`);
+// What lets one command line do more than commit: separators, line breaks, substitutions, redirections (`> file`
+// rewrites a file before `commit -a` takes it; `< file` feeds --interactive), and in PowerShell any parenthesis. A
+// commit must stand alone, after at most a leading cd, since this check runs before the command: then all it can take
+// is already staged, and git status shows it. (Reading what else a command stages leaked every round: `LC_ALL=C git
+// add`, `git -C. add`, `git add \` on two lines, a message's `$(bash -cm 'git add -A')`.)
+const UNSAFE = { Bash: /[;&|\r\n`$<>]/, PowerShell: /[;&|\r\n`$<>()]/ };
+// (git commit --interactive can stage untracked files itself)
+const INTERACTIVE = /\s--interactive\b/;
+// (and git itself must be the command, after any NAME=value settings: another program can run git more than once with
+// no separator, as `find ... -exec git add ... -exec git commit ...`)
+const FIRST_WORD = /^\s*(?:[A-Za-z_]\w*=\S*\s+)*("[^"]*"|'[^']*'|\S+)/;
+const isGit = word => /(?:^|[\\/])git(?:\.exe)?$/i.test(unquote(word));
+// (git's own options or a GIT_ setting before git could name another repository than the one this check finds)
+const OTHER_REPO = /--(?:git-dir|work-tree)\b/;
+const GIT_SETTING = /^\s*(?:[A-Za-z_]\w*=\S*\s+)*GIT_\w*=/;
 // A leading change of folder, ended by &&, ; or a new line: Bash's cd, or PowerShell's Set-Location by any of its
 // names, in any letter case, with or without -Path or -LiteralPath. (Each shell's own: in Bash, Set-Location fails, and
 // the commit after it runs where the shell already was.)
@@ -154,22 +166,22 @@ function bash(inp) {
   const command = String((inp.tool_input || {}).command || '');
   const commit = command.match(COMMIT);
   if (!commit) return null;
-  // (git status runs before the command, so what the command itself stages is still untracked: a new file made by a
-  // shell once went into a commit unchecked; a command that stages has its untracked files checked too)
-  const stages = STAGE.test(command);
   const cd = command.match(inp.tool_name === 'PowerShell' ? LEADING_CD.PowerShell : LEADING_CD.Bash);
+  const rest = cd ? command.slice(cd[0].length) : command;
+  const unsafe = inp.tool_name === 'PowerShell' ? UNSAFE.PowerShell : UNSAFE.Bash;
+  // (a new file staged in the same command was still untracked here, and once went into a commit unchecked)
+  if (unsafe.test(rest) || (cd && unsafe.test(cd[1])) || !isGit((rest.match(FIRST_WORD) || [])[1] || '') || INTERACTIVE.test(rest)) return deny('Not committed: commit on its own, after at most a leading cd, and not with --interactive. This check runs before the command, so anything else in it (git add, another command, a substitution, a redirection, a second line) could change what is committed unchecked: run git add and the rest first, and put a message with $, (, <, > or a line break in a file: git commit -F <file>.');
+  if (OTHER_REPO.test(commit[1]) || GIT_SETTING.test(rest)) return deny('Not committed: this commit names a repository with --git-dir, --work-tree or a GIT_ setting, which this check doesn\'t follow, so it could check the wrong one: use cd or git -C <folder> instead.');
   const start = path.resolve(inp.cwd || '.');
   let dir = cd ? path.resolve(start, shellPath(cd[1], inp.tool_name, true)) : start;
   // (a cd into a folder that doesn't exist fails, and a commit after `;` then runs where the shell already was)
   if (!fs.existsSync(dir)) dir = start;
   // (option by option, so a -C inside a quoted -c value is never taken for one)
-  for (const [, flag, value] of commit[1].matchAll(new RegExp(`-([Cc])\\s+${PLACE}`, 'g'))) if (flag === 'C') dir = path.resolve(dir, shellPath(value, inp.tool_name, false));
+  for (const [, flag, value] of commit[1].matchAll(new RegExp(`-([Cc])\\s*${PLACE}`, 'g'))) if (flag === 'C') dir = path.resolve(dir, shellPath(value, inp.tool_name, false));
   const root = state.projectRoot(dir);
-  // (`git init` in the same command makes a repository whose first commit takes every file unchecked)
-  if (!root && stages) return deny('Not committed: this command stages files and commits in a folder that isn\'t a git repository yet, so they can\'t be checked: run git init and git add on their own first, then commit.');
   if (!root) return null;
   const s = review.stateOf(root);
-  const r = spawnSync('git', ['status', '--porcelain=v1', '-z', `--untracked-files=${stages ? 'all' : 'no'}`], { cwd: root, encoding: 'utf8', windowsHide: true });
+  const r = spawnSync('git', ['status', '--porcelain=v1', '-z', '--untracked-files=no'], { cwd: root, encoding: 'utf8', windowsHide: true });
   if (r.status !== 0) throw new Error(`git status failed in ${root}: ${String(r.stderr).trim()}`);
   const files = new Map(Object.values(s.changes).map(c => [state.pathKey(c.path), c.path]));
   const entries = r.stdout.split('\0');

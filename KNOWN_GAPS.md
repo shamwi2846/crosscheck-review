@@ -361,3 +361,30 @@ Findings left unfixed on purpose. Entries are never deleted, only marked fixed.
 - Fix: Include gap-command writes in the automatically acknowledged bookkeeping description and reserve the hand-change rule for edits.
 - Log: 20261024234410-f7801d
 - Why skipped: pair: confirmed by B
+
+## G41 · open · 2026-10-25 · LOW
+- Task: -
+- Where: src/review.js:320
+- Problem: When KNOWN_GAPS.md can't be read, gaps.openFor returns no entries, so a review's prompt simply has no Known gaps section (CodeRabbit on PR 24).
+- Trigger: -
+- Fix: -
+- Log: recorded by hand
+- Why skipped: The only effect is the old behavior: GPT may report a recorded gap again. A review that has gaps to write already refuses to apply while the file can't be read, so the problem surfaces.
+
+## G42 · fixed · 2026-10-25 · MEDIUM
+- Task: Fixes from the 2026-10-25 review of the chats: known gaps in reviews, staging with a commit, BOM input, findings first, rate limits
+- Where: tests/hook.test.js:138-167
+- Problem: F4: T1's planned Git-option regression was removed
+- Trigger: The supplied T1 plan is checked against its named regression test.
+- Fix: Restore T1's exact command to the existing staging table and retain both acknowledgement assertions.
+- Log: 20261025184329-5f555d
+- Why skipped: pair: confirmed by A
+
+## G43 · open · 2026-10-25 · LOW
+- Task: -
+- Where: src/hook.js:170
+- Problem: A git hook that runs during the commit (the repository's pre-commit hook, or one a -c core.hooksPath setting names) could stage files after the commit guard checked, so they would go in unchecked (noted by the reviewers of PR 24).
+- Trigger: -
+- Fix: -
+- Log: recorded by hand
+- Why skipped: Hooks are code configured on purpose, outside the command line the guard reads; the guard is a backstop against Claude slipping, and none of the user's repositories has a hook that stages files.
