@@ -363,6 +363,28 @@ test('a round says its chain can be closed only when nothing in the whole chain 
   assert.ok(done.text.includes(`nothing is left open in chain ${done.chain}: close it (node "`) && done.text.includes(`crosscheck.js" close ${done.chain})`), done.text);
 });
 
+test('known gap context keeps its loss-reporting exceptions, in reviews and follow-ups', async () => {
+  const { root, taskFile } = project('t10', { 'src/refunds.js': 'retry: off\n' });
+  assert.deepStrictEqual(gaps.add(root, [{ task: 'refunds', where: ['src/refunds.js:12'], problem: 'duplicate refunds when two retry requests share an id',
+    trigger: 'two retries with one id', severity: 'MEDIUM', fix: 'dedupe by id', log: 'l', why: 'the retry route is disabled' }]).ids, ['G1']);
+  fs.writeFileSync(path.join(root, 'src/refunds.js'), 'retry: on\n'); // (the change makes the recorded gap realistic)
+  const finding = { ...gapFinding, severity: 'HIGH', title: 'G1 is now realistic: duplicate refunds', location: 'src/refunds.js:1', label: 'BUG', test: 'two retries refund once' };
+  const followed = JSON.stringify({ verdict: 'ISSUES_REMAIN', followups: [{ id: 'F1', status: 'MAINTAIN', reason: 'still on' }], findings: [], requirements: [],
+    possibly_missing: [], class: { level: 'normal', files: [], why: '-' }, coverage: 'c' });
+  setSpec({ exec: [{ text: answerOf({ verdict: 'ISSUES_FOUND', findings: [finding] }) }, { text: followed }] });
+  const first = await review.review(root, { files: ['src/refunds.js'], taskFile });
+  assert.strictEqual(first.status, 'DONE', first.text);
+  const responseFile = path.join(HOME, 't10-response.md');
+  fs.writeFileSync(responseFile, 'F1: not yet');
+  assert.strictEqual((await review.followup(root, { chain: first.chain, responseFile })).status, 'DONE');
+  const [fresh, round] = execCalls().map(c => c.prompt);
+  for (const prompt of [fresh, round]) {
+    assert.ok(prompt.includes('- G1 [MEDIUM] src/refunds.js:12: duplicate refunds when two retry requests share an id (trigger: two retries with one id; left because: the retry route is disabled)'), 'the gap with its place, trigger and reason');
+    assert.ok(prompt.includes('report one again only when this change makes it worse or newly realistic, the task asks to fix it, or you have concrete evidence that its recorded reason is wrong, and then name its id in the title'), 'its exceptions');
+  }
+  assert.match(round, /## Open findings\n- F1 /, 'the follow-up still asks about F1');
+});
+
 test('an automatic gap write cannot acknowledge a shell edit made during the review', async () => {
   const before = '# Known gaps\n\nFindings left unfixed on purpose. Entries are never deleted, only marked fixed.\n\n## G1 · open · 2026-10-01 · LOW\n- Where: src/old.js\n- Problem: older\n';
   const { root, taskFile } = project('t8', { 'src/q.js': 'q0\n', [gaps.NAME]: before });

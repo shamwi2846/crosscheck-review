@@ -129,6 +129,68 @@ test('a commit is refused while the chosen repository has unreviewed changes or 
   assert.strictEqual(commit(), null);
 });
 
+test('a commit must stand alone, after at most a leading cd, so what it takes is staged and checked', () => {
+  const root = project('t3st');
+  fs.writeFileSync(path.join(root, 'src/payout.js'), 'pay()\n'); // (made by a shell: untracked, with no change record)
+  const run = (tool, command, cwd = root) => hook.handle('bash', { session_id: 'S', cwd, tool_name: tool, tool_input: { command } });
+  // (staging in the same command, spelled any way, another command, a substitution, a second line; outside a repository too)
+  const plain = path.join(HOME, 't3st-new');
+  fs.mkdirSync(plain, { recursive: true });
+  for (const [tool, command, cwd] of [['Bash', 'git add -A && git commit -m change'], ['PowerShell', 'git add -A; git commit -m change'],
+    ['Bash', 'LC_ALL=C git add src/payout.js && git commit -m change'], ['Bash', 'git -C. add -A && git commit -m change'],
+    ['Bash', 'git add \\\n  -f .env && git commit -m change'], ['Bash', 'git add "-f" .env && git commit -m change'],
+    ['Bash', 'bash -c "git add -A && git commit -m change"'], ['Bash', 'git commit -m "$(git add -A; echo change)"'],
+    ['PowerShell', 'git commit -m "\\$(git add -A; \'change\')"'], ['PowerShell', 'git commit -m (git add -A)'],
+    ['Bash', 'git commit -F <(git add -A; echo change)'], ['Bash', "git commit -q -F - <<'EOF'\nchange\nEOF"],
+    ['PowerShell', "@'\nchange\n'@ | git commit -F -"], ['Bash', `cd "$(git add -A)" && git commit -m change`],
+    ['Bash', 'find src -name payout.js -exec git add -- {} + -exec git commit -m change -- {} +'], ['Bash', 'bash -c "git commit -m change"'],
+    ['Bash', 'git commit -am change > README.md'], ['PowerShell', 'git commit -am change > README.md'], ['Bash', 'git commit --interactive -m change'],
+    ['Bash', 'git commit --interactive -m change < answers.txt'], ['Bash', 'git commit --interact -m change'],
+    ['Bash', 'git add src/payout.js && git \\\n  commit -m change'], ['PowerShell', 'git add -A; git `\n  commit -m change'],
+    ['PowerShell', 'git add src/payout.js; git -C .\\ commit -m change'],
+    ['Bash', 'git init && git add -A && git commit -m initial', plain]]) {
+    assert.match(denial(run(tool, command, cwd)) || '', /commit on its own/, command);
+  }
+  // (a commit on its own leaves untracked files alone: it can't take them)
+  for (const [tool, command] of [['Bash', 'git commit -m change'], ['Bash', 'git commit -m "Fix guard (git add and commit)"'],
+    ['Bash', 'git commit -m "Mention --work-tree in a message"'], ['PowerShell', "git commit -m 'Add the payout report'"],
+    ['Bash', `cd "${root}" && git commit -m change`], ['PowerShell', `Set-Location '${root}'; git commit -m change`],
+    ['Bash', 'git -C. commit -m change'], ['Bash', 'LC_ALL=C git commit -m change'],
+    ['Bash', '"C:/Program Files/Git/cmd/git.exe" commit -m change']]) assert.strictEqual(run(tool, command), null, command);
+  // (a repository the guard doesn't follow could be another, unchecked one)
+  for (const command of ['git --git-dir=../other/.git --work-tree=../other commit -m change', 'git --work-tree ../other commit -m change',
+    'GIT_DIR=../other/.git git commit -m change', 'LC_ALL=C GIT_WORK_TREE=../other git commit -m change', 'git_dir=../other/.git git commit -m change',
+    'git_work_tree=../other git commit -m change']) assert.match(denial(run('Bash', command)) || '', /names a repository/, command);
+  // (a Bash folder with \ escapes isn't read exactly, so it could name the wrong repository)
+  for (const command of ['cd ../target\\ repo; git commit -am change', 'git -C ../target\\ repo commit -am change']) {
+    assert.match(denial(run('Bash', command)) || '', /write the folder in quotes/, command);
+  }
+  // (staged on its own, the new file is a change the guard sees, whatever git's own options before commit)
+  spawnSync('git', ['add', '-A'], { cwd: root });
+  for (const [tool, command] of [['Bash', 'git commit -m change'], ['Bash', 'git --no-pager commit -m change'], ['Bash', 'git -C. commit -m change'],
+    ['Bash', 'git.exe commit -m change'], ['PowerShell', 'GIT.EXE commit -m change'], ['PowerShell', 'Git commit -m change'],
+    ['Bash', 'git -c user.name=Review\\ Bot commit -m change'], ['Bash', 'cd README.md; git commit -m change'],
+    ['PowerShell', 'git -C .\\ commit -m change']]) {
+    assert.match(denial(run(tool, command)) || '', /differ from their last reviewed version: src\/payout\.js/, command);
+  }
+  seed(root, s => { s.acks = { [key('src/payout.js')]: sha('pay()\n') }; });
+  assert.strictEqual(run('Bash', 'git -C. commit -m change'), null, 'reviewed: it goes through');
+});
+
+test('hook input that starts with a byte-order mark is checked like plain input', () => {
+  const root = project('t3bom', { 'src/payout.js': 'pay\n' });
+  fs.writeFileSync(path.join(root, 'src/payout.js'), 'pay twice\n');
+  seed(root, s => { s.acks = { [key('src/payout.js')]: sha('pay\n') }; });
+  const requests = [['bash', { session_id: 'S', cwd: root, tool_name: 'Bash', tool_input: { command: 'git commit -m change' } }],
+    ['edit', { session_id: 'S', cwd: root, tool_name: 'Write', tool_input: { file_path: path.join(root, 'src/EA.mq5'), content: 'x' } }]];
+  for (const [event, input] of requests) {
+    const plain = hook.handle(event, JSON.stringify(input));
+    assert.ok(denial(plain), `${event}: refused`);
+    assert.deepStrictEqual(hook.handle(event, `﻿${JSON.stringify(input)}`), plain, `${event}: the same refusal with a byte-order mark`);
+  }
+  assert.strictEqual((stateOf(root).changes || {})[key('src/EA.mq5')], undefined, 'the refused edit records nothing');
+});
+
 test('a PowerShell leading location change cannot bypass the destination repository\'s commit guard', () => {
   const a = project('t3s a');
   const b = project('t3s b', { 'src/payments.js': 'old\n' });
@@ -148,9 +210,9 @@ test('a PowerShell leading location change cannot bypass the destination reposit
     assert.match(first || '', /src\/payments\.js/, form[1]);
     assert.match(first, /open BUG/, form[1]);
   }
-  // (Bash has no Set-Location: there that command fails, and the commit after `;` runs in B itself)
+  // (Bash has no Set-Location: there it is another command before the commit, which must stand alone)
   const bash = hook.handle('bash', { session_id: 'S', cwd: b, tool_name: 'Bash', tool_input: { command: `Set-Location '${a}'; git commit -m change` } });
-  assert.match(denial(bash) || '', /src\/payments\.js/);
+  assert.match(denial(bash) || '', /commit on its own/, 'in Bash, Set-Location is just another command before the commit');
   seed(b, s => { s.acks[key('src/payments.js')] = sha('changed by Claude\n'); });
   for (const form of forms) assert.doesNotMatch(denial(commit(form)) || 'allowed', /differ from their last reviewed version/, form[1]);
   for (const form of forms) assert.match(denial(commit(form)) || '', /open BUG/, `${form[1]}: the BUG still blocks`);
@@ -192,7 +254,7 @@ test('a Git Bash leading cd cannot bypass the target repository\'s commit guard 
     assert.match(denial(quoted) || '', /src\/old\.js/);
     // (a long path in an earlier git -C made a nested pattern take exponential time, so the guard timed out and let it through)
     const started = Date.now();
-    assert.match(denial(commit(['Bash', `git -C C:/${'a'.repeat(40)} status && git -C "${gitBash(b)}" commit -m change`])) || '', /src\/old\.js/);
+    assert.match(denial(commit(['Bash', `git -C C:/${'a'.repeat(40)} status && git -C "${gitBash(b)}" commit -m change`])) || '', /commit on its own/);
     assert.ok(Date.now() - started < 2000, `the guard answered in ${Date.now() - started} ms`);
     seed(b, s => { s.acks[key('src/old.js')] = sha('changed by Claude\n'); });
     for (const form of forms) assert.doesNotMatch(denial(commit(form)) || 'allowed', /differ from their last reviewed version/, form[1]);

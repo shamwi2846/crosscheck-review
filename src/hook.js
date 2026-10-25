@@ -109,16 +109,46 @@ function noteProject(session, root) {
 
 // ---- Commits ----
 
-// (one shell word: unquoted characters and quoted parts together, as in ~/"a folder"; one character at a time, since
-// a repetition inside the repetition makes a long path take exponential time and the guard time out)
-const PLACE = '((?:"[^"]*"|\'[^\']*\'|[^\\s;&|"\'])+)';
-const COMMIT = new RegExp(`\\bgit((?:\\s+-[Cc]\\s+${PLACE})*)\\s+commit\\b`);
+// The words of each shell's command line. One shell word: unquoted characters, escaped ones and quoted parts together,
+// as in ~/"a folder" or Review\ Bot, one character at a time (a repetition inside the repetition made a long path take
+// exponential time, and the guard timed out). Bash escapes with \, PowerShell with `, where \ is just a path's
+// separator (`git -C .\ commit`). The space between words takes a line continued with that escape: `git \` on one line
+// and `commit` on the next is git commit.
+function shellWords(esc) {
+  const PLACE = `((?:"[^"]*"|'[^']*'|${esc}.|[^\\s;&|"'${esc}])+)`;
+  const SP = `(?:\\s|${esc}\\r?\\n)+`;
+  // git (git.exe, maybe at the end of a quoted path, in any letter case: Windows runs GIT.EXE commit as git) with its
+  // own options before the subcommand: -C or -c and their value (-C. too), a one-letter flag such as -p, or a long one
+  // such as --no-pager, --git-dir=x or --work-tree x (`git --no-pager commit` once wasn't seen as a commit at all).
+  // (Each option parses one way, or fails at once, so the time stays linear.)
+  const GIT = `\\bgit(?:\\.exe)?["']?((?:${SP}(?:-[Cc](?:${SP})?${PLACE}|-(?![Cc])[A-Za-z](?![\\w-])|--[A-Za-z][\\w-]*(?:=\\S+|${SP}(?!-)${PLACE})?))*)${SP}`;
+  return { PLACE, COMMIT: new RegExp(`${GIT}commit\\b`, 'i'), C_OPTION: new RegExp(`-([Cc])(?:${SP})?${PLACE}`, 'g') };
+}
+const WORDS = { Bash: shellWords('\\\\'), PowerShell: shellWords('`') };
+// (a Bash folder written with \ escapes, as in ../target\ repo, isn't read exactly, so it could name the wrong folder)
+const escapedFolder = place => place.replace(/"[^"]*"|'[^']*'/g, '').includes('\\');
+// What lets one command line do more than commit: separators, line breaks, substitutions, redirections (`> file`
+// rewrites a file before `commit -a` takes it; `< file` feeds --interactive), and in PowerShell any parenthesis. A
+// commit must stand alone, after at most a leading cd, since this check runs before the command: then all it can take
+// is already staged, and git status shows it. (Reading what else a command stages leaked every round: `LC_ALL=C git
+// add`, `git -C. add`, `git add \` on two lines, a message's `$(bash -cm 'git add -A')`.)
+const UNSAFE = { Bash: /[;&|\r\n`$<>]/, PowerShell: /[;&|\r\n`$<>()]/ };
+// (git commit --interactive can stage untracked files itself; git also takes it shortened, as --interact)
+const INTERACTIVE = /\s--int[a-z]*\b/;
+// (and git itself must be the command, after any NAME=value settings: another program can run git more than once with
+// no separator, as `find ... -exec git add ... -exec git commit ...`)
+const FIRST_WORD = /^\s*(?:[A-Za-z_]\w*=\S*\s+)*("[^"]*"|'[^']*'|\S+)/;
+const isGit = word => /(?:^|[\\/])git(?:\.exe)?$/i.test(unquote(word));
+// (git's own options or a GIT_ setting before git could name another repository than the one this check finds; the
+// setting in any letter case, since Windows reads git_dir as GIT_DIR)
+const OTHER_REPO = /--(?:git-dir|work-tree)\b/;
+const GIT_SETTING = /^\s*(?:[A-Za-z_]\w*=\S*\s+)*GIT_\w*=/i;
 // A leading change of folder, ended by &&, ; or a new line: Bash's cd, or PowerShell's Set-Location by any of its
 // names, in any letter case, with or without -Path or -LiteralPath. (Each shell's own: in Bash, Set-Location fails, and
 // the commit after it runs where the shell already was.)
 const LEADING_CD = {
-  Bash: new RegExp(`^\\s*cd\\s+${PLACE}\\s*(?:&&|;|\\n)`),
-  PowerShell: new RegExp(`^\\s*(?:cd|chdir|sl|set-location)(?:\\s+-(?:literal)?path)?\\s+${PLACE}\\s*(?:&&|;|\\n)`, 'i'),
+  Bash: new RegExp(`^\\s*cd\\s+${WORDS.Bash.PLACE}\\s*(?:&&|;|\\n)`),
+  PowerShell: new RegExp(`^\\s*(?:cd|chdir|sl|set-location)(?:\\s+-(?:literal)?path)?\\s+${WORDS.PowerShell.PLACE}\\s*(?:&&|;|\\n)`, 'i'),
 };
 const unquote = s => s.replace(/"([^"]*)"|'([^']*)'/g, '$1$2');
 // On Windows, Git Bash spells C:\ as /c/.
@@ -144,15 +174,24 @@ function shellPath(place, tool, isCd) {
 function bash(inp) {
   if (globalState().off) return null;
   const command = String((inp.tool_input || {}).command || '');
-  const commit = command.match(COMMIT);
+  const shell = inp.tool_name === 'PowerShell' ? 'PowerShell' : 'Bash';
+  const commit = command.match(WORDS[shell].COMMIT);
   if (!commit) return null;
-  const cd = command.match(inp.tool_name === 'PowerShell' ? LEADING_CD.PowerShell : LEADING_CD.Bash);
+  const cd = command.match(LEADING_CD[shell]);
+  const rest = cd ? command.slice(cd[0].length) : command;
+  const unsafe = UNSAFE[shell];
+  // (a new file staged in the same command was still untracked here, and once went into a commit unchecked)
+  if (unsafe.test(rest) || (cd && unsafe.test(cd[1])) || !isGit((rest.match(FIRST_WORD) || [])[1] || '') || INTERACTIVE.test(rest)) return deny('Not committed: commit on its own, after at most a leading cd, and not with --interactive. This check runs before the command, so anything else in it (git add, another command, a substitution, a redirection, a second line) could change what is committed unchecked: run git add and the rest first, and put a message with $, (, <, > or a line break in a file: git commit -F <file>. A command that only mentions git commit in its text (a search, a pull request body) counts too: reword it, search with the Grep tool, or pass the text in a file (gh pr create --body-file).');
+  if (OTHER_REPO.test(commit[1]) || GIT_SETTING.test(rest)) return deny('Not committed: this commit names a repository with --git-dir, --work-tree or a GIT_ setting, which this check doesn\'t follow, so it could check the wrong one: use cd or git -C <folder> instead.');
+  const folders = [...(cd ? [cd[1]] : []), ...[...commit[1].matchAll(WORDS[shell].C_OPTION)].filter(m => m[1] === 'C').map(m => m[2])];
+  if (shell === 'Bash' && folders.some(escapedFolder)) return deny('Not committed: a folder written with \\ escapes (cd or git -C) isn\'t read exactly by this check, so it could check the wrong repository: write the folder in quotes instead.');
   const start = path.resolve(inp.cwd || '.');
   let dir = cd ? path.resolve(start, shellPath(cd[1], inp.tool_name, true)) : start;
-  // (a cd into a folder that doesn't exist fails, and a commit after `;` then runs where the shell already was)
-  if (!fs.existsSync(dir)) dir = start;
+  // (a cd into a folder that doesn't exist, or into a file, fails, and a commit after `;` then runs where the shell
+  // already was)
+  if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) dir = start;
   // (option by option, so a -C inside a quoted -c value is never taken for one)
-  for (const [, flag, value] of commit[1].matchAll(new RegExp(`-([Cc])\\s+${PLACE}`, 'g'))) if (flag === 'C') dir = path.resolve(dir, shellPath(value, inp.tool_name, false));
+  for (const [, flag, value] of commit[1].matchAll(WORDS[shell].C_OPTION)) if (flag === 'C') dir = path.resolve(dir, shellPath(value, inp.tool_name, false));
   const root = state.projectRoot(dir);
   if (!root) return null;
   const s = review.stateOf(root);
@@ -341,7 +380,8 @@ function handle(name, raw) {
   event = name;
   try {
     if (!EVENTS[name]) throw new Error(`unknown hook event ${name}`);
-    return EVENTS[name](typeof raw === 'string' ? JSON.parse(raw || '{}') : raw);
+    // (an input that once began with a byte-order mark failed to parse, and a failed edit or commit check lets it through)
+    return EVENTS[name](typeof raw === 'string' ? JSON.parse(raw.replace(/^﻿/, '') || '{}') : raw);
   } catch (e) {
     log(e.stack || e);
     if (name === 'screen') return deny(`The desktop owner could not be checked (${e.message}), so the screen tool is refused. Retry; if it persists, run ${CLI} doctor.`);
