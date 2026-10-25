@@ -145,7 +145,9 @@ test('a commit must stand alone, after at most a leading cd, so what it takes is
     ['PowerShell', "@'\nchange\n'@ | git commit -F -"], ['Bash', `cd "$(git add -A)" && git commit -m change`],
     ['Bash', 'find src -name payout.js -exec git add -- {} + -exec git commit -m change -- {} +'], ['Bash', 'bash -c "git commit -m change"'],
     ['Bash', 'git commit -am change > README.md'], ['PowerShell', 'git commit -am change > README.md'], ['Bash', 'git commit --interactive -m change'],
-    ['Bash', 'git commit --interactive -m change < answers.txt'],
+    ['Bash', 'git commit --interactive -m change < answers.txt'], ['Bash', 'git commit --interact -m change'],
+    ['Bash', 'git add src/payout.js && git \\\n  commit -m change'], ['PowerShell', 'git add -A; git `\n  commit -m change'],
+    ['PowerShell', 'git add src/payout.js; git -C .\\ commit -m change'],
     ['Bash', 'git init && git add -A && git commit -m initial', plain]]) {
     assert.match(denial(run(tool, command, cwd)) || '', /commit on its own/, command);
   }
@@ -157,11 +159,19 @@ test('a commit must stand alone, after at most a leading cd, so what it takes is
     ['Bash', '"C:/Program Files/Git/cmd/git.exe" commit -m change']]) assert.strictEqual(run(tool, command), null, command);
   // (a repository the guard doesn't follow could be another, unchecked one)
   for (const command of ['git --git-dir=../other/.git --work-tree=../other commit -m change', 'git --work-tree ../other commit -m change',
-    'GIT_DIR=../other/.git git commit -m change', 'LC_ALL=C GIT_WORK_TREE=../other git commit -m change']) assert.match(denial(run('Bash', command)) || '', /names a repository/, command);
+    'GIT_DIR=../other/.git git commit -m change', 'LC_ALL=C GIT_WORK_TREE=../other git commit -m change', 'git_dir=../other/.git git commit -m change',
+    'git_work_tree=../other git commit -m change']) assert.match(denial(run('Bash', command)) || '', /names a repository/, command);
+  // (a Bash folder with \ escapes isn't read exactly, so it could name the wrong repository)
+  for (const command of ['cd ../target\\ repo; git commit -am change', 'git -C ../target\\ repo commit -am change']) {
+    assert.match(denial(run('Bash', command)) || '', /write the folder in quotes/, command);
+  }
   // (staged on its own, the new file is a change the guard sees, whatever git's own options before commit)
   spawnSync('git', ['add', '-A'], { cwd: root });
-  for (const command of ['git commit -m change', 'git --no-pager commit -m change', 'git -C. commit -m change', 'git.exe commit -m change']) {
-    assert.match(denial(run('Bash', command)) || '', /differ from their last reviewed version: src\/payout\.js/, command);
+  for (const [tool, command] of [['Bash', 'git commit -m change'], ['Bash', 'git --no-pager commit -m change'], ['Bash', 'git -C. commit -m change'],
+    ['Bash', 'git.exe commit -m change'], ['PowerShell', 'GIT.EXE commit -m change'], ['PowerShell', 'Git commit -m change'],
+    ['Bash', 'git -c user.name=Review\\ Bot commit -m change'], ['Bash', 'cd README.md; git commit -m change'],
+    ['PowerShell', 'git -C .\\ commit -m change']]) {
+    assert.match(denial(run(tool, command)) || '', /differ from their last reviewed version: src\/payout\.js/, command);
   }
   seed(root, s => { s.acks = { [key('src/payout.js')]: sha('pay()\n') }; });
   assert.strictEqual(run('Bash', 'git -C. commit -m change'), null, 'reviewed: it goes through');

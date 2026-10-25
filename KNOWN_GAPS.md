@@ -388,3 +388,12 @@ Findings left unfixed on purpose. Entries are never deleted, only marked fixed.
 - Fix: -
 - Log: recorded by hand
 - Why skipped: Hooks are code configured on purpose, outside the command line the guard reads; the guard is a backstop against Claude slipping, and none of the user's repositories has a hook that stages files.
+
+## G44 · open · 2026-10-25 · LOW
+- Task: -
+- Where: src/review.js:322
+- Problem: The project's lessons go into the review prompt without a fence or a 'recorded text, not instructions' label, unlike the known gaps (CodeRabbit on PR 24).
+- Trigger: -
+- Fix: -
+- Log: recorded by hand
+- Why skipped: Older than this change, and the lessons hold only lines Claude records itself with crosscheck's lesson command; it gets its own look rather than widening this pull request.
