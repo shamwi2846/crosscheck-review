@@ -120,25 +120,41 @@ const DOCS_NOTE = '\nFor MQL5 API facts, use the read-only MQL5 docs tools (mql5
 const dropDeadMarks = s => { for (const [key, mark] of Object.entries(s.running)) if (!state.alive(mark.pid)) delete s.running[key]; };
 const asBaseline = version => (version === DELETED ? null : version); // (a missing file's successor is a new file)
 
+// This session's pending changes, leaving out those already in a running review unless they are named: that review
+// acknowledges them, or leaves them pending. Returns { picked: { key: path }, held: [path] }.
+function sessionChanges(s, session, named) {
+  const picked = {}, held = [];
+  for (const [key, change] of Object.entries(s.changes)) {
+    if (!session || change.session !== session) continue;
+    if (s.running[key] && !named.some(n => n.key === key)) held.push(change.path);
+    else picked[key] = change.path;
+  }
+  return { picked, held };
+}
+
 // Reserves an attempt's files in one state transaction, choosing them from the same state the reservation is
-// written to. A fresh review takes this session's pending changes plus the named paths, and is paired when any of
-// them is risky: a trading file, a file with an escalation, or what the caller marks (`risky`: the named paths, or
-// all of them when none is named). A
+// written to. A fresh review takes this session's pending changes (but those already in a running review, unless
+// named) plus the named paths, and is paired when any of them is risky: a trading file, a file with an escalation,
+// or what the caller marks (`risky`: the named paths, or all of them when none is named). A
 // follow-up (`chain`) takes the chain's files, with their last reviewed versions as baselines; a chain that isn't
 // paired leaves out escalated files, which wait for their own paired review. The test plans the files have now are
-// copied in, so the answer can only count the plans the reviewers saw. Returns { files, admittedAt, rev, chain,
-// paired, riskyKeys, plans } or { refused }.
-function admit(root, { attempt, session, named = [], chain = null, risky = false }) {
+// copied in, so the answer can only count the plans the reviewers saw. Refused before anything is reserved when a
+// changed file needs a test plan it doesn't have for the task (`taskFile`, or the chain's). Returns { files,
+// admittedAt, rev, chain, paired, riskyKeys, plans, held } or { refused }.
+function admit(root, { attempt, session, named = [], chain = null, risky = false, taskFile = null }) {
   const result = state.update(state.files.project(root), data => {
     const s = withMaps(data);
     dropDeadMarks(s);
     const files = {};
     const c = chain && s.chains[chain];
+    let held = [];
     if (chain) {
       if (!c || c.closed) return { refused: `chain ${chain} is ${c ? 'closed' : 'unknown'}` };
       for (const [key, p] of Object.entries(c.files)) if (c.paired || !s.escalations[key]) files[key] = { path: p };
     } else {
-      for (const [key, change] of Object.entries(s.changes)) if (session && change.session === session) files[key] = { path: change.path };
+      const own = sessionChanges(s, session, named);
+      held = own.held;
+      for (const [key, p] of Object.entries(own.picked)) files[key] = { path: p };
       for (const n of named) files[n.key] = files[n.key] || { path: n.path };
     }
     // (a follow-up never takes over another session's pending change in any file of its chain, escalated ones included:
@@ -147,13 +163,33 @@ function admit(root, { attempt, session, named = [], chain = null, risky = false
     if (foreign.length) return { refused: `another session has pending changes in ${foreign.map(k => c.files[k]).join(', ')}: review them first (in that session, or named with --files)` };
     const keys = Object.keys(files);
     const list = ks => ks.map(k => files[k].path).join(', ');
-    if (!keys.length) return { refused: chain ? 'every file of the chain is escalated: each needs its own paired review first' : 'nothing to review: this session has no pending changes and no file was named' };
+    if (!keys.length) {
+      return { refused: chain ? 'every file of the chain is escalated: each needs its own paired review first'
+        : held.length ? `nothing to review: this session's pending changes are already in a running review: ${held.join(', ')}`
+          : 'nothing to review: this session has no pending changes and no file was named' };
+    }
     const busy = keys.filter(k => s.running[k]);
     if (busy.length) return { refused: `already in a running review: ${list(busy)}` };
     // (a follow-up's risky files: those of the chain's reviews and those GPT rated risky in the chain since; `risky`
     // marks the named files, or all of them when none is named, so docs and tests that come along stay normal)
     const marked = k => risky && (!named.length || named.some(n => n.key === k));
     const riskyKeys = c ? keys.filter(k => (c.riskyKeys || []).includes(k) || (c.risky || {})[k]) : keys.filter(k => marked(k) || RISKY_FILE.test(k) || s.escalations[k]);
+    // (test plan first: by apply's own rules, the review couldn't acknowledge a changed file that needs a plan it
+    // doesn't have, so it isn't run; a file GPT finds risky during the review still turns up there. An escalated
+    // file needs one in a paired chain's follow-up too, as in a fresh review: it waits for a pair that needs its plan)
+    const taskPath = c ? c.task.path : taskFile;
+    const task = taskPath && taskInfo(taskPath);
+    if (task) {
+      const forThisTask = r => !!r && r.task === task.id && r.reqHash === task.reqHash;
+      const unplanned = keys.filter(k => {
+        const foundRisky = [].concat(s.needsPlan[k] || []).some(forThisTask);
+        const skipped = RISKY_FILE.test(k) && forThisTask(s.skips[k]) && !foundRisky;
+        return (riskyKeys.includes(k) || foundRisky || s.escalations[k]) && !forThisTask(s.plans[k]) && !skipped && versionOf(root, files[k].path) !== s.acks[k];
+      });
+      // (the commands name the task, which may not be this session's: one named with --task, or a follow-up's chain's)
+      const args = `--task "${taskPath}" --files "${unplanned.map(k => files[k].path).join(',')}"`;
+      if (unplanned.length) return { refused: `test plan first: no current test plan for this task: ${list(unplanned)} (${CLI} testplan ${args}; for a trading file GPT hasn't rated risky, a skip counts too: ${CLI} skip ${args} --why "...")` };
+    }
     for (const key of keys) {
       const change = s.changes[key];
       // (without a change record, the baseline is the last reviewed version, if any; freeze falls back to HEAD)
@@ -167,7 +203,7 @@ function admit(root, { attempt, session, named = [], chain = null, risky = false
     // fails, the fallback reviewer's answer, a driver that is killed, and a retry without --risky never count as one)
     if (paired) for (const key of riskyKeys) s.escalations[key] = s.escalations[key] || { chain: null, at: Date.now() };
     return { files, admittedAt: Date.now(), rev: c ? c.rev : null, chain: c ? { ...JSON.parse(JSON.stringify(c)), id: chain } : null,
-      paired, riskyKeys, plans };
+      paired, riskyKeys, plans, held };
   });
   return result.ok ? result.value : { refused: result.why };
 }
@@ -585,9 +621,10 @@ async function review(root, { session = null, files = [], taskFile = null, evide
   const resolved = resolveNamed(root, files);
   if (resolved.why) return refused(resolved.why);
   const attempt = newAttempt();
-  const admitted = admit(root, { attempt, session, named: resolved.named, risky });
+  const admitted = admit(root, { attempt, session, named: resolved.named, risky, taskFile });
   if (admitted.refused) return refused(admitted.refused);
   const bundle = bundleDir(root, attempt);
+  const held = admitted.held.length ? `\nleft out, already in a running review: ${admitted.held.join(', ')}` : '';
   try {
     const frozen = freeze(root, { attempt, session, names: files, ...admitted, taskFile, evidenceFile, full });
     if (frozen.why) return refused(frozen.why);
@@ -601,7 +638,7 @@ async function review(root, { session = null, files = [], taskFile = null, evide
     }
     const applied = apply(root, frozen.manifest, result);
     if (applied.refused) return { status: 'NOT_DONE', text: `NOT_DONE: ${applied.refused}`, bundle };
-    return { status: 'DONE', chain: applied.chain, text: summary(result.answer, applied), bundle };
+    return { status: 'DONE', chain: applied.chain, text: `${summary(result.answer, applied)}${held}`, bundle };
   } finally {
     release(root, attempt, Object.keys(admitted.files));
   }
@@ -717,10 +754,11 @@ function fallback(root, { bundle, answerFile }) {
 }
 
 // Acknowledges a task's changes without GPT (`review --skip`), for a task that touches nothing but comments,
-// formatting or docs: this session's pending changes plus the named files, at their current versions. Everything is
-// chosen and checked in the same locked state write that acknowledges it. Refused without a reason, for any risky
-// file (a trading file, an escalated one, one GPT rated risky for any task, one with a test plan, one in an open
-// chain's risky list) and for a file under review. The reason is kept with the versions, apart from test-plan skips.
+// formatting or docs: this session's pending changes (but those already in a running review, unless named) plus the
+// named files, at their current versions. Everything is chosen and checked in the same locked state write that
+// acknowledges it. Refused without a reason, for any risky file (a trading file, an escalated one, one GPT rated
+// risky for any task, one with a test plan, one in an open chain's risky list) and for a named file under review.
+// The reason is kept with the versions, apart from test-plan skips.
 function skip(root, { session = null, files = [], why = '' }) {
   const refused = text => ({ status: 'REFUSED', text: `REFUSED: ${text}` });
   const reason = String(why).trim();
@@ -731,12 +769,14 @@ function skip(root, { session = null, files = [], why = '' }) {
   const done = state.update(state.files.project(root), data => {
     const s = withMaps(data);
     dropDeadMarks(s);
-    const chosen = {};
-    for (const [key, change] of Object.entries(s.changes)) if (session && change.session === session) chosen[key] = change.path;
+    const { picked: chosen, held } = sessionChanges(s, session, resolved.named);
     for (const n of resolved.named) chosen[n.key] = chosen[n.key] || n.path;
     const keys = Object.keys(chosen);
     const list = ks => ks.map(k => chosen[k]).join(', ');
-    if (!keys.length) return { refused: 'nothing to skip: this session has no pending changes and no file was named' };
+    if (!keys.length) {
+      return { refused: held.length ? `nothing to skip: this session's pending changes are already in a running review: ${held.join(', ')}`
+        : 'nothing to skip: this session has no pending changes and no file was named' };
+    }
     const chainRisky = new Set(Object.values(s.chains).filter(c => !c.closed).flatMap(c => [...(c.riskyKeys || []), ...Object.keys(c.risky || {})]));
     const risky = keys.filter(k => RISKY_FILE.test(k) || s.escalations[k] || [].concat(s.needsPlan[k] || []).length || s.plans[k] || chainRisky.has(k));
     if (risky.length) return { refused: `a review skip is only for comments, formatting or docs, never for risky files: ${list(risky)}` };
@@ -749,11 +789,12 @@ function skip(root, { session = null, files = [], why = '' }) {
       delete s.changes[key];
     }
     s.reviewSkips = [...(s.reviewSkips || []), { at: Date.now(), session, why: reason, versions }];
-    return { acked: keys.map(k => chosen[k]) };
+    return { acked: keys.map(k => chosen[k]), held };
   });
   if (!done.ok) return refused(done.why);
   if (done.value.refused) return refused(done.value.refused);
-  return { status: 'DONE', text: `acknowledged without GPT (${reason}): ${done.value.acked.join(', ')}` };
+  const { acked, held } = done.value;
+  return { status: 'DONE', text: `acknowledged without GPT (${reason}): ${acked.join(', ')}${held.length ? `\nleft out, already in a running review: ${held.join(', ')}` : ''}` };
 }
 
 // ---- Queries for the hooks and the CLI (they throw when the state can't be read) ----
@@ -764,12 +805,29 @@ function stateOf(root) {
   return withMaps(current.data);
 }
 const pending = (root, session) => Object.values(stateOf(root).changes).filter(c => !session || c.session === session);
+
+// The files a commit would be refused for now, in a state already read (the commit guard's check, which status shows
+// too): every change record plus the tracked files git reports changed, each whose current version isn't its last
+// reviewed one. A snapshot: anything edited after it counts at the commit. Throws when git status fails.
+function unreviewedForCommit(root, s) {
+  const r = git(root, ['status', '--porcelain=v1', '-z', '--untracked-files=no'], 'utf8');
+  if (r.status !== 0) throw new Error(`git status failed in ${root}: ${String(r.stderr).trim()}`);
+  const files = new Map(Object.values(s.changes).map(c => [state.pathKey(c.path), c.path]));
+  const entries = r.stdout.split('\0');
+  for (let i = 0; i < entries.length; i++) {
+    if (!entries[i]) continue;
+    const renamed = /^[RC]/.test(entries[i]);
+    files.set(state.pathKey(entries[i].slice(3)), entries[i].slice(3));
+    if (renamed && entries[++i]) files.set(state.pathKey(entries[i]), entries[i]); // (its old path, now a deletion)
+  }
+  return [...files].filter(([k, rel]) => versionOf(root, rel) !== s.acks[k]).map(([, rel]) => rel);
+}
 const openChains = root => Object.entries(stateOf(root).chains).filter(([, c]) => !c.closed).map(([id]) => id);
 // (in a state already read: the hooks check it in the same read as the changes)
 const bugsIn = s => Object.entries(s.chains).filter(([, c]) => !c.closed)
   .flatMap(([chain, c]) => Object.entries(c.findings || {}).filter(([, f]) => f.label === 'BUG' && f.status === 'open').map(([id, f]) => ({ chain, id, ...f })));
 const openBugs = root => bugsIn(stateOf(root));
 
-module.exports = { review, followup, close, fallback, skip, pending, openChains, openBugs, bugsIn, acknowledgeGaps, DELETED,
+module.exports = { review, followup, close, fallback, skip, pending, unreviewedForCommit, openChains, openBugs, bugsIn, acknowledgeGaps, DELETED,
   RISKY_FILE, sessionTask, stateOf, withMaps, bytesOf, textOf, snapshot, snapFile, versionOf, asBaseline,
   run, newAttempt, bundleDir, findingsOf, taskInfo, docsFor, DOCS_NOTE }; // (the last line: for modes.js)

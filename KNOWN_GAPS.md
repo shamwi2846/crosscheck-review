@@ -397,3 +397,21 @@ Findings left unfixed on purpose. Entries are never deleted, only marked fixed.
 - Fix: -
 - Log: recorded by hand
 - Why skipped: Older than this change, and the lessons hold only lines Claude records itself with crosscheck's lesson command; it gets its own look rather than widening this pull request.
+
+## G45 · open · 2026-10-26 · LOW
+- Task: Fixes from the 2026-10-26 review of the chats: status as a commit preflight, busy files left out, test plan first
+- Where: src/review.js:625-639
+- Problem: F3: Failed reviews omit the held-file notice
+- Trigger: A fresh review leaves out a busy session file, then GPT is unavailable, the pair fails, or application is refused.
+- Fix: Append the held-file notice to every post-admission result.
+- Log: 20261026224654-125d0e
+- Why skipped: pair: both
+
+## G46 · open · 2026-10-26 · LOW
+- Task: Fixes from the 2026-10-26 review of the chats: status as a commit preflight, busy files left out, test plan first
+- Where: tests/review.test.js:342-347
+- Problem: F4: T3 does not observe reservation publication
+- Trigger: Run the regression test intended to verify refusal before any reservation is published.
+- Fix: Observe project-state writes during each refused request and assert that none publishes a reservation for the selected files.
+- Log: 20261026224654-125d0e
+- Why skipped: pair: both

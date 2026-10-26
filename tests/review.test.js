@@ -49,6 +49,8 @@ const answerOf = (over = {}) => JSON.stringify({ verdict: 'NO_ISSUES', findings:
 const gapFinding = { severity: 'LOW', title: 'odd name', location: 'src/a.js:2', trigger: 'reading it', harm: 'none', failure: 'confusing',
   fix: 'rename', test: null, label: 'GAP', reqs: [] };
 const change = (rel, session, at, baseline) => ({ path: rel, session, at, baseline });
+// A current test plan for a file in the task as it is now, with GPT's reason for no case, as testplan stores one.
+const planFor = taskFile => { const t = review.taskInfo(taskFile); return { task: t.id, reqHash: t.reqHash, at: 1, cases: [], tests: [], why: 'covered' }; };
 
 test('a fresh review selects at admission and records frozen results after durable gaps', async () => {
   const { root, taskFile, git } = project('t1', { 'src/a.js': 'v0 committed\n', 'src/b.js': 'b\n', 'src/dé.js': 'deleted text\n' });
@@ -164,6 +166,11 @@ test('changed requirements acknowledge nothing, and a risky rating stays escalat
   assert.ok(s.chains[r.chain]);
   assert.strictEqual(s.escalations[key('src/m.js')].chain, r.chain);
   const calls = execCalls().length;
+  const unplanned = await review.review(root, { session: 'A', files: ['src/m.js'], taskFile });
+  assert.strictEqual(unplanned.status, 'REFUSED', 'escalated without a test plan: it couldn\'t be acknowledged');
+  assert.match(unplanned.text, /test plan first: no current test plan for this task: src\/m\.js \(/);
+  assert.strictEqual(execCalls().length, calls);
+  seed(root, st => { st.plans[key('src/m.js')] = planFor(taskFile); });
   const again = await review.review(root, { session: 'A', files: ['src/m.js'], taskFile }); // (escalated: now always a pair)
   assert.strictEqual(again.status, 'DONE', again.text);
   const pairCalls = execCalls().slice(calls);
@@ -171,7 +178,7 @@ test('changed requirements acknowledge nothing, and a risky rating stays escalat
   assert.ok(pairCalls.every(c => c.prompt.includes('R2. Keeps the sum, rounded.')), 'the next review reads the changed requirement');
   s = stateOf(root);
   assert.ok(s.riskyReviews[key('src/m.js')], 'the pair it was escalated to records its review');
-  assert.ok(s.changes[key('src/m.js')], 'still pending: it has no test plan');
+  assert.strictEqual(s.acks[key('src/m.js')], sha('m1 moves money\n'), 'acknowledged with its plan');
 });
 
 test('edits outside Requirements do not void a running review', async () => {
@@ -200,7 +207,10 @@ test('a named risky review keeps accompanying docs config and tests normal', asy
     fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
     fs.writeFileSync(path.join(root, rel), `changed ${i}\n`);
   }
-  seed(root, s => { s.changes = Object.fromEntries(rels.map((rel, i) => [key(rel), change(rel, 'A', i + 1, null)])); });
+  seed(root, s => {
+    s.changes = Object.fromEntries(rels.map((rel, i) => [key(rel), change(rel, 'A', i + 1, null)]));
+    s.plans = { [key('src/payments.js')]: planFor(taskFile) };
+  });
   const risky = { level: 'risky', files: ['src/payments.js'], why: 'it moves money' };
   const followed = JSON.stringify({ verdict: 'RESOLVED', followups: [], findings: [], requirements: [], possibly_missing: [], class: risky, coverage: 'c' });
   setSpec({ byPrompt: [ // (the follow-up first: a fresh one's history holds reviewer A's prompt too)
@@ -214,14 +224,14 @@ test('a named risky review keeps accompanying docs config and tests normal', asy
   assert.deepStrictEqual([Object.keys(manifest.files).sort(), manifest.riskyKeys, manifest.paired], [rels.map(key).sort(), [key('src/payments.js')], true]);
   const normalNow = what => {
     const s = stateOf(root);
-    assert.ok(s.changes[key('src/payments.js')], `${what}: payments.js waits for its test plan`);
+    assert.ok(s.acks[key('src/payments.js')] && !s.changes[key('src/payments.js')], `${what}: payments.js is acknowledged with its plan`);
     for (const rel of rels.slice(1)) {
       assert.deepStrictEqual([!!s.acks[key(rel)], s.changes[key(rel)], s.escalations[key(rel)], s.needsPlan[key(rel)]], [true, undefined, undefined, undefined], `${what}: ${rel}`);
     }
   };
   normalNow('the pair');
   const responseFile = path.join(HOME, 't3c-response.md');
-  fs.writeFileSync(responseFile, 'payments.js: its test plan comes next');
+  fs.writeFileSync(responseFile, 'nothing changed');
   assert.strictEqual((await review.followup(root, { chain: r.chain, responseFile })).status, 'DONE');
   normalNow('its follow-up');
   const prompts = execCalls().map(c => c.prompt);
@@ -255,6 +265,98 @@ test('a dead reservation is reclaimed, but an overlapping live review can neithe
   const s = stateOf(root);
   assert.deepStrictEqual(s.running, { [key('src/other.js')]: { attempt: 'other', pid: process.pid } });
   assert.strictEqual(s.acks[key('src/a.js')], sha('a1\n'));
+});
+
+test('a session\'s file in a running review is left out of its next review or skip, never acknowledged, and its follow-up is still refused', async () => {
+  const { root, taskFile } = project('t4b', { 'src/payments.js': 'p0\n', 'README.md': 'r0\n' });
+  fs.writeFileSync(path.join(root, 'src/payments.js'), 'p1 moves money\n');
+  fs.writeFileSync(path.join(root, 'README.md'), 'r1\n');
+  const pay = key('src/payments.js'), readme = key('README.md');
+  const bug = { severity: 'HIGH', title: 'no daily limit', location: 'src/payments.js:1', trigger: 't', harm: 'h', failure: 'f', fix: 'x', test: null, label: 'BUG', reqs: [], status: 'open' };
+  seed(root, s => {
+    s.changes = { [pay]: change('src/payments.js', 'A', 1, sha('p0\n')), [readme]: change('README.md', 'A', 2, null) };
+    s.acks = { [pay]: sha('p0\n') };
+    s.escalations = { [pay]: { chain: 'C1', at: 1 } };
+    s.plans = { [pay]: planFor(taskFile) };
+    s.running = { [pay]: { attempt: 'other', pid: process.pid } };
+    s.chains = { C1: { closed: false, rev: 3, paired: true, session: 'A', files: { [pay]: 'src/payments.js', [readme]: 'README.md' }, riskyKeys: [pay],
+      risky: {}, task: { path: taskFile }, frozen: {}, rounds: [], findings: { F1: bug } } };
+  });
+  const payments = () => { const s = stateOf(root); return [s.changes[pay], s.acks[pay], s.escalations[pay], s.running[pay]]; };
+  const untouched = payments();
+  setSpec({ exec: [{ text: answerOf() }] });
+  const named = await review.review(root, { session: 'A', files: ['src/payments.js'], taskFile });
+  assert.match(named.text, /^REFUSED: already in a running review: src\/payments\.js$/);
+  assert.strictEqual(review.skip(root, { session: 'A', files: ['src/payments.js'], why: 'docs only' }).status, 'REFUSED');
+  assert.deepStrictEqual([stateOf(root).acks[readme], execCalls().length], [undefined, 0], 'a refused request acknowledges nothing');
+  const r = await review.review(root, { session: 'A', taskFile });
+  assert.strictEqual(r.status, 'DONE', r.text);
+  assert.match(r.text, /\nleft out, already in a running review: src\/payments\.js$/);
+  assert.deepStrictEqual(Object.keys(JSON.parse(fs.readFileSync(path.join(r.bundle, 'manifest.json'), 'utf8')).files), [readme]);
+  assert.ok(!execCalls()[0].prompt.includes('src/payments.js'), 'GPT never sees the left-out file');
+  assert.strictEqual(stateOf(root).acks[readme], sha('r1\n'));
+  assert.deepStrictEqual(payments(), untouched);
+  fs.writeFileSync(path.join(root, 'README.md'), 'r2\n');
+  seed(root, s => { s.changes[readme] = change('README.md', 'A', 3, sha('r1\n')); });
+  const skipped = review.skip(root, { session: 'A', why: 'wording only' });
+  assert.strictEqual(skipped.text, 'acknowledged without GPT (wording only): README.md\nleft out, already in a running review: src/payments.js');
+  assert.deepStrictEqual(Object.keys(stateOf(root).reviewSkips.slice(-1)[0].versions), [readme]);
+  assert.deepStrictEqual(payments(), untouched);
+  // (only the held file is left)
+  assert.match(review.skip(root, { session: 'A', why: 'wording only' }).text, /^REFUSED: nothing to skip: this session's pending changes are already in a running review: src\/payments\.js$/);
+  assert.match((await review.review(root, { session: 'A', taskFile })).text, /^REFUSED: nothing to review: this session's pending changes are already in a running review: src\/payments\.js$/);
+  const responseFile = path.join(HOME, 't4b-response.md');
+  fs.writeFileSync(responseFile, 'F1: fixed');
+  assert.match((await review.followup(root, { chain: 'C1', responseFile })).text, /^REFUSED: already in a running review: src\/payments\.js/);
+  const s = stateOf(root);
+  assert.deepStrictEqual([s.chains.C1.rev, s.chains.C1.findings.F1.status, execCalls().length, payments()], [3, 'open', 1, untouched]);
+});
+
+test('a changed file that needs a test plan it doesn\'t have refuses its review before anything is reserved or GPT is asked', async () => {
+  const rels = ['src/EA.mq5', 'src/lots.js', 'src/pay.js', 'src/Risk.mqh', 'src/f.js', 'src/g.js', 'src/Kept.mqh', 'src/Same.mq5', 'src/a.js'];
+  const { root, taskFile } = project('t4c', Object.fromEntries(rels.map(rel => [rel, `${rel} 0\n`])));
+  for (const rel of rels) fs.writeFileSync(path.join(root, rel), `${rel} 1\n`);
+  const t = review.taskInfo(taskFile);
+  const k = Object.fromEntries(rels.map(rel => [rel, key(rel)]));
+  seed(root, s => {
+    s.changes = { [k['src/a.js']]: change('src/a.js', 'A', 1, null) }; // (a normal companion, in every fresh review)
+    s.escalations = { [k['src/lots.js']]: { chain: 'Cx', at: 1 }, [k['src/g.js']]: { chain: 'Cx', at: 1 } };
+    // (the same requirements in another task, and this task's older requirements)
+    s.plans = { [k['src/lots.js']]: { ...planFor(taskFile), task: 'another task' }, [k['src/pay.js']]: { ...planFor(taskFile), reqHash: sha('R1. Adds numbers.') } };
+    s.skips = { [k['src/Risk.mqh']]: { task: t.id, reqHash: t.reqHash, why: 'w' }, [k['src/Kept.mqh']]: { task: t.id, reqHash: t.reqHash, why: 'w' } };
+    s.needsPlan = { [k['src/Risk.mqh']]: [{ task: 'another task', reqHash: t.reqHash }, { task: t.id, reqHash: t.reqHash }], [k['src/Kept.mqh']]: [{ task: 'another task', reqHash: t.reqHash }] };
+    s.acks = { [k['src/Same.mq5']]: sha('src/Same.mq5 1\n') }; // (changed since HEAD, but reviewed as it is)
+    s.chains = {
+      C1: { closed: false, rev: 1, paired: false, session: 'A', files: { [k['src/f.js']]: 'src/f.js' }, riskyKeys: [k['src/f.js']], risky: {},
+        task: { path: taskFile }, frozen: {}, rounds: [], findings: {} },
+      // (a paired chain's normal companion, escalated since by another review)
+      C2: { closed: false, rev: 1, paired: true, session: 'A', files: { [k['src/g.js']]: 'src/g.js' }, riskyKeys: [], risky: {},
+        task: { path: taskFile }, frozen: {}, rounds: [], findings: {} },
+    };
+  });
+  const responseFile = path.join(HOME, 't4c-response.md');
+  fs.writeFileSync(responseFile, 'nothing changed');
+  const requests = [
+    ['src/EA.mq5', () => review.review(root, { session: 'A', files: ['src/EA.mq5'], taskFile })], // (a trading file)
+    ['src/lots.js', () => review.review(root, { session: 'A', files: ['src/lots.js'], taskFile })], // (escalated)
+    ['src/pay.js', () => review.review(root, { session: 'A', files: ['src/pay.js'], taskFile, risky: true })], // (marked risky)
+    ['src/Risk.mqh', () => review.review(root, { session: 'A', files: ['src/Risk.mqh'], taskFile })], // (GPT rated it risky here: its skip is void)
+    ['src/f.js', () => review.followup(root, { chain: 'C1', responseFile })], // (a chain's risky file)
+    ['src/g.js', () => review.followup(root, { chain: 'C2', responseFile })], // (escalated, in a paired chain's follow-up)
+  ];
+  setSpec({ byPrompt: [{ match: 'reviewer A. Check', answers: [{ text: answerOf(), session: 'sess-A' }] }, { match: 'reviewer B. Attack', answers: [{ text: answerOf(), session: 'sess-B' }] }] });
+  const before = review.withMaps(stateOf(root));
+  for (const [rel, request] of requests) {
+    const r = await request();
+    assert.strictEqual(r.status, 'REFUSED', `${rel}: ${r.text}`);
+    const args = `--task "${taskFile}" --files "${rel}"`; // (the review's own task, which may not be the session's)
+    assert.ok(r.text.startsWith(`REFUSED: test plan first: no current test plan for this task: ${rel} (`) && r.text.includes(`testplan ${args};`) && r.text.includes(`skip ${args} --why`), r.text);
+    assert.deepStrictEqual([stateOf(root), execCalls().length, fs.existsSync(path.join(state.projectDir(root), 'bundles'))], [before, 0, false], `${rel}: nothing reserved or frozen, GPT never asked`);
+  }
+  // (a trading file's skip counts when only other tasks found it risky, and a file at its reviewed version needs nothing)
+  const passing = await review.review(root, { session: 'A', files: ['src/Kept.mqh', 'src/Same.mq5'], taskFile });
+  assert.strictEqual(passing.status, 'DONE', passing.text);
+  assert.strictEqual(stateOf(root).acks[k['src/Kept.mqh']], sha('src/Kept.mqh 1\n'));
 });
 
 test('an answer still wrong after its one repair applies nothing and keeps its bundle', async () => {

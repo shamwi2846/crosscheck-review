@@ -134,7 +134,7 @@ test('closing a chain needs a gap reason for every open BUG', () => {
 });
 
 test('a follow-up, or a repair, that GPT can\'t complete hands its bundle to the fallback', () => {
-  const { root } = project('t6', { 'src/a.js': 'a\n', 'src/b.js': 'b\n' });
+  const { root, task } = project('t6', { 'src/a.js': 'a\n', 'src/b.js': 'b\n' });
   change(root, 'src/a.js', 'a2\n');
   seed(root, s => { s.changes = { [key('src/a.js')]: pending('src/a.js') }; });
   const bug = { severity: 'MEDIUM', title: 'off by one', location: 'src/a.js:1', trigger: 't', harm: 'wrong sum', failure: 'f', fix: 'x', test: null, label: 'BUG', reqs: [] };
@@ -142,7 +142,10 @@ test('a follow-up, or a repair, that GPT can\'t complete hands its bundle to the
   const first = cli(root, ['review']);
   assert.strictEqual(first.status, 0, first.stdout);
   const chain = first.stdout.match(/^chain (\S+)/m)[1];
-  seed(root, s => { delete s.escalations[key('src/a.js')]; }); // (as its own paired review leaves it)
+  seed(root, s => { // (as its own paired review leaves it, with the plan the follow-up needs)
+    delete s.escalations[key('src/a.js')];
+    s.plans[key('src/a.js')] = { task: task.id, reqHash: task.reqHash, cases: [], tests: [], why: 'covered', at: 1 };
+  });
   const response = path.join(HOME, 't6-response.md');
   fs.writeFileSync(response, 'F1: fixed');
   const disconnected = { fail: 'error: stream disconnected', code: 1 };
@@ -209,6 +212,59 @@ test('a review skip needs its reason, and records only the chosen files\' curren
   assert.deepStrictEqual(Object.keys(s.changes), [key('docs/other.md')], 'session B\'s change is untouched');
   assert.deepStrictEqual(s.reviewSkips.map(k => [k.why, k.session, k.versions]), [['documentation wording only', 'A', versions]]);
   assert.strictEqual(calls(), 0);
+});
+
+test('status and the commit guard use the same complete reviewed-version check', () => {
+  const { root } = project('t5b', { 'src/auth.js': 'auth\n', 'src/auth policy.js': 'policy\n', 'src/payments.js': 'p\n', 'src/ok.js': 'o\n' });
+  const g = args => assert.strictEqual(spawnSync('git', args, { cwd: root }).status, 0);
+  g(['mv', 'src/auth policy.js', 'src/auth policy v2.js']); // (a staged rename: its old path is a deletion)
+  change(root, 'src/payments.js', 'p2\n');
+  change(root, 'src/ok.js', 'o2\n');
+  change(root, 'src/scratch.js', 'untracked\n');
+  const bug = (status, over = {}) => ({ severity: 'HIGH', title: 'no stop loss', location: 'src/payments.js:1', trigger: 't', harm: 'h', failure: 'f', fix: 'x', test: null, label: 'BUG', reqs: [], status, ...over });
+  seed(root, s => {
+    // (session B's auth.js is back at HEAD, so git shows nothing, but it isn't the version that was reviewed)
+    s.changes = { [key('src/auth.js')]: pending('src/auth.js', 'B'), [key('src/payments.js')]: pending('src/payments.js') };
+    s.acks = { [key('src/auth.js')]: sha('auth reviewed\n'), [key('src/auth policy v2.js')]: sha('policy\n'), [key('src/ok.js')]: sha('o2\n') };
+    s.chains = {
+      C1: { closed: false, rev: 1, rounds: [], findings: { F1: bug('open'), F2: bug('open', { label: 'GAP' }), F3: bug('resolved') } },
+      C2: { closed: true, rev: 2, rounds: [], findings: { F1: bug('open') } },
+    };
+  });
+  const listedIn = (text, pattern) => (text.match(pattern) || [, ''])[1].split(', ').filter(Boolean).sort();
+  const check = () => {
+    const before = fs.readFileSync(state.files.project(root), 'utf8');
+    const status = cli(root, ['status']);
+    assert.strictEqual(status.status, 0, status.stdout);
+    const line = status.stdout.match(/^a commit now: .*$/m)[0];
+    const guard = commitRefusal(root);
+    assert.strictEqual(fs.readFileSync(state.files.project(root), 'utf8'), before, 'both only read the state');
+    return { line, guard, statusFiles: listedIn(line, /not reviewed: ([^;)]*)/), guardFiles: listedIn(guard || '', /last reviewed version: ([^\n]*)\. Review/) };
+  };
+  const three = ['src/auth policy.js', 'src/auth.js', 'src/payments.js'];
+  let now = check();
+  assert.deepStrictEqual([now.statusFiles, now.guardFiles], [three, three]);
+  assert.match(now.line, /; 1 open BUG\(s\)\)$/);
+  assert.match(now.guard, /open BUG findings: C1 F1 /);
+  seed(root, s => {
+    s.acks[key('src/auth.js')] = sha('auth\n');
+    s.acks[key('src/auth policy.js')] = review.DELETED;
+    s.acks[key('src/payments.js')] = sha('p2\n');
+  });
+  now = check();
+  assert.deepStrictEqual([now.statusFiles, now.guardFiles, now.line], [[], [], 'a commit now: would be refused (1 open BUG(s))']);
+  assert.match(now.guard, /^Not committed: open BUG findings: C1 F1 /);
+  // (switched off, the guard checks nothing, and status doesn't predict a refusal)
+  assert.ok(state.update(state.files.global(), g => { g.off = true; }).ok);
+  try {
+    now = check();
+    assert.deepStrictEqual([now.line, now.guard], ['a commit now: not checked (crosscheck is OFF)', null]);
+  } finally {
+    assert.ok(state.update(state.files.global(), g => { delete g.off; }).ok);
+  }
+  seed(root, s => { s.chains.C1.findings.F1.status = 'resolved'; });
+  now = check();
+  assert.deepStrictEqual([now.line, now.guard], ['a commit now: would pass', null], 'change records and git differences at their reviewed versions block nothing');
 });
 
 test('plain words a command doesn\'t take and options given twice are wrong usage, refused before anything runs', () => {
