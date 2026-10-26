@@ -415,3 +415,21 @@ Findings left unfixed on purpose. Entries are never deleted, only marked fixed.
 - Fix: Observe project-state writes during each refused request and assert that none publishes a reservation for the selected files.
 - Log: 20261026224654-125d0e
 - Why skipped: pair: both
+
+## G47 · open · 2026-10-26 · MEDIUM
+- Task: -
+- Where: src/review.js:823
+- Problem: A modified git submodule is reported by git status as a folder, which versionOf can't read, so unreviewedForCommit throws: status stops with an error and the commit guard fails open (logged in hooks.log, shown by status) for that commit (CodeRabbit on PR 25).
+- Trigger: A project with a git submodule whose recorded commit changed.
+- Fix: -
+- Log: recorded by hand
+- Why skipped: No project crosscheck runs in has a submodule (checked 2026-10-26), and the guard's throw predates this change; fix it when a project adds one.
+
+## G48 · open · 2026-10-26 · LOW
+- Task: -
+- Where: src/review.js:187
+- Problem: If the task's Requirements change in the moment between admission and freezing, the review runs with a plan that is no longer current and can't acknowledge the risky file (CodeRabbit on PR 25).
+- Trigger: Another process rewrites the task's Requirements during the few milliseconds between admit and freeze.
+- Fix: -
+- Log: recorded by hand
+- Why skipped: Only Claude edits the task file, one command at a time, so the window isn't reachable in normal use; the result fails safe (nothing is acknowledged, the summary says why).
