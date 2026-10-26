@@ -92,8 +92,8 @@ test('every GPT job is read-only and isolated; research alone has the web, MQL5 
   ] });
   // (from a subfolder, with project-relative paths: they are read from the project's root)
   const ran = (args, code = 0) => { const r = cli(path.join(root, 'src'), args); assert.strictEqual(r.status, code, `${args[0]}: ${r.stdout}`); return r.stdout; };
+  ran(['testplan', '--files', 'src/EA.mq5']); // (first: a trading file's review needs its plan)
   ran(['review']);
-  ran(['testplan', '--files', 'src/EA.mq5']);
   ran(['plan', '--file', 'notes/plan.md']);
   ran(['idea', '--file', 'notes/idea.md']);
   ran(['digest', '--files', 'logs/run.log', '--question', 'did it pass?']);
@@ -189,6 +189,8 @@ test('a skip is refused for a file GPT rated risky in this task, even after its 
   ] });
   assert.strictEqual(cli(root, ['review']).status, 0);
   assert.ok(stateOf(root).escalations[key('src/payments.js')], 'rated risky: escalated');
+  const task = review.sessionTask(root, 'A');
+  seed(root, s => { s.plans = { [key('src/payments.js')]: { task: task.id, reqHash: task.reqHash, cases: [], tests: [], why: 'covered', at: 1 } }; }); // (its pair needs it)
   const paired = cli(root, ['review']);
   assert.strictEqual(paired.status, 0, paired.stdout);
   const before = stateOf(root);

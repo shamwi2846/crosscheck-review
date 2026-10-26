@@ -136,6 +136,11 @@ function statusCommand(args) {
   const changes = Object.values(s.changes);
   const mine = session ? changes.filter(c => c.session === session).map(c => c.path) : [];
   lines.push(`unreviewed changes of this session: ${mine.join(', ') || 'none'}${changes.length > mine.length ? `; of other sessions: ${changes.length - mine.length}` : ''}`);
+  // (the commit guard's own check, so a commit is never refused right after status said nothing blocks it)
+  const blockers = review.unreviewedForCommit(root, s);
+  const bugs = review.bugsIn(s).length;
+  const why = [blockers.length ? `not reviewed: ${blockers.join(', ')}` : '', bugs ? `${bugs} open BUG(s)` : ''].filter(Boolean).join('; ');
+  lines.push(`a commit now: ${shared.off ? 'not checked (crosscheck is OFF)' : why ? `would be refused (${why})` : 'would pass'}`);
   for (const [id, c] of Object.entries(s.chains).filter(([, chain]) => !chain.closed)) {
     const open = Object.entries(c.findings).filter(([, f]) => f.status === 'open');
     lines.push(`chain ${id} (revision ${c.rev}, ${c.rounds.length} round(s)${c.paired ? ', paired' : ''}): ${open.length} open finding(s)`);

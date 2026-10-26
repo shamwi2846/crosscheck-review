@@ -118,7 +118,15 @@ test('plan authorization stays bound to the task, its requirements and the froze
   const hold = fs.mkdtempSync(path.join(HOME, 't2-hold-'));
   const risky = { level: 'risky', files: ['src/EA.mq5'], why: 'orders' };
   setPair({ A: [{ hold, text: reviewAnswer([], { cls: risky }) }], B: [reviewAnswer()], xA: [marks([])], xB: [marks([])],
-    follow: [followAnswer(), followAnswer()] });
+    follow: [followAnswer()] });
+  // (another task's plan and one from older requirements don't count, so the review isn't run; the escalated EA's
+  // skip still does, since GPT hasn't rated it risky for this task)
+  const before = review.withMaps(stateOf(p.root));
+  const unplanned = await review.review(p.root, { session: 'A', taskFile: p.taskFile, risky: true });
+  assert.strictEqual(unplanned.status, 'REFUSED');
+  assert.match(unplanned.text, /^REFUSED: test plan first: no current test plan for this task: src\/Risk\.mqh, src\/Lots\.mqh \(/);
+  assert.deepStrictEqual([stateOf(p.root), execCalls().length], [before, 0], 'nothing reserved, GPT never asked');
+  seed(p.root, s => { for (const rel of ['src/Risk.mqh', 'src/Lots.mqh']) s.plans[k[rel]] = plan(p); });
   const running = review.review(p.root, { session: 'A', taskFile: p.taskFile, risky: true });
   await waitFor(path.join(hold, 'started'));
   seed(p.root, s => { s.plans[k['src/store.js']] = { ...plan(p), cases: [{ id: 'T9', text: 'replaced', test: 'x' }] }; });
@@ -127,21 +135,19 @@ test('plan authorization stays bound to the task, its requirements and the froze
   assert.strictEqual(r.status, 'DONE', r.text);
   assert.ok(!execCalls().some(c => c.prompt.includes('Cross-check')), 'a pair with no findings on either side skips the cross-check');
   let s = stateOf(p.root);
-  assert.deepStrictEqual(Object.keys(s.acks), [k['src/preset.set']]);
-  assert.match(r.text, /not acknowledged until they have a current test plan[^\n]*src\/EA\.mq5/);
+  assert.deepStrictEqual(Object.keys(s.acks).sort(), [k['src/preset.set'], k['src/Risk.mqh'], k['src/Lots.mqh']].sort());
+  assert.match(r.text, /not acknowledged until they have a current test plan[^\n]*src\/EA\.mq5, src\/store\.js/);
   assert.deepStrictEqual(s.needsPlan[k['src/EA.mq5']], [{ task: p.task, reqHash: p.reqHash }]);
   assert.ok(!s.escalations[k['src/EA.mq5']]); // (the pair read it in full)
-  const f1 = await review.followup(p.root, { chain: r.chain, responseFile: response('nothing changed') });
+  const skipOnly = await review.followup(p.root, { chain: r.chain, responseFile: response('nothing changed') });
+  assert.strictEqual(skipOnly.status, 'REFUSED', 'its skip never counts once GPT rated it risky for this task');
+  assert.match(skipOnly.text, /test plan first: no current test plan for this task: src\/EA\.mq5 \(/);
+  seed(p.root, x => { x.plans[k['src/EA.mq5']] = plan(p); });
+  const f1 = await review.followup(p.root, { chain: r.chain, responseFile: response('EA plan written') });
   assert.strictEqual(f1.status, 'DONE', f1.text);
   assert.match(execCalls().slice(-1)[0].prompt, /## Test plans\n[\s\S]*- T9: replaced/, 'a plan that counts in this round is shown to it');
   s = stateOf(p.root);
-  assert.ok(!s.acks[k['src/EA.mq5']], 'its skip never counts once GPT rated it risky for this task');
-  for (const rel of ['src/Risk.mqh', 'src/Lots.mqh']) assert.ok(!s.acks[k[rel]], rel);
   assert.ok(s.acks[k['src/store.js']], 'this follow-up froze the replacement plan, so it counts now');
-  seed(p.root, x => { for (const rel of ['src/EA.mq5', 'src/Risk.mqh', 'src/Lots.mqh', 'src/store.js']) x.plans[k[rel]] = plan(p); });
-  const f2 = await review.followup(p.root, { chain: r.chain, responseFile: response('plans written') });
-  assert.strictEqual(f2.status, 'DONE', f2.text);
-  s = stateOf(p.root);
   for (const rel of Object.keys(files)) assert.ok(s.acks[k[rel]], `${rel} acknowledged`);
 });
 
@@ -191,10 +197,9 @@ test('another task\'s paired review of a file keeps this task\'s plan requiremen
   assert.ok(!s.escalations[key('src/helper.js')]);
   write(p.root, 'src/helper.js', 'h2 changed in task 1\n');
   const again = await review.followup(p.root, { chain: first.chain, responseFile: response('rated normal now') });
-  assert.strictEqual(again.status, 'DONE', again.text);
-  s = stateOf(p.root);
-  assert.ok(s.changes[key('src/helper.js')], 'task 1 still needs its own plan for the file it found risky');
-  assert.match(again.text, /not acknowledged until they have a current test plan[^\n]*src\/helper\.js/);
+  assert.strictEqual(again.status, 'REFUSED', 'task 1 still needs its own plan for the file it found risky');
+  assert.match(again.text, /test plan first: no current test plan for this task: src\/helper\.js \(/);
+  assert.strictEqual(stateOf(p.root).acks[key('src/helper.js')], sha('h1 sizes lots\n'), 'its new version isn\'t acknowledged');
 });
 
 test('new risky files need their own pair, during a paired review and its follow-ups', async () => {

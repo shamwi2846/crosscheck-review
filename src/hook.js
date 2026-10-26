@@ -6,7 +6,6 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
-const { spawnSync } = require('child_process');
 const state = require('./state');
 const review = require('./review');
 const gaps = require('./gaps');
@@ -195,17 +194,7 @@ function bash(inp) {
   const root = state.projectRoot(dir);
   if (!root) return null;
   const s = review.stateOf(root);
-  const r = spawnSync('git', ['status', '--porcelain=v1', '-z', '--untracked-files=no'], { cwd: root, encoding: 'utf8', windowsHide: true });
-  if (r.status !== 0) throw new Error(`git status failed in ${root}: ${String(r.stderr).trim()}`);
-  const files = new Map(Object.values(s.changes).map(c => [state.pathKey(c.path), c.path]));
-  const entries = r.stdout.split('\0');
-  for (let i = 0; i < entries.length; i++) {
-    if (!entries[i]) continue;
-    const renamed = /^[RC]/.test(entries[i]);
-    files.set(state.pathKey(entries[i].slice(3)), entries[i].slice(3));
-    if (renamed && entries[++i]) files.set(state.pathKey(entries[i]), entries[i]); // (its old path, now a deletion)
-  }
-  const unreviewed = [...files].filter(([k, rel]) => review.versionOf(root, rel) !== s.acks[k]).map(([, rel]) => rel);
+  const unreviewed = review.unreviewedForCommit(root, s);
   const bugs = openBugs(s);
   if (!unreviewed.length && !bugs.length) return null;
   return deny([

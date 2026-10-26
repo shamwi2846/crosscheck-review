@@ -49,7 +49,7 @@ test('a failed cross-check applies nothing, and a fallback answer cannot certify
 test('a fallback chain keeps its trading file risky: its own pair comes first, and a follow-up rated normal then still needs its plan, at xhigh', async () => {
   const p = project('t1b', { 'src/EA.mq5': 'e0\n' });
   write(p.root, 'src/EA.mq5', 'e1\n');
-  seed(p.root, s => { s.changes = { [key('src/EA.mq5')]: pending('src/EA.mq5') }; });
+  seed(p.root, s => { s.changes = { [key('src/EA.mq5')]: pending('src/EA.mq5') }; s.skips = { [key('src/EA.mq5')]: { task: p.task, reqHash: p.reqHash, why: 'w' } }; });
   setPair({ A: [reviewAnswer()], B: [{ fail: 'error: no such session', code: 1 }] });
   const r = await review.review(p.root, { session: 'A', taskFile: p.taskFile });
   assert.strictEqual(r.status, 'PAIR_INCOMPLETE', r.text);
@@ -57,16 +57,23 @@ test('a fallback chain keeps its trading file risky: its own pair comes first, a
   fs.writeFileSync(answerFile, reviewAnswer());
   const fb = review.fallback(p.root, { bundle: r.bundle, answerFile });
   assert.strictEqual(fb.status, 'DONE', fb.text);
-  assert.ok(stateOf(p.root).changes[key('src/EA.mq5')], 'without a plan it stays pending');
+  assert.ok(stateOf(p.root).changes[key('src/EA.mq5')], 'without a completed pair it stays pending');
   assert.match((await review.followup(p.root, { chain: fb.chain, responseFile: response('nothing changed') })).text, /every file of the chain is escalated/);
   // (the fresh follow-up's history holds reviewer A's prompt, so the stub routes it to A's answers)
   setPair({ A: [reviewAnswer(), followAnswer()], B: [reviewAnswer()] });
   assert.strictEqual((await review.review(p.root, { session: 'A', taskFile: p.taskFile })).status, 'DONE');
-  assert.ok(stateOf(p.root).changes[key('src/EA.mq5')], 'its pair completed, but without a plan it stays pending');
-  const f1 = await review.followup(p.root, { chain: fb.chain, responseFile: response('nothing changed') });
+  assert.strictEqual(stateOf(p.root).acks[key('src/EA.mq5')], sha('e1\n'), 'its pair completed: acknowledged with its skip');
+  write(p.root, 'src/EA.mq5', 'e2\n');
+  const f1 = await review.followup(p.root, { chain: fb.chain, responseFile: response('tightened it') });
   assert.strictEqual(f1.status, 'DONE', f1.text);
-  assert.ok(stateOf(p.root).changes[key('src/EA.mq5')], 'a normal rating never drops the plan it needs');
+  assert.strictEqual(stateOf(p.root).acks[key('src/EA.mq5')], sha('e2\n'));
   assert.ok(execCalls().some(c => c.prompt.includes('This is a follow-up round') && c.args.includes('model_reasoning_effort=xhigh')));
+  // (new requirements leave the skip stale: the chain's last rating was normal, but its trading file still needs a plan)
+  fs.writeFileSync(p.taskFile, fs.readFileSync(p.taskFile, 'utf8').replace('R2. Keeps the lot within limits.', 'R2. Keeps the lot within the new limits.'));
+  write(p.root, 'src/EA.mq5', 'e3\n');
+  const f2 = await review.followup(p.root, { chain: fb.chain, responseFile: response('changed again') });
+  assert.strictEqual(f2.status, 'REFUSED', 'a normal rating never drops the plan it needs');
+  assert.match(f2.text, /test plan first: no current test plan for this task: src\/EA\.mq5 \(/);
 });
 
 test('a planned trading file stays pending after a fallback until a pair completes, and the fallback chain\'s follow-up keeps that acknowledgement', async () => {
