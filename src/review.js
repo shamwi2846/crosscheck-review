@@ -115,7 +115,7 @@ function taskInfo(file) {
 
 // The read-only MQL5 docs server (config.json `mql5Docs`, recorded at install) for runs on MQL5 files, else null.
 const docsFor = paths => (paths.some(p => /\.(mq5|mqh)$/i.test(p)) && state.config().mql5Docs) || null;
-const DOCS_NOTE = '\nFor MQL5 API facts, use the read-only MQL5 docs tools (mql5-chm) and cite the topic you checked; mark a fact you couldn\'t check "unverified against the MQL5 docs".';
+const DOCS_NOTE = '\nFor MQL5 API facts, use the read-only MQL5 docs tools (mql5-docs: mql5_find with every name you need, then mql5_read for a page) and cite the page you checked; mark a fact you couldn\'t check "unverified against the MQL5 docs".';
 
 const dropDeadMarks = s => { for (const [key, mark] of Object.entries(s.running)) if (!state.alive(mark.pid)) delete s.running[key]; };
 const asBaseline = version => (version === DELETED ? null : version); // (a missing file's successor is a new file)

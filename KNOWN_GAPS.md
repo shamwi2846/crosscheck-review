@@ -433,3 +433,21 @@ Findings left unfixed on purpose. Entries are never deleted, only marked fixed.
 - Fix: -
 - Log: recorded by hand
 - Why skipped: Only Claude edits the task file, one command at a time, so the window isn't reachable in normal use; the result fails safe (nothing is acknowledged, the summary says why).
+
+## G49 · fixed · 2026-10-27 · LOW
+- Task: The MQL5 docs server is mql5-docs now: record it again and give it to GPT
+- Where: install.js:108-115
+- Problem: F2: The permitted env name __proto__ is silently discarded
+- Trigger: The env table contains __proto__ = 'value', which passes the plain-variable-name check.
+- Fix: Create the env dictionary with Object.create(null).
+- Log: 20261027011942-a78d3d
+- Why skipped: pair: both
+
+## G50 · fixed · 2026-10-27 · LOW
+- Task: The MQL5 docs server is mql5-docs now: record it again and give it to GPT
+- Where: DESIGN.md:188
+- Problem: F3: The design omits pre-approval and optional startup
+- Trigger: A reader consults the docs-server description for the behavior required by R2.
+- Fix: Add those two guarantees to the paragraph.
+- Log: 20261027011942-a78d3d
+- Why skipped: pair: both

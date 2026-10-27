@@ -12,7 +12,7 @@ const state = require('./src/state');
 const { registration, runsScript } = require('./src/hook');
 const { npmRoot, claudeVersion, MIN_CLAUDE, olderThan } = require('./src/doctor');
 
-const DOCS_TOOLS = ['mql5_chm_status', 'mql5_chm_lookup_identifiers', 'mql5_chm_search', 'mql5_chm_read', 'mql5_chm_read_image'];
+const DOCS_TOOLS = ['mql5_find', 'mql5_read'];
 // (a hook command is ours when node runs crosscheck's hook.js; any other command is kept)
 const OURS = runsScript('crosscheck[\\\\/]hook\\.js');
 
@@ -58,62 +58,28 @@ function prerequisites() {
   return { problems, codexJs, claude: claude.command };
 }
 
-// A plain one-line TOML value: a 'literal' or "basic" string, or a list of them, then at most a # comment.
-// Returns { value }, or null for anything else.
-function tomlValue(text) {
-  let i = 0;
-  const space = () => { while (text[i] === ' ' || text[i] === '\t') i++; };
-  const string = () => {
-    if (text[i] === "'") {
-      const end = text.indexOf("'", i + 1);
-      if (end < 0) return undefined;
-      const s = text.slice(i + 1, end);
-      i = end + 1;
-      return s;
-    }
-    const basic = text[i] === '"' && text.slice(i).match(/^"(?:[^"\\\n]|\\.)*"/);
-    if (!basic) return undefined;
-    i += basic[0].length;
-    try { return JSON.parse(basic[0]); } catch { return undefined; }
-  };
-  space();
-  let value;
-  if (text[i] === '[') {
-    i++;
-    value = [];
-    for (space(); text[i] !== ']'; space()) {
-      const s = string();
-      if (s === undefined) return null;
-      value.push(s);
-      space();
-      if (text[i] === ',') i++;
-      else if (text[i] !== ']') return null;
-    }
-    i++;
-  } else if ((value = string()) === undefined) return null;
-  space();
-  return i === text.length || text[i] === '#' ? { value } : null;
-}
-
-// The MQL5 docs server from the Codex config's [mcp_servers.mql5-chm], only when it is plain and enabled: a command,
-// its args and nothing the driver wouldn't pass on (env, cwd, sub-tables). Anything else leaves the docs off.
-function docsServer() {
-  const text = readOr(path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'config.toml'), '');
-  if (/^\s*\[mcp_servers\.(mql5-chm|"mql5-chm")\./m.test(text)) return null;
-  const section = text.match(/^\s*\[mcp_servers\.(?:mql5-chm|"mql5-chm")\]\s*$([\s\S]*?)(?=^\s*\[|(?![\s\S]))/m);
-  if (!section) return null;
-  const got = {};
-  for (const line of section[1].split(/\r?\n/).map(l => l.trim()).filter(l => l && !l.startsWith('#'))) {
-    const m = line.match(/^([A-Za-z_]+)\s*=\s*(.+)$/);
-    if (!m || !['command', 'args', 'enabled', 'required', 'startup_timeout_sec', 'tool_timeout_sec'].includes(m[1])) return null;
-    if (m[1] === 'command' || m[1] === 'args') {
-      const v = tomlValue(m[2]);
-      if (!v) return null; // (a value it can't read leaves the docs off, never with its args silently dropped)
-      got[m[1]] = v.value;
-    } else if (m[1] === 'enabled') got.enabled = m[2].replace(/#.*$/, '').trim();
+// The MQL5 docs server as Codex itself reads it from its config (`codex mcp get mql5-docs --json`; a hand-made TOML
+// reader missed valid spellings and dropped settings), only when the driver can pass all of it on: an enabled stdio
+// server with a command, args and string env settings, and no working folder or variables taken from Codex's own
+// environment. Anything else, or no answer, leaves the docs off.
+function docsServer(codexJs) {
+  if (!codexJs) return null;
+  const r = run(process.execPath, [codexJs, 'mcp', 'get', 'mql5-docs', '--json']);
+  let got = null;
+  try {
+    got = r.status === 0 ? JSON.parse(r.stdout) : null;
+  } catch {
+    return null;
   }
-  if (got.enabled === 'false' || typeof got.command !== 'string' || !(got.args === undefined || Array.isArray(got.args))) return null;
-  return { command: got.command, args: got.args || [], tools: DOCS_TOOLS };
+  const t = (got && got.transport) || {};
+  const args = t.args || [];
+  const env = t.env || {};
+  if (got === null || got.name !== 'mql5-docs' || got.enabled !== true || t.type !== 'stdio' || typeof t.command !== 'string' || t.cwd != null
+    || (t.env_vars || []).length || !Array.isArray(args) || args.some(a => typeof a !== 'string') || typeof env !== 'object' || Array.isArray(env)) return null;
+  // (each env name becomes part of a Codex setting's name, so only a plain variable name may: a dot, quote or = could
+  // set something else)
+  if (Object.entries(env).some(([name, value]) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || typeof value !== 'string')) return null;
+  return { command: t.command, args, env: { ...env }, tools: DOCS_TOOLS };
 }
 
 // Why install must wait, or null: a review running in any project, or a project state that can't be read.
@@ -208,6 +174,7 @@ async function install({ yes = false, checks = true, ask = confirm, say = text =
     const tests = run(process.execPath, ['--test'], __dirname);
     if (tests.status !== 0) return { code: 1, text: `Not installed: the tests failed.\n${String(tests.stdout).split('\n').slice(-30).join('\n')}` };
   }
+  const docs = docsServer(found ? found.codexJs : state.config().codexJs); // (before the lock: it asks Codex)
   const settings = JSON.parse(readOr(p.settings, '{}')); // (read again now, so a hook added meanwhile stays)
   const waitingNow = busy();
   if (waitingNow) return { code: 1, text: `Not installed: ${waitingNow}. Run install again once nothing is running.` };
@@ -217,7 +184,7 @@ async function install({ yes = false, checks = true, ask = confirm, say = text =
     const now = state.read(state.files.config());
     if (now.unreadable) return notReadable(now);
     // (what install found replaces only a value nobody changed while it asked)
-    const discovered = { ...(found ? { codexJs: found.codexJs, claude: found.claude } : {}), mql5Docs: docsServer() };
+    const discovered = { ...(found ? { codexJs: found.codexJs, claude: found.claude } : {}), mql5Docs: docs };
     for (const k of Object.keys(discovered)) if (JSON.stringify(now.data[k]) !== JSON.stringify(before.data[k])) delete discovered[k];
     const config = { ...now.data, ...discovered, model: now.data.model || state.config().model };
     const code = fs.readdirSync(path.join(__dirname, 'src')).map(f => [path.join(p.code, f), fs.readFileSync(path.join(__dirname, 'src', f), 'utf8')]);
