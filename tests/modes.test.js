@@ -14,10 +14,15 @@ const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'crosscheck modes test ü '))
 const SPEC = path.join(HOME, 'spec.json');
 const LOG = path.join(HOME, 'calls.jsonl');
 const DOCS = { command: 'C:/docs/node.exe', args: ['--serve'], env: { MQL5_DOCS_DATA: 'C:/docs/data' }, tools: ['mql5_find', 'mql5_read'] };
+// (the docs server as `codex mcp get mql5-docs --json` prints it)
+const docsAnswer = (server, over = {}) => ({ out: JSON.stringify({ name: 'mql5-docs', enabled: true, disabled_reason: null, ...over,
+  transport: { type: 'stdio', command: server.command, args: server.args, env: server.env, env_vars: [], cwd: null } }) });
 Object.assign(process.env, { CROSSCHECK_HOME: path.join(HOME, 'state'), FAKE_CODEX_SPEC: SPEC, FAKE_CODEX_LOG: LOG });
 fs.mkdirSync(process.env.CROSSCHECK_HOME, { recursive: true });
+// (an earlier install's copy of the docs server, which went stale: no job may use it)
+const RETIRED = { command: 'C:/retired/node.exe', args: ['C:/retired/0.1.4/server.mjs'], env: {}, tools: ['mql5_find', 'mql5_read'] };
 fs.writeFileSync(path.join(process.env.CROSSCHECK_HOME, 'config.json'),
-  JSON.stringify({ model: 'gpt-test', windowsSandbox: 'unelevated', codexJs: path.join(__dirname, 'fake-codex.js'), mql5Docs: DOCS }));
+  JSON.stringify({ model: 'gpt-test', windowsSandbox: 'unelevated', codexJs: path.join(__dirname, 'fake-codex.js'), mql5Docs: RETIRED }));
 const state = require('../src/state');
 const review = require('../src/review');
 const hook = require('../src/hook');
@@ -89,7 +94,7 @@ test('every GPT job is read-only and isolated; research alone has the web, MQL5 
     { match: 'You read large material', answers: [json({ answer: 'all passed', evidence: [], counts: { passed: 1, failed: 0, first_failure: null }, scope: 'run.log', confidence: 'proven' })] },
     { match: 'You look things up on the web', answers: [json({ answer: 'yes', sources: [{ url: 'https://example.com', claim: 'c' }], confidence: 'proven' })] },
     { match: 'You write a long document', answers: [json({ title: 'Release notes', text: 'Everything.' })] },
-  ] });
+  ], 'mcp get': [docsAnswer(DOCS)] });
   // (from a subfolder, with project-relative paths: they are read from the project's root)
   const ran = (args, code = 0) => { const r = cli(path.join(root, 'src'), args); assert.strictEqual(r.status, code, `${args[0]}: ${r.stdout}`); return r.stdout; };
   ran(['testplan', '--files', 'src/EA.mq5']); // (first: a trading file's review needs its plan)
@@ -122,6 +127,62 @@ test('every GPT job is read-only and isolated; research alone has the web, MQL5 
   }
 });
 
+const DOCS_KEY = 'mcp_servers.mql5-docs';
+const lookups = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').split('\n').filter(Boolean).map(JSON.parse) : []).filter(c => c.kind === 'mcp get');
+// (a run's docs server settings, and whether its prompt has the note about the docs tools)
+const docsOf = run => ({ pairs: run.args.filter(a => a.startsWith(`${DOCS_KEY}.`)), note: /MQL5 docs tools/.test(run.prompt) });
+
+test('every MQL5 job reads the docs server from Codex at that moment: a moved one is picked up, a disabled one is off, and an earlier install\'s copy is never used', () => {
+  const root = project('t1b', { 'src/EA.mq5': 'e\n' });
+  const MOVED = { command: 'C:/docs/0.1.5/node.exe', args: ['C:/docs/0.1.5/server.mjs'], env: { MQL5_DOCS_DATA: 'D:/docs data' }, tools: DOCS.tools };
+  const planned = { match: 'You design the test cases', answers: [json({ cases: [testCase('T1', ['src/EA.mq5'])], no_case: [], not_worth_testing: '-' })] };
+  for (const [server, answer] of [[DOCS, docsAnswer(DOCS)], [MOVED, docsAnswer(MOVED)], [null, docsAnswer(MOVED, { enabled: false })]]) {
+    setSpec({ byPrompt: [planned], 'mcp get': [answer] }); // (no reinstall between the jobs)
+    const r = cli(root, ['testplan', '--files', 'src/EA.mq5']);
+    assert.strictEqual(r.status, 0, r.stdout);
+    assert.deepStrictEqual(lookups().map(c => c.args), [['mcp', 'get', 'mql5-docs', '--json']], 'one lookup for the job');
+    const [run] = execCalls();
+    const expected = !server ? [] : [`${DOCS_KEY}.command=${JSON.stringify(server.command)}`, `${DOCS_KEY}.args=${JSON.stringify(server.args)}`,
+      ...Object.entries(server.env).map(([k, v]) => `${DOCS_KEY}.env.${k}=${JSON.stringify(v)}`), `${DOCS_KEY}.required=false`,
+      `${DOCS_KEY}.enabled_tools=["mql5_find","mql5_read"]`, `${DOCS_KEY}.tools.mql5_find.approval_mode="approve"`, `${DOCS_KEY}.tools.mql5_read.approval_mode="approve"`];
+    assert.deepStrictEqual(docsOf(run), { pairs: expected, note: !!server }, server ? server.command : 'disabled');
+    assert.ok(!run.args.some(a => a.includes('retired')), 'the earlier install\'s copy is never used');
+  }
+});
+
+test('a digest gets the docs server when its material holds MQL5 code, a listed file or one deep in a folder, and only then', async () => {
+  const root = project('t1c', { 'logs/run.log': 'ok\n', 'src/EA.mq5': 'e\n', 'deep/a/b/c/Risk.mqh': 'r\n', 'deep/a/notes.txt': 'n\n', 'logsdir/x.log': 'l\n', 'locked/Lots.mqh': 'l\n' });
+  const digested = { match: 'You read large material', answers: [json({ answer: 'checked', evidence: [], counts: { passed: null, failed: null, first_failure: null }, scope: 's', confidence: 'proven' })] };
+  for (const [args, withDocs] of [
+    [['--files', 'logs/run.log,src/EA.mq5'], true],
+    [['--dir', 'deep'], true],
+    [['--files', 'logs/run.log'], false], // (only a log, though the project holds MQL5 code elsewhere)
+    [['--dir', 'logsdir'], false],
+  ]) {
+    setSpec({ byPrompt: [digested], 'mcp get': [docsAnswer(DOCS)] });
+    const r = cli(root, ['digest', ...args, '--question', 'do the position-sizing safeguards hold?']);
+    assert.strictEqual(r.status, 0, r.stdout);
+    const { pairs, note } = docsOf(execCalls()[0]);
+    assert.deepStrictEqual([pairs.length > 0, note], [withDocs, withDocs], args.join(' '));
+  }
+  // (a folder that can't be scanned counts as holding no MQL5 code: the digest still runs, without the docs)
+  const modes = require('../src/modes');
+  const readdirSync = fs.readdirSync;
+  fs.readdirSync = (p, options) => {
+    if (String(p).endsWith('locked')) throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+    return readdirSync(p, options);
+  };
+  setSpec({ byPrompt: [digested], 'mcp get': [docsAnswer(DOCS)] });
+  let r;
+  try {
+    r = await modes.simple(root, 'digest', `## Question\nsafe?\n\n## Material (read it yourself)\n- ${path.join(root, 'locked')}`, { material: [path.join(root, 'locked')] });
+  } finally {
+    fs.readdirSync = readdirSync;
+  }
+  assert.strictEqual(r.status, 'DONE', r.text);
+  assert.deepStrictEqual([docsOf(execCalls()[0]), lookups().length], [{ pairs: [], note: false }, 0]);
+});
+
 test('a test plan is checked against its targets and stored for the named task only', () => {
   const root = project('t2', { 'src/EA.mq5': 'e\n', 'docs/spec.md': 's\n' });
   const taskB = writeTask(path.join(HOME, 't2-task-B.md'));
@@ -131,7 +192,7 @@ test('a test plan is checked against its targets and stored for the named task o
     json({ cases: [testCase('T1', ['docs/spec.md'])], no_case: [], not_worth_testing: '-' }),
     json({ cases: [testCase('T1', [])], no_case: [], not_worth_testing: '-' }),
     json({ cases: [testCase('T1', ['src/EA.mq5', 'src/Risk.mqh']), testCase('T2', ['src/Risk.mqh'])], no_case: [], not_worth_testing: '-' }),
-  ] }] });
+  ] }], 'mcp get': [docsAnswer(DOCS)] });
   assert.strictEqual(cli(root, ['testplan', '--task', taskB.file]).status, 2, 'no --files is wrong usage');
   const args = ['testplan', '--task', taskB.file, '--files', 'src/EA.mq5,src/Risk.mqh', '--context', 'docs/spec.md'];
   const bad = cli(root, args);

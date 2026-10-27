@@ -145,34 +145,6 @@ test('the removed restore option is wrong usage and changes no file', async () =
   fs.rmSync(old.backup, { recursive: true, force: true });
 });
 
-test('the MQL5 docs server is taken from Codex\'s own reading of its config, and left off for anything the driver can\'t pass on', () => {
-  // (a stand-in Codex that records its arguments and prints the given answer)
-  const asked = path.join(HOME, 'docs-asked.json');
-  const docs = (answer, code = 0) => {
-    const codexJs = path.join(HOME, 'docs-codex.js');
-    fs.writeFileSync(codexJs, `require('fs').writeFileSync(${JSON.stringify(asked)}, JSON.stringify(process.argv.slice(2))); process.stdout.write(${JSON.stringify(typeof answer === 'string' ? answer : JSON.stringify(answer))}); process.exit(${code});`);
-    return installer.docsServer(codexJs);
-  };
-  const entry = (transport = {}, over = {}) => ({ name: 'mql5-docs', enabled: true, disabled_reason: null, ...over,
-    transport: { type: 'stdio', command: 'C:\\Program Files\\nodejs\\node.exe', args: ['C:\\docs\\server.mjs'], env: { MQL5_DOCS_DATA: 'C:\\MQL5 "docs"' }, env_vars: [], cwd: null, ...transport },
-    enabled_tools: null, disabled_tools: null, startup_timeout_sec: null, tool_timeout_sec: null });
-  assert.deepStrictEqual(docs(entry()), { command: 'C:\\Program Files\\nodejs\\node.exe', args: ['C:\\docs\\server.mjs'], env: { MQL5_DOCS_DATA: 'C:\\MQL5 "docs"' }, tools: ['mql5_find', 'mql5_read'] });
-  assert.deepStrictEqual(JSON.parse(fs.readFileSync(asked, 'utf8')), ['mcp', 'get', 'mql5-docs', '--json']);
-  assert.deepStrictEqual(docs(entry({ args: null, env: null })), { command: 'C:\\Program Files\\nodejs\\node.exe', args: [], env: {}, tools: ['mql5_find', 'mql5_read'] });
-  // (an env name that isn't a plain variable name would become part of another setting's name: the whole entry is off)
-  for (const name of ['X="ok",NODE_OPTIONS', 'a.b', '1ST', '']) assert.strictEqual(docs(entry({ env: { MQL5_DOCS_DATA: 'C:/d', [name]: 'x' } })), null, name);
-  const proto = docs(JSON.stringify(entry()).replace('"env":{', '"env":{"__proto__":"p",'));
-  assert.deepStrictEqual(Object.entries(proto.env), [['__proto__', 'p'], ['MQL5_DOCS_DATA', 'C:\\MQL5 "docs"']], 'a __proto__ name is kept as a setting');
-  for (const [why, answer] of [
-    ['not enabled', entry({}, { enabled: false })], ['another server', entry({}, { name: 'mql5-chm' })], ['not stdio', entry({ type: 'streamable_http' })],
-    ['a working folder', entry({ cwd: 'C:/docs' })], ['variables from Codex\'s environment', entry({ env_vars: ['DOCS'] })],
-    ['an arg that isn\'t a string', entry({ args: ['a', 1] })], ['an env value that isn\'t a string', entry({ env: { MQL5_DOCS_DATA: 1 } })],
-    ['env as a list', entry({ env: ['x'] })], ['no command', entry({ command: null })], ['no transport', { ...entry(), transport: null }], ['not JSON', 'Error: no such server'],
-  ]) assert.strictEqual(docs(answer), null, why);
-  assert.strictEqual(docs(entry(), 1), null, 'Codex failing leaves the docs off');
-  assert.strictEqual(installer.docsServer(undefined), null, 'no Codex found');
-});
-
 test('install waits while a review runs in any project, also one started while it asks, changing nothing', async () => {
   const p = profile('t4', { settings: oldSettings(), claudeMd: 'old rules\n', agent: 'old agent\n' });
   const running = path.join(state.HOME, 'proj-b', 'state.json');
@@ -227,13 +199,14 @@ test('a failed switch on a full disk puts back everything written, and input tha
   assert.strictEqual(await installer.confirm('Install? ', Readable.from([])), false);
 });
 
-test('install keeps the config changes made while it asked, a removed verification and a value it would set included, and writes under the config lock', async () => {
+test('install keeps the config changes made while it asked, a removed verification included, drops an earlier install\'s docs server copy, and writes under the config lock', async () => {
   const p = profile('t7', { settings: oldSettings(), claudeMd: 'old rules\n', agent: 'old agent\n' });
-  fs.writeFileSync(state.files.config(), JSON.stringify({ model: 'gpt-old', custom: { a: 1, b: 2 }, codexVerified: '0.162.1' }));
-  const docs = { command: 'node', args: ['C:/docs/server.mjs'], env: {}, tools: ['mql5_find', 'mql5_read'] };
-  const ask = async () => { // (meanwhile doctor took the verification away, the docs server was set by hand, and more changed)
+  // (an earlier install recorded the docs server; every job now reads it from Codex, and this copy had gone stale)
+  const stale = { command: 'node', args: ['C:/docs/0.1.4/server.mjs'], env: {}, tools: ['mql5_find', 'mql5_read'] };
+  fs.writeFileSync(state.files.config(), JSON.stringify({ model: 'gpt-old', custom: { a: 1, b: 2 }, codexVerified: '0.162.1', mql5Docs: stale }));
+  const ask = async () => { // (meanwhile doctor took the verification away, and more changed)
     const { codexVerified, ...rest } = json(state.files.config());
-    fs.writeFileSync(state.files.config(), JSON.stringify({ ...rest, model: 'gpt-new', custom: { a: 1, b: 3 }, added: true, mql5Docs: docs }));
+    fs.writeFileSync(state.files.config(), JSON.stringify({ ...rest, model: 'gpt-new', custom: { a: 1, b: 3 }, added: true }));
     return true;
   };
   const renameSync = fs.renameSync;
@@ -247,7 +220,7 @@ test('install keeps the config changes made while it asked, a removed verificati
   }
   assert.strictEqual(r.code, 0, r.text);
   const written = json(state.files.config());
-  assert.deepStrictEqual([written.model, written.custom, written.added, written.mql5Docs, 'codexVerified' in written], ['gpt-new', { a: 1, b: 3 }, true, docs, false]);
+  assert.deepStrictEqual([written.model, written.custom, written.added, 'mql5Docs' in written, 'codexVerified' in written], ['gpt-new', { a: 1, b: 3 }, true, false, false]);
   assert.strictEqual(lockedAtWrite, true, 'no locked update (doctor\'s) can slip in between the read and the write');
   assert.ok(!fs.existsSync(`${state.files.config()}.lock`), 'and the lock is released');
   assert.ok(fs.existsSync(path.join(p.code, 'hook.js')) && commands(json(p.settings)).some(c => c.includes('crosscheck/hook.js')), 'installed as usual');

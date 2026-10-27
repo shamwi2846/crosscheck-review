@@ -258,6 +258,27 @@ test('every run explicitly selects the shared tier without weakening isolation',
   fs.rmSync(profile);
 });
 
+test('the MQL5 docs server is taken from Codex\'s own reading of its config, and left off for anything the driver can\'t pass on', () => {
+  const entry = (transport = {}, over = {}) => ({ name: 'mql5-docs', enabled: true, disabled_reason: null, ...over,
+    transport: { type: 'stdio', command: 'C:\\Program Files\\nodejs\\node.exe', args: ['C:\\docs\\server.mjs'], env: { MQL5_DOCS_DATA: 'C:\\MQL5 "docs"' }, env_vars: [], cwd: null, ...transport },
+    enabled_tools: null, disabled_tools: null, startup_timeout_sec: null, tool_timeout_sec: null });
+  const docs = (answer, code = 0) => { setSpec({ 'mcp get': [{ out: typeof answer === 'string' ? answer : JSON.stringify(answer), code }] }); return codex.docsServer(); };
+  assert.deepStrictEqual(docs(entry()), { command: 'C:\\Program Files\\nodejs\\node.exe', args: ['C:\\docs\\server.mjs'], env: { MQL5_DOCS_DATA: 'C:\\MQL5 "docs"' }, tools: ['mql5_find', 'mql5_read'] });
+  assert.deepStrictEqual(calls().map(c => [c.kind, c.args]), [['mcp get', ['mcp', 'get', 'mql5-docs', '--json']]]);
+  assert.deepStrictEqual(docs(entry({ args: null, env: null })), { command: 'C:\\Program Files\\nodejs\\node.exe', args: [], env: {}, tools: ['mql5_find', 'mql5_read'] });
+  // (an env name that isn't a plain variable name would become part of another setting's name: the whole entry is off)
+  for (const name of ['X="ok",NODE_OPTIONS', 'a.b', '1ST', '']) assert.strictEqual(docs(entry({ env: { MQL5_DOCS_DATA: 'C:/d', [name]: 'x' } })), null, name);
+  const proto = docs(JSON.stringify(entry()).replace('"env":{', '"env":{"__proto__":"p",'));
+  assert.deepStrictEqual(Object.entries(proto.env), [['__proto__', 'p'], ['MQL5_DOCS_DATA', 'C:\\MQL5 "docs"']], 'a __proto__ name is kept as a setting');
+  for (const [why, answer] of [
+    ['not enabled', entry({}, { enabled: false })], ['another server', entry({}, { name: 'mql5-chm' })], ['not stdio', entry({ type: 'streamable_http' })],
+    ['a working folder', entry({ cwd: 'C:/docs' })], ['variables from Codex\'s environment', entry({ env_vars: ['DOCS'] })],
+    ['an arg that isn\'t a string', entry({ args: ['a', 1] })], ['an env value that isn\'t a string', entry({ env: { MQL5_DOCS_DATA: 1 } })],
+    ['env as a list', entry({ env: ['x'] })], ['no command', entry({ command: null })], ['no transport', { ...entry(), transport: null }], ['not JSON', 'Error: no such server'],
+  ]) assert.strictEqual(docs(answer), null, why);
+  assert.strictEqual(docs(entry(), 1), null, 'Codex failing leaves the docs off');
+});
+
 test('the docs server\'s env settings reach only its own server setting, never the Codex launcher or a later run', async () => {
   // (NODE_OPTIONS naming a module that doesn't exist: had it reached the launcher's own node, the run would fail to start)
   const docs = { command: 'C:\\Program Files\\nodejs\\node.exe', args: ['C:\\docs\\server.mjs'], tools: ['mql5_find', 'mql5_read'],

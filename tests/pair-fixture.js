@@ -22,7 +22,9 @@ const answer = require('../src/answer');
 const gaps = require('../src/gaps');
 
 const sha = text => crypto.createHash('sha256').update(text).digest('hex');
-const execCalls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').split('\n').filter(Boolean).map(JSON.parse) : []).filter(c => c.kind === 'exec');
+const logged = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').split('\n').filter(Boolean).map(JSON.parse) : []);
+const execCalls = () => logged().filter(c => c.kind === 'exec');
+const lookups = () => logged().filter(c => c.kind === 'mcp get'); // (docs server lookups)
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const waitFor = async file => { for (let i = 0; i < 400 && !fs.existsSync(file); i++) await sleep(20); assert.ok(fs.existsSync(file), `${file} never appeared`); };
 const stateOf = root => state.read(state.files.project(root)).data;
@@ -51,8 +53,9 @@ const reviewAnswer = (findings = [], { cls = normal, reqs = rows() } = {}) => JS
 const marks = list => JSON.stringify({ marks: list.map(([id, mark, sameAs = null, evidence = mark === 'DISPUTE' ? 'src/x.js:1 guards it' : '']) => ({ id, mark, evidence, same_as: sameAs })) });
 const followAnswer = (followups = [], cls = normal) => JSON.stringify({ verdict: followups.some(f => f.status === 'MAINTAIN') ? 'ISSUES_REMAIN' : 'RESOLVED',
   followups, findings: [], requirements: [], possibly_missing: [], class: cls, coverage: 'c' });
-// The stub's answers by prompt: each reviewer's review and cross-check, and follow-ups (which resume reviewer A).
-function setPair({ A = [], B = [], xA = [], xB = [], follow = [], single = [] }) {
+// The stub's answers by prompt: each reviewer's review and cross-check, and follow-ups (which resume reviewer A);
+// `docs`: its answers to the docs server lookups (`codex mcp get`), in order.
+function setPair({ A = [], B = [], xA = [], xB = [], follow = [], single = [], docs = [] }) {
   const withSession = (list, session) => list.map(a => (typeof a === 'string' ? { text: a, session } : { session, ...a }));
   fs.writeFileSync(SPEC, JSON.stringify({ byPrompt: [
     { match: 'Cross-check (you are reviewer A)', answers: withSession(xA, 'sess-A') },
@@ -61,11 +64,11 @@ function setPair({ A = [], B = [], xA = [], xB = [], follow = [], single = [] })
     { match: 'reviewer B. Attack', answers: withSession(B, 'sess-B') },
     { match: 'This is a follow-up round', answers: withSession(follow, 'sess-A') },
     { match: 'You review a code change', answers: withSession(single, 'sess-S') }, // (a single review: last, as pairs' prompts hold it too)
-  ] }));
+  ], 'mcp get': docs }));
   fs.rmSync(LOG, { force: true });
 }
 const plan = (p, files) => ({ task: p.task, reqHash: p.reqHash, cases: [{ id: 'T1', text: 'an order without a stop is refused', test: 'tests/t.test.js' }], tests: files || [], at: 1 });
 const pending = (rel, session = 'A') => ({ path: rel, session, at: 1, baseline: null });
 
-module.exports = { HOME, state, review, pair, answer, gaps, sha, execCalls, waitFor, stateOf, seed, key, write, response, project, finding, rows,
+module.exports = { HOME, state, review, pair, answer, gaps, sha, execCalls, lookups, waitFor, stateOf, seed, key, write, response, project, finding, rows,
   reviewAnswer, marks, followAnswer, setPair, plan, pending };
