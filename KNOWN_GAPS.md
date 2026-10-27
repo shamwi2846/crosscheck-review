@@ -451,3 +451,12 @@ Findings left unfixed on purpose. Entries are never deleted, only marked fixed.
 - Fix: Add those two guarantees to the paragraph.
 - Log: 20261027011942-a78d3d
 - Why skipped: pair: both
+
+## G51 · open · 2026-10-27 · LOW
+- Task: -
+- Where: src/codex.js:27
+- Problem: tomlString uses JSON.stringify, which leaves U+007F (DEL) unescaped though TOML basic strings must escape it, so a docs setting holding that character would make the run's -c setting invalid and the run fail (CodeRabbit on PR 26).
+- Trigger: A docs server command, arg or env value containing the DEL control character.
+- Fix: -
+- Log: recorded by hand
+- Why skipped: No path or setting of the docs server holds a control character in normal use; the run fails visibly rather than doing anything unchecked.
