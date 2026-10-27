@@ -12,7 +12,6 @@ const state = require('./src/state');
 const { registration, runsScript } = require('./src/hook');
 const { npmRoot, claudeVersion, MIN_CLAUDE, olderThan } = require('./src/doctor');
 
-const DOCS_TOOLS = ['mql5_find', 'mql5_read'];
 // (a hook command is ours when node runs crosscheck's hook.js; any other command is kept)
 const OURS = runsScript('crosscheck[\\\\/]hook\\.js');
 
@@ -56,30 +55,6 @@ function prerequisites() {
   const claude = claudeVersion();
   if (!claude.version || olderThan(claude.version, MIN_CLAUDE)) problems.push(`Claude Code ${MIN_CLAUDE.join('.')} or newer is needed (${claude.text ? `found ${claude.text}` : `not found: ${claude.why}`})`);
   return { problems, codexJs, claude: claude.command };
-}
-
-// The MQL5 docs server as Codex itself reads it from its config (`codex mcp get mql5-docs --json`; a hand-made TOML
-// reader missed valid spellings and dropped settings), only when the driver can pass all of it on: an enabled stdio
-// server with a command, args and string env settings, and no working folder or variables taken from Codex's own
-// environment. Anything else, or no answer, leaves the docs off.
-function docsServer(codexJs) {
-  if (!codexJs) return null;
-  const r = run(process.execPath, [codexJs, 'mcp', 'get', 'mql5-docs', '--json']);
-  let got = null;
-  try {
-    got = r.status === 0 ? JSON.parse(r.stdout) : null;
-  } catch {
-    return null;
-  }
-  const t = (got && got.transport) || {};
-  const args = t.args || [];
-  const env = t.env || {};
-  if (got === null || got.name !== 'mql5-docs' || got.enabled !== true || t.type !== 'stdio' || typeof t.command !== 'string' || t.cwd != null
-    || (t.env_vars || []).length || !Array.isArray(args) || args.some(a => typeof a !== 'string') || typeof env !== 'object' || Array.isArray(env)) return null;
-  // (each env name becomes part of a Codex setting's name, so only a plain variable name may: a dot, quote or = could
-  // set something else)
-  if (Object.entries(env).some(([name, value]) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || typeof value !== 'string')) return null;
-  return { command: t.command, args, env: { ...env }, tools: DOCS_TOOLS };
 }
 
 // Why install must wait, or null: a review running in any project, or a project state that can't be read.
@@ -174,7 +149,6 @@ async function install({ yes = false, checks = true, ask = confirm, say = text =
     const tests = run(process.execPath, ['--test'], __dirname);
     if (tests.status !== 0) return { code: 1, text: `Not installed: the tests failed.\n${String(tests.stdout).split('\n').slice(-30).join('\n')}` };
   }
-  const docs = docsServer(found ? found.codexJs : state.config().codexJs); // (before the lock: it asks Codex)
   const settings = JSON.parse(readOr(p.settings, '{}')); // (read again now, so a hook added meanwhile stays)
   const waitingNow = busy();
   if (waitingNow) return { code: 1, text: `Not installed: ${waitingNow}. Run install again once nothing is running.` };
@@ -184,9 +158,12 @@ async function install({ yes = false, checks = true, ask = confirm, say = text =
     const now = state.read(state.files.config());
     if (now.unreadable) return notReadable(now);
     // (what install found replaces only a value nobody changed while it asked)
-    const discovered = { ...(found ? { codexJs: found.codexJs, claude: found.claude } : {}), mql5Docs: docs };
+    const discovered = found ? { codexJs: found.codexJs, claude: found.claude } : {};
     for (const k of Object.keys(discovered)) if (JSON.stringify(now.data[k]) !== JSON.stringify(before.data[k])) delete discovered[k];
     const config = { ...now.data, ...discovered, model: now.data.model || state.config().model };
+    // (every MQL5 job now reads the docs server from the Codex config, so an earlier install's copy goes: it went
+    // stale when the server updated itself, and misled whoever read config.json)
+    delete config.mql5Docs;
     const code = fs.readdirSync(path.join(__dirname, 'src')).map(f => [path.join(p.code, f), fs.readFileSync(path.join(__dirname, 'src', f), 'utf8')]);
     const claudeMd = claudeMdText(p); // (read again now: a CLAUDE.md changed while install asked keeps its change)
     writeAll([...code,
@@ -222,4 +199,4 @@ if (require.main === module) {
     e => { process.stdout.write(`install failed: ${e.message}\n`); process.exitCode = 1; });
 }
 
-module.exports = { install, docsServer, confirm };
+module.exports = { install, confirm };

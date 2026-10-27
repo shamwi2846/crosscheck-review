@@ -7,7 +7,7 @@ const test = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
 const path = require('path');
-const { HOME, state, review, pair, answer, gaps, sha, execCalls, waitFor, stateOf, seed, key, write, response, project, finding, rows,
+const { HOME, state, review, pair, answer, gaps, sha, execCalls, lookups, waitFor, stateOf, seed, key, write, response, project, finding, rows,
   reviewAnswer, marks, followAnswer, setPair, plan, pending } = require('./pair-fixture');
 
 const GAPS_BEFORE = '# Known gaps\n\nFindings left unfixed on purpose. Entries are never deleted, only marked fixed.\n\n## G1 · open · 2026-10-01 · LOW\n- Where: src/old.js\n- Problem: older\n';
@@ -37,6 +37,46 @@ test('a completed pair acknowledges a planned payments file, and its gap entries
   assert.strictEqual(review.close(p.root, { chain: r.chain, rev: stateOf(p.root).chains[r.chain].rev, notes: { F1: 'gap: refunds are switched off in this build' } }).status, 'DONE');
   assert.match(gapsNow(p.root), /- Problem: F1: a refund can run twice/);
   acknowledged('a close');
+});
+
+test('a review and its follow-up each look the docs server up once, and every run of the attempt gets that one', async () => {
+  const p = project('t1d', { 'src/EA.mq5': 'e0\n' });
+  write(p.root, 'src/EA.mq5', 'e1\n');
+  seed(p.root, s => { s.changes = { [key('src/EA.mq5')]: pending('src/EA.mq5') }; s.plans = { [key('src/EA.mq5')]: plan(p) }; });
+  // (each lookup answers a newer version, as a docs server that updates itself would)
+  const entry = v => ({ out: JSON.stringify({ name: 'mql5-docs', enabled: true,
+    transport: { type: 'stdio', command: 'C:/node.exe', args: [`C:/docs/${v}/server.mjs`], env: { MQL5_DOCS_DATA: `C:/docs/${v}` }, env_vars: [], cwd: null } }) });
+  const found = [finding('a lot can exceed the limit', 'src/EA.mq5:1')];
+  const unrated = reviewAnswer(found, { reqs: rows().slice(0, 1) }); // (R2 left out, so its repair resumes the session)
+  setPair({ A: [unrated, reviewAnswer(found)], B: [reviewAnswer(found)], xA: [marks([['B1', 'SAME_AS', 'A1']])], xB: [marks([['A1', 'SAME_AS', 'B1']])],
+    follow: [followAnswer([]), followAnswer([{ id: 'F1', status: 'RESOLVED', reason: 'capped' }])], docs: [entry('0.1.4'), entry('0.1.5'), entry('0.1.6')] });
+  const serverOf = c => c.args.filter(a => a.startsWith('mcp_servers.mql5-docs.args=')).join('');
+  const r = await review.review(p.root, { session: 'A', taskFile: p.taskFile });
+  assert.strictEqual(r.status, 'DONE', r.text);
+  const reviewRuns = execCalls();
+  assert.strictEqual(reviewRuns.length, 5, 'two reviewers, a repair and two cross-checks');
+  assert.deepStrictEqual([...new Set(reviewRuns.map(serverOf))], ['mcp_servers.mql5-docs.args=["C:/docs/0.1.4/server.mjs"]']);
+  assert.strictEqual(lookups().length, 1, 'one lookup for the attempt');
+  const reviewers = reviewRuns.filter(c => /reviewer [AB]\. (Check|Attack)/.test(c.prompt) && c.args[1] !== 'resume');
+  assert.ok(reviewers.length === 2 && reviewers.every(c => /MQL5 docs tools/.test(c.prompt)), 'both reviewers\' prompts have the note');
+  const f = await review.followup(p.root, { chain: r.chain, responseFile: response('capped the lot') });
+  assert.strictEqual(f.status, 'DONE', f.text);
+  const followRuns = execCalls().slice(reviewRuns.length);
+  assert.strictEqual(followRuns.length, 2, 'the follow-up and its repair');
+  assert.deepStrictEqual([...new Set(followRuns.map(serverOf))], ['mcp_servers.mql5-docs.args=["C:/docs/0.1.5/server.mjs"]']);
+  assert.match(followRuns[0].prompt, /MQL5 docs tools/);
+  assert.strictEqual(lookups().length, 2, 'the follow-up looked it up once more');
+  // (an attempt whose lookup finds no server keeps that: no run gets one or the note, though a later lookup would)
+  const q = project('t1e', { 'src/EA.mq5': 'e0\n' });
+  write(q.root, 'src/EA.mq5', 'e1\n');
+  seed(q.root, s => { s.changes = { [key('src/EA.mq5')]: pending('src/EA.mq5') }; s.plans = { [key('src/EA.mq5')]: plan(q) }; });
+  setPair({ A: [unrated, reviewAnswer(found)], B: [reviewAnswer(found)], xA: [marks([['B1', 'SAME_AS', 'A1']])], xB: [marks([['A1', 'SAME_AS', 'B1']])],
+    docs: [{ code: 1 }, entry('0.1.5')] });
+  const off = await review.review(q.root, { session: 'A', taskFile: q.taskFile });
+  assert.strictEqual(off.status, 'DONE', off.text);
+  assert.strictEqual(execCalls().length, 5);
+  assert.ok(execCalls().every(c => !c.args.some(a => a.startsWith('mcp_servers.')) && !/MQL5 docs tools/.test(c.prompt)), 'no run gets a server or the note');
+  assert.strictEqual(lookups().length, 1);
 });
 
 test('a follow-up is refused for another session\'s change in an escalated chain file, starting no reviewer', async () => {

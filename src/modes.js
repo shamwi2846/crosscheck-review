@@ -159,10 +159,24 @@ const SIMPLE = {
   write: { effort: 'medium', rules: 'You write a long document from the brief below, for Claude to check and apply. Return its title and its full text (Markdown). Write plainly: the answer first, short sentences.' },
 };
 
-// `input` is the job's text: the proposal, the question (with the material's paths for a digest) or the brief.
-async function simple(root, kind, input) {
+// The material's files, a folder's at any depth. A folder that can't be scanned counts as holding none: the docs are
+// an extra for MQL5 code, never a reason for a digest to fail.
+function filesOf(material) {
+  return material.flatMap(p => {
+    try {
+      return fs.statSync(p).isDirectory() ? fs.readdirSync(p, { recursive: true }).map(f => path.join(p, String(f))) : [p];
+    } catch {
+      return [];
+    }
+  });
+}
+
+// `input` is the job's text: the proposal, the question (with the material's paths for a digest) or the brief. A
+// digest of MQL5 code (`material`: the paths it reads) gets the MQL5 docs, as a review does.
+async function simple(root, kind, input, { material = [] } = {}) {
   const job = SIMPLE[kind];
-  const r = await ask(root, kind, `${job.rules}\n\n${input}\n`, { asked: {}, effort: job.effort || 'high', mode: job.mode || 'consult' });
+  const docs = kind === 'digest' ? review.docsFor(filesOf(material)) : null;
+  const r = await ask(root, kind, `${job.rules}${docs ? review.DOCS_NOTE : ''}\n\n${input}\n`, { asked: {}, effort: job.effort || 'high', mode: job.mode || 'consult', docs });
   if (r.status !== 'OK') return failed(r);
   if (kind !== 'write') return { status: 'DONE', text: job.show(r.answer).join('\n') };
   const draft = path.join(state.projectDir(root), 'drafts', `${path.basename(r.bundle)}.md`);

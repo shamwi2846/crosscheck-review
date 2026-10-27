@@ -235,6 +235,7 @@ async function simpleCommand(args) {
   const { root, at } = where(args);
   const fileOption = { idea: 'file', write: 'brief' }[kind];
   let input;
+  let material = [];
   if (fileOption) {
     if (!args[fileOption]) throw new Usage(`${kind} needs --${fileOption} <file>`);
     const bytes = review.bytesOf(at(args[fileOption]));
@@ -245,13 +246,13 @@ async function simpleCommand(args) {
     input = `## Question\n${args.question}`;
     if (kind === 'digest') {
       if (!args.files === !args.dir) throw new Usage('digest takes --files a,b or --dir <folder>: one of them');
-      const material = args.dir ? [at(args.dir)] : listOf(args.files).map(at);
+      material = args.dir ? [at(args.dir)] : listOf(args.files).map(at);
       const missing = material.filter(p => !fs.existsSync(p));
       if (missing.length) return { code: 1, text: `REFUSED: these don't exist: ${missing.join(', ')}` };
       input += `\n\n## Material (read it yourself)\n${material.map(p => `- ${p}`).join('\n')}`;
     }
   }
-  return reported(await modes.simple(root, kind, input), false);
+  return reported(await modes.simple(root, kind, input, { material }), false);
 }
 
 const COMMANDS = { review: reviewCommand, close: closeCommand, status: statusCommand, gap: gapCommand, lesson: lessonCommand, on: switchCommand, off: switchCommand, fast: fastCommand,

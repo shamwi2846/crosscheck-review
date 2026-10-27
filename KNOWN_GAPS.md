@@ -460,3 +460,21 @@ Findings left unfixed on purpose. Entries are never deleted, only marked fixed.
 - Fix: -
 - Log: recorded by hand
 - Why skipped: No path or setting of the docs server holds a control character in normal use; the run fails visibly rather than doing anything unchecked.
+
+## G52 · open · 2026-10-27 · MEDIUM
+- Task: The MQL5 docs server is looked up at each MQL5 job, so its updates can't break it; digests get it too
+- Where: src/review.js:397-404
+- Problem: F1: Repairs and cross-checks receive docs without the promised prompt note
+- Trigger: An MQL5 review produces findings requiring cross-checks, or an answer requires repair.
+- Fix: Ensure each outgoing prompt includes DOCS_NOTE when docs is passed, including cross-checks and repairs. Extend T2 to assert this relationship on every recorded request.
+- Log: 20261027104530-8d5d4e
+- Why skipped: pair: both
+
+## G53 · open · 2026-10-27 · MEDIUM
+- Task: The MQL5 docs server is looked up at each MQL5 job, so its updates can't break it; digests get it too
+- Where: src/review.js:117
+- Problem: F2: Test plans omit docs when MQL5 appears only in context files
+- Trigger: Run testplan with a non-MQL5 target and an existing MQL5 context file, for example --files tests/risk.test.js --context src/Risk.mqh.
+- Fix: Have testplan include context paths alongside target paths when calling docsFor().
+- Log: 20261027104530-8d5d4e
+- Why skipped: pair: both

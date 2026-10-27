@@ -110,8 +110,8 @@ function checks() {
     return [!bad.length, bad.length ? `can't be read: ${bad.join(', ')}` : `readable (${state.HOME})`];
   });
   check('MQL5 docs', () => {
-    const docs = state.config().mql5Docs;
-    if (!docs) return [true, 'none recorded (reviews of MQL5 files run without them)'];
+    const docs = codex.docsServer(); // (as every MQL5 job gets it: from the Codex config, now)
+    if (!docs) return [true, 'none in the Codex config, or not one crosscheck can pass on (jobs on MQL5 files run without them)'];
     const missing = [docs.command, ...docs.args.filter(a => /[\\/]|\.[cm]?js$|\.py$/i.test(a))].filter((f, i) => !(i === 0 ? findable(f) : fs.existsSync(f)));
     return [!missing.length, missing.length ? `missing: ${missing.join(', ')}` : `${docs.command} ${docs.args.join(' ')}`];
   });

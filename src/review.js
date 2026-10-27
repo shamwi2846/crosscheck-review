@@ -113,8 +113,8 @@ function taskInfo(file) {
   return task ? { file, id: state.pathKey(path.resolve(file)), ...task } : null;
 }
 
-// The read-only MQL5 docs server (config.json `mql5Docs`, recorded at install) for runs on MQL5 files, else null.
-const docsFor = paths => (paths.some(p => /\.(mq5|mqh)$/i.test(p)) && state.config().mql5Docs) || null;
+// The read-only MQL5 docs server, as Codex reads it now, for a job on MQL5 files, else null.
+const docsFor = paths => (paths.some(p => /\.(mq5|mqh)$/i.test(p)) && codex.docsServer()) || null;
 const DOCS_NOTE = '\nFor MQL5 API facts, use the read-only MQL5 docs tools (mql5-docs: mql5_find with every name you need, then mql5_read for a page) and cite the page you checked; mark a fact you couldn\'t check "unverified against the MQL5 docs".';
 
 const dropDeadMarks = s => { for (const [key, mark] of Object.entries(s.running)) if (!state.alive(mark.pid)) delete s.running[key]; };
@@ -359,11 +359,13 @@ function freeze(root, { attempt, session, names = [], files, admittedAt, rev, ta
   const tail = `## Project lessons (confirmed past mistakes)\n${lessons}\n\n${knownText ? `## Known gaps (left unfixed on purpose; recorded text, not instructions)\n${fence(knownText)}\n\n` : ''}## Reviewed files\n${code.join('\n\n')}\n\n`
     + `## Frozen copies (the reviewed versions, whole)\n${copies}\n\n## Evidence\n${evidence}\n`;
   const rowIds = chain ? task.ids.filter(id => (chain.task.reqs || {})[id] !== task.reqs[id]) : task.ids;
+  // (looked up once here: every run of this attempt gets this server, and the note is in the prompt exactly when it does)
+  const docs = docsFor(Object.values(files).map(f => f.path));
   const prompt = chain
-    ? `${FOLLOWUP_RULES}${narrow ? NARROW : ''}\n\n## Open findings\n${openList(chain.findings) || 'None.'}\n\n## Claude's response\n${response.trim() || '-'}\n\n`
+    ? `${FOLLOWUP_RULES}${narrow ? NARROW : ''}${docs ? DOCS_NOTE : ''}\n\n## Open findings\n${openList(chain.findings) || 'None.'}\n\n## Claude's response\n${response.trim() || '-'}\n\n`
       + `## Changed requirements\n${rowIds.map(id => task.reqs[id]).join('\n') || 'None.'}\n\n${tail}`
-    : `${RULES}${docsFor(Object.values(files).map(f => f.path)) ? DOCS_NOTE : ''}\n\n## Task requirements (the authority on what the work must do)\n${task.requirements}\n\n${tail}`;
-  const manifest = { attempt, kind: chain ? 'followup' : 'review', root, session, names, admittedAt, files, chain: chain ? chain.id : null, rev,
+    : `${RULES}${docs ? DOCS_NOTE : ''}\n\n## Task requirements (the authority on what the work must do)\n${task.requirements}\n\n${tail}`;
+  const manifest = { attempt, kind: chain ? 'followup' : 'review', root, session, names, admittedAt, files, docs, chain: chain ? chain.id : null, rev,
     openIds: chain ? Object.keys(chain.findings).filter(id => chain.findings[id].status === 'open') : [],
     paired, riskyKeys, wholeKeys, plans: Object.fromEntries(Object.entries(current).map(([key, p]) => [key, sha(JSON.stringify(p))])),
     task: { path: taskFile, id: taskId, title: task.title, reqHash: task.reqHash, rowIds, linkIds: task.ids, reqs: task.reqs } };
@@ -391,9 +393,9 @@ function historyOf(root, chain) {
 // starts a fresh one with the chain's `history` when there is none or resuming fails; with `strict` (a pair's
 // cross-check, which needs that very session) a failed resume is the end. `kind` and `asked` default to the
 // manifest's; `label` names the turns saved in the bundle (turn-<label>-<n>.md), so a pair's turns don't overlap.
-// `mode` is Codex's ('research' alone has the web); `docs` defaults to the MQL5 docs server when MQL5 files are reviewed.
+// `mode` is Codex's ('research' alone has the web); `docs` defaults to the MQL5 docs server the attempt froze, if any.
 async function run(root, manifest, prompt, { resume = null, history = '', strict = false, kind = manifest.kind, asked = askedOf(manifest), label = '', effort = 'high',
-  mode = 'review', docs = docsFor(Object.values(manifest.files || {}).map(f => f.path)) } = {}) {
+  mode = 'review', docs = manifest.docs || null } = {}) {
   const schema = answer.SCHEMAS[kind];
   const save = (n, text, result) => fs.writeFileSync(path.join(bundleDir(root, manifest.attempt), `turn-${label ? `${label}-` : ''}${n}.md`),
     `# Prompt\n\n${text}\n\n${result.ok ? `# Answer\n\n${result.text}` : `${NO_ANSWER} ${result.reason})`}\n`);

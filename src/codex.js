@@ -23,10 +23,38 @@ const COOLDOWN_MS = 15 * 60 * 1000;
 const LIMIT_ERROR = /usage limit|rate limit|quota|too many requests|model is not supported when using Codex with a ChatGPT account/i;
 const LOGIN_ERROR = /not logged in|log in again|login required|unauthorized/i;
 
+const DOCS_TOOLS = ['mql5_find', 'mql5_read']; // the MQL5 docs server's read-only lookup tools
+
 const configPairs = list => list.flatMap(value => ['-c', value]);
 const tomlString = s => JSON.stringify(s); // a JSON string is also a valid TOML string
 
-// The read-only MQL5 docs server, with its own settings (env, such as where its data is: install admits only plain
+// The MQL5 docs server as Codex itself reads it from its config right now (`codex mcp get mql5-docs --json`), so one
+// that updates itself or moves keeps working without a reinstall (a copy recorded at install once pointed at a
+// folder the server's own update had deleted). Only when the driver can pass all of it on: an enabled stdio server
+// with a command, args and string env settings, and no working folder or variables taken from Codex's own
+// environment. Anything else, or no answer, is null, and the docs stay off.
+function docsServer() {
+  const { codexJs } = state.config();
+  if (!codexJs) return null;
+  const r = spawnSync(process.execPath, [codexJs, 'mcp', 'get', 'mql5-docs', '--json'], { encoding: 'utf8', timeout: 60000, windowsHide: true });
+  let got = null;
+  try {
+    got = r.status === 0 ? JSON.parse(r.stdout) : null;
+  } catch {
+    return null;
+  }
+  const t = (got && got.transport) || {};
+  const args = t.args || [];
+  const env = t.env || {};
+  if (got === null || got.name !== 'mql5-docs' || got.enabled !== true || t.type !== 'stdio' || typeof t.command !== 'string' || t.cwd != null
+    || (t.env_vars || []).length || !Array.isArray(args) || args.some(a => typeof a !== 'string') || typeof env !== 'object' || Array.isArray(env)) return null;
+  // (each env name becomes part of a Codex setting's name, so only a plain variable name may: a dot, quote or = could
+  // set something else)
+  if (Object.entries(env).some(([name, value]) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || typeof value !== 'string')) return null;
+  return { command: t.command, args, env: { ...env }, tools: DOCS_TOOLS };
+}
+
+// The read-only MQL5 docs server, with its own settings (env, such as where its data is: docsServer admits only plain
 // variable names, since each becomes part of a setting's name) and exactly its lookup tools, for runs on MQL5 code.
 function docsArgs(docs) {
   const k = 'mcp_servers.mql5-docs';
@@ -364,4 +392,4 @@ async function ask(request) {
   return result;
 }
 
-module.exports = { buildArgs, computerLockdown, ask, CU_PLUGINS, CU_SERVERS, ISOLATION_OFF };
+module.exports = { buildArgs, computerLockdown, ask, docsServer, CU_PLUGINS, CU_SERVERS, ISOLATION_OFF };
