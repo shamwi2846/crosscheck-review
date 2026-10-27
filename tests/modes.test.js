@@ -13,7 +13,7 @@ const { spawn, spawnSync } = require('child_process');
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'crosscheck modes test ü '));
 const SPEC = path.join(HOME, 'spec.json');
 const LOG = path.join(HOME, 'calls.jsonl');
-const DOCS = { command: 'C:/docs/mql5-chm.exe', args: ['--serve'], tools: ['mql5_chm_status', 'mql5_chm_read'] };
+const DOCS = { command: 'C:/docs/node.exe', args: ['--serve'], env: { MQL5_DOCS_DATA: 'C:/docs/data' }, tools: ['mql5_find', 'mql5_read'] };
 Object.assign(process.env, { CROSSCHECK_HOME: path.join(HOME, 'state'), FAKE_CODEX_SPEC: SPEC, FAKE_CODEX_LOG: LOG });
 fs.mkdirSync(process.env.CROSSCHECK_HOME, { recursive: true });
 fs.writeFileSync(path.join(process.env.CROSSCHECK_HOME, 'config.json'),
@@ -64,9 +64,9 @@ function writeTask(file, reqs = 'R1. Every order keeps its stop loss.') {
 // exactly its read tools) only for MQL5 work. Only the generated paths and the resumed session are placeholders.
 function isolated(call, { web = false, docs = false, effort }) {
   const c = value => ['-c', value];
-  const k = 'mcp_servers.mql5-chm';
-  const docsArgs = !docs ? [] : [...c(`${k}.command="C:/docs/mql5-chm.exe"`), ...c(`${k}.args=["--serve"]`), ...c(`${k}.required=false`),
-    ...c(`${k}.enabled_tools=["mql5_chm_status","mql5_chm_read"]`), ...c(`${k}.tools.mql5_chm_status.approval_mode="approve"`), ...c(`${k}.tools.mql5_chm_read.approval_mode="approve"`)];
+  const k = 'mcp_servers.mql5-docs';
+  const docsArgs = !docs ? [] : [...c(`${k}.command="C:/docs/node.exe"`), ...c(`${k}.args=["--serve"]`), ...c(`${k}.env.MQL5_DOCS_DATA="C:/docs/data"`), ...c(`${k}.required=false`),
+    ...c(`${k}.enabled_tools=["mql5_find","mql5_read"]`), ...c(`${k}.tools.mql5_find.approval_mode="approve"`), ...c(`${k}.tools.mql5_read.approval_mode="approve"`)];
   const resume = call.args[1] === 'resume';
   const expected = ['exec', ...(resume ? ['resume'] : []), '--ignore-user-config', '--json', '-m', 'gpt-test', ...c(`model_reasoning_effort=${effort}`), ...c('windows.sandbox=unelevated'), ...c('service_tier="default"'),
     ...['apps', 'plugins', 'multi_agent', 'image_generation', 'tool_suggest', 'computer_use', 'browser_use', 'in_app_browser'].flatMap(f => c(`features.${f}=false`)),

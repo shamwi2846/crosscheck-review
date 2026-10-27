@@ -26,12 +26,14 @@ const LOGIN_ERROR = /not logged in|log in again|login required|unauthorized/i;
 const configPairs = list => list.flatMap(value => ['-c', value]);
 const tomlString = s => JSON.stringify(s); // a JSON string is also a valid TOML string
 
-// The read-only MQL5 docs server, with exactly its lookup tools, for runs on MQL5 code.
+// The read-only MQL5 docs server, with its own settings (env, such as where its data is: install admits only plain
+// variable names, since each becomes part of a setting's name) and exactly its lookup tools, for runs on MQL5 code.
 function docsArgs(docs) {
-  const k = 'mcp_servers.mql5-chm';
+  const k = 'mcp_servers.mql5-docs';
   return configPairs([
     `${k}.command=${tomlString(docs.command)}`,
     `${k}.args=[${docs.args.map(tomlString).join(',')}]`,
+    ...Object.entries(docs.env || {}).map(([name, value]) => `${k}.env.${name}=${tomlString(value)}`),
     `${k}.required=false`,
     `${k}.enabled_tools=[${docs.tools.map(tomlString).join(',')}]`,
     ...docs.tools.map(t => `${k}.tools.${t}.approval_mode="approve"`),

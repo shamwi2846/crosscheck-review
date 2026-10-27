@@ -230,7 +230,7 @@ test('every run explicitly selects the shared tier without weakening isolation',
   fs.mkdirSync(path.dirname(profile), { recursive: true });
   fs.writeFileSync(profile, toml);
   const schema = { type: 'object', properties: { verdict: { type: 'string' } }, required: ['verdict'], additionalProperties: false };
-  const docs = { command: 'docs.exe', args: ['server.mjs'], tools: ['mql5_chm_search'] };
+  const docs = { command: 'docs.exe', args: ['server.mjs'], env: {}, tools: ['mql5_find', 'mql5_read'] };
   for (const [fast, tier] of [[undefined, 'default'], [true, 'priority'], [false, 'default']]) {
     setFast(fast);
     setSpec({ exec: [{ text: '{"verdict":"NO_ISSUES"}' }], 'plugin list': [pluginList(ALLOWED)],
@@ -249,13 +249,36 @@ test('every run explicitly selects the shared tier without weakening isolation',
       assert.ok(run.args.includes('read-only') || run.args.includes('sandbox_mode="read-only"'), 'read-only as before');
     }
     assert.ok(fresh.args.includes('--output-schema') && resumed.args.includes('--output-schema'));
-    assert.ok(fresh.args.includes('mcp_servers.mql5-chm.enabled_tools=["mql5_chm_search"]'), 'the docs server keeps only its lookup tools');
+    assert.ok(fresh.args.includes('mcp_servers.mql5-docs.enabled_tools=["mql5_find","mql5_read"]'), 'the docs server keeps only its lookup tools');
     assert.ok(consult.args.includes('web_search="disabled"') && !research.args.includes('web_search="disabled"'), 'only research has the web');
     assert.ok(computer.args.join('\n').includes(lockdown.args.join('\n')) && !computer.args.includes('--ignore-user-config'), 'the computer lockdown as before');
   }
   assert.strictEqual(fs.readFileSync(profile, 'utf8'), toml, "the user's Codex config is unchanged");
   setFast(undefined);
   fs.rmSync(profile);
+});
+
+test('the docs server\'s env settings reach only its own server setting, never the Codex launcher or a later run', async () => {
+  // (NODE_OPTIONS naming a module that doesn't exist: had it reached the launcher's own node, the run would fail to start)
+  const docs = { command: 'C:\\Program Files\\nodejs\\node.exe', args: ['C:\\docs\\server.mjs'], tools: ['mql5_find', 'mql5_read'],
+    env: { DOCS_ROOT: 'C:\\MQL5 "docs"', NODE_OPTIONS: `--require=${path.join(HOME, 'no-such-module.js')}` } };
+  const before = { ...process.env };
+  const schema = { type: 'object', properties: { verdict: { type: 'string' } }, required: ['verdict'], additionalProperties: false };
+  setSpec({ exec: [{ text: '{"verdict":"NO_ISSUES"}' }, { text: '{"verdict":"NO_ISSUES"}' }] });
+  for (const request of [{ docs }, {}]) {
+    const r = await codex.ask({ mode: 'review', effort: 'high', prompt: 'look', cwd: WORK, schema, ...request });
+    assert.ok(r.ok, r.reason);
+  }
+  assert.deepStrictEqual({ ...process.env }, before);
+  const [withDocs, without] = execCalls();
+  const k = 'mcp_servers.mql5-docs';
+  const pairs = withDocs.args.filter(a => a.startsWith(`${k}.`));
+  assert.deepStrictEqual(pairs, [`${k}.command=${JSON.stringify(docs.command)}`, `${k}.args=[${JSON.stringify(docs.args[0])}]`,
+    `${k}.env.DOCS_ROOT=${JSON.stringify(docs.env.DOCS_ROOT)}`, `${k}.env.NODE_OPTIONS=${JSON.stringify(docs.env.NODE_OPTIONS)}`, `${k}.required=false`,
+    `${k}.enabled_tools=["mql5_find","mql5_read"]`, `${k}.tools.mql5_find.approval_mode="approve"`, `${k}.tools.mql5_read.approval_mode="approve"`]);
+  const withoutDocs = placeholders(withDocs.args).filter((a, i, all) => !a.startsWith(`${k}.`) && !(a === '-c' && all[i + 1].startsWith(`${k}.`)));
+  assert.deepStrictEqual(withoutDocs, placeholders(without.args), 'apart from the docs server, the run is isolated as one without it');
+  assert.ok(!without.args.some(a => a.startsWith('mcp_servers.')), 'the next run has no docs server');
 });
 
 test('fast limit keeps the selected tier and the shared cooldown', async () => {
