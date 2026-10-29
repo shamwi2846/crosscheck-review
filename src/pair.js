@@ -56,9 +56,16 @@ function merge(a, b, found, marks) {
     const confirmed = members.some(m => m.mark && m.mark.mark === 'CONFIRM');
     const disputed = sides.length === 1 && !confirmed && members.every(m => m.mark && m.mark.mark === 'DISPUTE');
     const lead = members.reduce((best, m) => (SEVERITY.indexOf(m.f.severity) > SEVERITY.indexOf(best.f.severity) ? m : best));
-    const label = disputed ? 'GAP' : sides.length === 2 || confirmed ? (members.every(m => m.f.label === 'GAP') ? 'GAP' : 'BUG') : 'BUG';
-    const agreement = sides.length === 2 ? 'both' : confirmed ? `confirmed by ${other(sides[0])}`
-      : disputed ? `disputed by ${other(sides[0])}: ${members.map(m => m.mark.evidence).join(' / ')}` : 'unsettled';
+    // (found by both or confirmed: a BUG unless every member called it a GAP; disputed: a GAP; unsettled: a BUG)
+    let label = 'BUG';
+    let agreement = 'unsettled';
+    if (sides.length === 2 || confirmed) {
+      agreement = sides.length === 2 ? 'both' : `confirmed by ${other(sides[0])}`;
+      if (members.every(m => m.f.label === 'GAP')) label = 'GAP';
+    } else if (disputed) {
+      agreement = `disputed by ${other(sides[0])}: ${members.map(m => m.mark.evidence).join(' / ')}`;
+      label = 'GAP';
+    }
     const picked = Object.fromEntries(FIELDS.map(k => [k, lead.f[k]]));
     findings.push({ ...picked, label, reqs: [...new Set(members.flatMap(m => m.f.reqs))], agreement, by: sides.sort().join('+') });
   }

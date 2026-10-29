@@ -47,19 +47,19 @@ Status: built in the steps of section 16 (pull requests 1 to 10) and installed o
 
 Total: about 1,670 lines of code, install included, and 700 of tests, against about 7,900 and 7,600 today. These are ceilings, not targets: Fable's estimate for this scope is 1,200 to 1,500. Going over a budget needs a reason written into this file.
 
-Built, the code is about 3,110 lines, install included, and the tests about 3,200. Each overrun is recorded below.
+Built, the code was about 3,110 lines, install included, and the tests about 3,200. On 2026-10-29 it is about 3,340 lines and the tests about 4,570, after the commit guard's hardening (PRs 20 to 25), the MQL5 docs server (PRs 26 and 27) and a simplification pass that wrote out crammed code and merged copies (more lines, less to follow). Each overrun is recorded below, with the size as of 2026-10-29.
 
 Recorded overruns:
 - `state.js`, about 230 lines: lock ownership. A lock names its owner process and is reclaimed only once that process has ended, under a serialized reclaim guard. A write happens only while the lock is still held. Step 1's review found that age-based reclaim lets a stalled holder and a new holder overwrite each other. Steps 4 to 6 added finding a project without git (the hooks run on every edit), the desktop owner's process check, and the state folder of the Claude Code profile it serves.
-- `answer.js`, about 175 lines: the answer shapes of GPT's other jobs (step 5b), and the test plan's checks: each case names an existing requirement, covers a listed target and names a test inside the project, and every target has a case or one reason it needs none.
-- `codex.js`, about 375 lines:
+- `answer.js`, about 195 lines (175 until the test plans' "only tests that protect something" checks and the known gaps in reviews): the answer shapes of GPT's other jobs (step 5b), and the test plan's checks: each case names an existing requirement, covers a listed target and names a test inside the project, and every target has a case or one reason it needs none.
+- `codex.js`, about 395 lines (375 until the Fast tier switch and the MQL5 docs server, looked up at each job):
   - Process cleanup on Windows. Codex's launcher runs the native `codex.exe`, and what Codex starts hangs off that process, outside every job object. So the run notes its processes at the first output and stops everything descended from them, even after they exit. A computer run notes them again every 2 seconds, so what a helper started later stays the run's after that helper exits (the final audit found that a late helper's worker could outlive the run and its desktop record). Step 1's review found that killing only the launcher's tree left those processes running and could hang the run.
   - Reading Codex's `--json` events. Its plain output repeats the prompt and GPT's text, which falsely triggered the usage cooldown (found in PR 1).
 - `gaps.js`, about 165 lines: compatibility and privacy, plus the plain reads the hooks use (a file's open gaps, the lessons as read), added in step 4.
   - Projects already hold `KNOWN_GAPS.md` files that the old setup wrote, some with Windows line endings. New entries are appended so that every existing byte stays, and a status change rewrites only that entry's header.
   - The project and home folders and e-mail addresses are taken out of every field, because the file is committed to public repositories.
   - A file that can't be read is never taken as empty.
-- `review.js`, about 725 lines. The final audit's fixes added the paired-review condition for risky files, the follow-up's session check and crosscheck's own gap entries counting as reviewed. Steps 4 and 5 added the queries the hooks use, the review skip, and the runner options GPT's other jobs share. Step 3 added the risky material (whole files, frozen candidate callers, frozen plan tests) and the test-plan check before a risky file is acknowledged. Before that, it held what the three plan-review rounds of step 2b required, so that only reviewed versions are ever acknowledged:
+- `review.js`, about 850 lines. Since 725: status predicting the commit check and the test plan required before a review (about 60), crosscheck's own gap bookkeeping counting as reviewed (about 20), known gaps shown to reviewers, and the 2026-10-29 simplification (one shared check of a record's task, the round's finding bookkeeping and the test-plan text as their own functions). The final audit's fixes added the paired-review condition for risky files, the follow-up's session check and crosscheck's own gap entries counting as reviewed. Steps 4 and 5 added the queries the hooks use, the review skip, and the runner options GPT's other jobs share. Step 3 added the risky material (whole files, frozen candidate callers, frozen plan tests) and the test-plan check before a risky file is acknowledged. Before that, it held what the three plan-review rounds of step 2b required, so that only reviewed versions are ever acknowledged:
   - choosing and reserving the files in one state transaction, with dead reservations reclaimed;
   - a bundle per attempt (frozen copies, prompt, manifest), so the fallback reviewer judges the same material and an answer applies only once;
   - chain revisions, so a stale follow-up, close or fallback changes nothing;
@@ -67,25 +67,25 @@ Recorded overruns:
   - baselines from the last reviewed version or from git for shell changes and deletions;
   - each round's turns saved, so a fresh GPT session can continue a chain;
   - gap entries written under the state lock.
-- `hook.js`, about 330 lines. Steps 5 and 6 added binding a plan's review to its task, and the hook list and hook-command matcher that install.js and doctor.js share. Step 4's plan review asked for these, and each guards a real harm:
+- `hook.js`, about 390 lines (330 until the commit guard learned Git Bash and home-folder paths, PowerShell's Set-Location, git in any letter case and shell escapes, and refused a commit that doesn't stand alone, each after a commit slipped through; plus the known gaps shown before an edit). Steps 5 and 6 added binding a plan's review to its task, and the hook list and hook-command matcher that install.js and doctor.js share. Step 4's plan review asked for these, and each guards a real harm:
   - the screen gate validates the desktop record and treats a process it can't check as running, so a bad record never unlocks the desktop;
   - returned failures (a state that can't be read, a lock taken over, an unreadable gaps or lessons file) are logged, not only thrown errors;
   - the commit guard finds its repository from `-C` or a leading `cd` (or PowerShell's `Set-Location`), and checks both paths of a rename;
   - bundle cleanup runs under the project lock and keeps open chains' rounds and reserved attempts.
 
   The refusal texts name the exact next command, so Claude doesn't have to guess.
-- `crosscheck.js` and a new `modes.js`, about 275 and 270 lines. GPT's other jobs (test plans and skips, plan reviews, ideas, digests, research, writing, screen control) live in `modes.js`, since the CLI's 250 lines can't also hold them.
+- `crosscheck.js` and a new `modes.js`, about 300 and 285 lines (275 and 270 until the Fast tier switch, the gap and close reminders, and the MQL5 docs server for digests). GPT's other jobs (test plans and skips, plan reviews, ideas, digests, research, writing, screen control) live in `modes.js`, since the CLI's 250 lines can't also hold them.
   - Screen control records every Codex process a computer run starts, as it is noted, so the desktop stays owned while any of them runs, even after its driver is killed.
   - The CLI checks each command's options. A typo, a missing value, an option given twice or a plain word the command doesn't take is wrong usage, never a silently different run, because a review skip bypasses GPT (`skip --files a b` once skipped only `a`).
   - The jobs reuse review.js's runner, so their isolation, schema, repair and bundles are a review's.
-- `install.js`, about 245 lines (about 340 until the old setup's retirement removed restore, its backup and the old setup's checks). Step 6a's plan and code reviews required each of these, because the installer rewrites the user's global Claude Code setup:
+- `install.js`, about 200 lines (about 340 until the old setup's retirement removed restore, its backup and the old setup's checks). Step 6a's plan and code reviews required each of these, because the installer rewrites the user's global Claude Code setup:
   - writing settings.json last, and putting back everything written (the code included) when a step fails, by moving each original aside first, so a full disk can't stop the rollback;
   - matching only the hook commands that run crosscheck's hook;
   - refusing while a review runs or a project's state can't be read, both before asking and after.
 - A new `doctor.js`, about 205 lines: the CLI couldn't hold the checks. It shares with install.js the hook list (in hook.js) and the Claude Code lookup, which tries again without the saved command when that fails (Node moved, say).
   - Its live probe asks GPT to really try a write and to answer in a plain sentence, so only an enforced schema yields JSON.
   - A proven write takes away the verified version, and the version is pinned before the probes and checked after.
-- Tests, about 2,900 lines: the review and pair paths above are each covered by the at most five cases of their test plan, and those cases need real processes and git projects. Steps 4 to 6 added the tests of the hooks, the CLI, GPT's other jobs, screen control, install and doctor, each from its plan's cases.
+- Tests, about 4,570 lines (2,900 until the commit guard's and the docs server's regression tests): the review and pair paths above are each covered by the at most five cases of their test plan, and those cases need real processes and git projects. Steps 4 to 6 added the tests of the hooks, the CLI, GPT's other jobs, screen control, install and doctor, each from its plan's cases.
 
 ## 4. Commands
 

@@ -13,8 +13,7 @@ const gaps = require('./gaps');
 const pair = require('./pair');
 const { planKey } = require('./hook');
 
-const refused = text => ({ status: 'REFUSED', text: `REFUSED: ${text}` });
-const fence = text => { const ticks = '`'.repeat(Math.max(3, ...[...text.matchAll(/`+/g)].map(m => m[0].length + 1))); return `${ticks}\n${text}\n${ticks}`; };
+const { refused, fence } = review;
 const failed = r => ({ status: r.status, unavailable: r.status === 'GPT_UNAVAILABLE' || !!r.unavailable, text: `${r.status}: ${r.why}`, bundle: r.bundle });
 
 // A new bundle for one job, holding its prompt; `files` are what a review-shaped answer may point at.
@@ -92,10 +91,9 @@ function skip(root, { taskFile, files, why }) {
   const found = targetsOf(root, taskFile, files);
   if (found.why) return refused(found.why);
   const { task, rels } = found;
-  const forTask = r => !!r && r.task === task.id && r.reqHash === task.reqHash;
   const done = state.update(state.files.project(root), data => {
     const s = review.withMaps(data);
-    const rated = rels.filter(rel => s.escalations[state.pathKey(rel)] || [].concat(s.needsPlan[state.pathKey(rel)] || []).some(forTask));
+    const rated = rels.filter(rel => s.escalations[state.pathKey(rel)] || review.ratedRiskyIn(s, state.pathKey(rel), task));
     if (rated.length) return `GPT rated ${rated.join(', ')} risky, so only a test plan counts: run testplan`;
     for (const rel of rels) s.skips[state.pathKey(rel)] = { task: task.id, reqHash: task.reqHash, why: String(why).trim(), at: Date.now() };
     return null;

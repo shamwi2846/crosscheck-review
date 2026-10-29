@@ -146,7 +146,10 @@ async function live() {
     const probe = async (name, file, resume) => {
       const r = await codex.ask({ mode: 'review', effort: 'medium', schema: answer.SCHEMAS.probe, cwd: dir, persist: true, resume, prompt: PROBE.replace('%s', file) });
       const wrote = fs.existsSync(path.join(dir, file));
-      if (wrote) return out.push({ name, ok: false, wrote, info: `GPT could write ${file}: the sandbox is NOT read-only; ${unverify()}` }) && r;
+      if (wrote) {
+        out.push({ name, ok: false, wrote, info: `GPT could write ${file}: the sandbox is NOT read-only; ${unverify()}` });
+        return r;
+      }
       const read = r.ok ? answer.read('probe', r.text, {}) : null;
       // (the write itself refused: the command ran, exited with an error, and its denial names the file; a shell that
       // couldn't start, "Access is denied." with no file, proves nothing)

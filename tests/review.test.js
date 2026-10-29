@@ -313,7 +313,7 @@ test('a session\'s file in a running review is left out of its next review or sk
 });
 
 test('a changed file that needs a test plan it doesn\'t have refuses its review before anything is reserved or GPT is asked', async () => {
-  const rels = ['src/EA.mq5', 'src/lots.js', 'src/pay.js', 'src/Risk.mqh', 'src/f.js', 'src/g.js', 'src/Kept.mqh', 'src/Same.mq5', 'src/a.js'];
+  const rels = ['src/EA.mq5', 'src/lots.js', 'src/pay.js', 'src/Risk.mqh', 'src/Old.mqh', 'src/f.js', 'src/g.js', 'src/Kept.mqh', 'src/Same.mq5', 'src/a.js'];
   const { root, taskFile } = project('t4c', Object.fromEntries(rels.map(rel => [rel, `${rel} 0\n`])));
   for (const rel of rels) fs.writeFileSync(path.join(root, rel), `${rel} 1\n`);
   const t = review.taskInfo(taskFile);
@@ -323,8 +323,11 @@ test('a changed file that needs a test plan it doesn\'t have refuses its review 
     s.escalations = { [k['src/lots.js']]: { chain: 'Cx', at: 1 }, [k['src/g.js']]: { chain: 'Cx', at: 1 } };
     // (the same requirements in another task, and this task's older requirements)
     s.plans = { [k['src/lots.js']]: { ...planFor(taskFile), task: 'another task' }, [k['src/pay.js']]: { ...planFor(taskFile), reqHash: sha('R1. Adds numbers.') } };
-    s.skips = { [k['src/Risk.mqh']]: { task: t.id, reqHash: t.reqHash, why: 'w' }, [k['src/Kept.mqh']]: { task: t.id, reqHash: t.reqHash, why: 'w' } };
-    s.needsPlan = { [k['src/Risk.mqh']]: [{ task: 'another task', reqHash: t.reqHash }, { task: t.id, reqHash: t.reqHash }], [k['src/Kept.mqh']]: [{ task: 'another task', reqHash: t.reqHash }] };
+    // (a current skip counts only for a trading file, so src/pay.js, marked risky, still needs its plan)
+    s.skips = Object.fromEntries(['src/Risk.mqh', 'src/Old.mqh', 'src/Kept.mqh', 'src/pay.js'].map(rel => [k[rel], { task: t.id, reqHash: t.reqHash, why: 'w' }]));
+    // (src/Old.mqh's rating is one record, not a list, as step 3 stored it)
+    s.needsPlan = { [k['src/Risk.mqh']]: [{ task: 'another task', reqHash: t.reqHash }, { task: t.id, reqHash: t.reqHash }], [k['src/Old.mqh']]: { task: t.id, reqHash: t.reqHash },
+      [k['src/Kept.mqh']]: [{ task: 'another task', reqHash: t.reqHash }] };
     s.acks = { [k['src/Same.mq5']]: sha('src/Same.mq5 1\n') }; // (changed since HEAD, but reviewed as it is)
     s.chains = {
       C1: { closed: false, rev: 1, paired: false, session: 'A', files: { [k['src/f.js']]: 'src/f.js' }, riskyKeys: [k['src/f.js']], risky: {},
@@ -341,6 +344,7 @@ test('a changed file that needs a test plan it doesn\'t have refuses its review 
     ['src/lots.js', () => review.review(root, { session: 'A', files: ['src/lots.js'], taskFile })], // (escalated)
     ['src/pay.js', () => review.review(root, { session: 'A', files: ['src/pay.js'], taskFile, risky: true })], // (marked risky)
     ['src/Risk.mqh', () => review.review(root, { session: 'A', files: ['src/Risk.mqh'], taskFile })], // (GPT rated it risky here: its skip is void)
+    ['src/Old.mqh', () => review.review(root, { session: 'A', files: ['src/Old.mqh'], taskFile })], // (the same, rated in the older format)
     ['src/f.js', () => review.followup(root, { chain: 'C1', responseFile })], // (a chain's risky file)
     ['src/g.js', () => review.followup(root, { chain: 'C2', responseFile })], // (escalated, in a paired chain's follow-up)
   ];

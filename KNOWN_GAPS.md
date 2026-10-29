@@ -478,3 +478,12 @@ Findings left unfixed on purpose. Entries are never deleted, only marked fixed.
 - Fix: Have testplan include context paths alongside target paths when calling docsFor().
 - Log: 20261027104530-8d5d4e
 - Why skipped: pair: both
+
+## G54 · open · 2026-10-29 · LOW
+- Task: -
+- Where: tests/screen.test.js:78, tests/screen.test.js:102
+- Problem: Two screen tests fail now and then in the full suite: on 2026-10-29 'a worker started late by a helper keeps the desktop after its driver and its helper are gone' failed once and 'a GPT worker that outlives its killed driver keeps the desktop until it ends' once, in 2 of 3 full runs. Each time allow-screen was still refused after the test had killed every process it knew of; both passed 3 of 3 run alone. Likely causes, not proven: under load Windows gave a finished process's id to a new process, and state.mayRun counts any live process with that id; or (the second test) the run noted one more process after the test copied the desktop record's list, so the test never killed it.
+- Trigger: -
+- Fix: -
+- Log: recorded by hand
+- Why skipped: A timing flake in a test; the gate errs toward keeping the desktop held, never toward two operators on one screen. When it fails, rerun it alone before treating it as a regression.
