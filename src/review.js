@@ -24,6 +24,14 @@ const snapFile = (root, hash) => path.join(state.projectDir(root), 'snap', hash)
 const bundleDir = (root, attempt) => path.join(state.projectDir(root), 'bundles', attempt);
 const withMaps = s => { for (const k of MAPS) s[k] = s[k] || {}; return s; };
 const git = (cwd, args, encoding) => spawnSync('git', args, { cwd, encoding, windowsHide: true, maxBuffer: 64 << 20 });
+const refused = why => ({ status: 'REFUSED', text: `REFUSED: ${why}` });
+
+// Whether a record (a test plan, a skip, a risky rating) belongs to `task` as it is now: its id and requirements hash.
+const forTask = (task, record) => !!record && record.task === task.id && record.reqHash === task.reqHash;
+// Whether GPT rated the file risky in `task`: from then on only a test plan counts for it there, never a skip.
+const ratedRiskyIn = (s, key, task) => [].concat(s.needsPlan[key] || []).some(r => forTask(task, r));
+// Whether a trading file's skip counts in `task`: recorded for it, and the file not rated risky there.
+const skipCounts = (s, key, task) => RISKY_FILE.test(key) && forTask(task, s.skips[key]) && !ratedRiskyIn(s, key, task);
 
 // A file's bytes, or null when it doesn't exist. Any other read error stops the review.
 function bytesOf(file) {
@@ -180,12 +188,8 @@ function admit(root, { attempt, session, named = [], chain = null, risky = false
     const taskPath = c ? c.task.path : taskFile;
     const task = taskPath && taskInfo(taskPath);
     if (task) {
-      const forThisTask = r => !!r && r.task === task.id && r.reqHash === task.reqHash;
-      const unplanned = keys.filter(k => {
-        const foundRisky = [].concat(s.needsPlan[k] || []).some(forThisTask);
-        const skipped = RISKY_FILE.test(k) && forThisTask(s.skips[k]) && !foundRisky;
-        return (riskyKeys.includes(k) || foundRisky || s.escalations[k]) && !forThisTask(s.plans[k]) && !skipped && versionOf(root, files[k].path) !== s.acks[k];
-      });
+      const unplanned = keys.filter(k => (riskyKeys.includes(k) || ratedRiskyIn(s, k, task) || s.escalations[k])
+        && !forTask(task, s.plans[k]) && !skipCounts(s, k, task) && versionOf(root, files[k].path) !== s.acks[k]);
       // (the commands name the task, which may not be this session's: one named with --task, or a follow-up's chain's)
       const args = `--task "${taskPath}" --files "${unplanned.map(k => files[k].path).join(',')}"`;
       if (unplanned.length) return { refused: `test plan first: no current test plan for this task: ${list(unplanned)} (${CLI} testplan ${args}; for a trading file GPT hasn't rated risky, a skip counts too: ${CLI} skip ${args} --why "...")` };
@@ -301,6 +305,18 @@ The round limit is reached, so this round checks only the fixed lines. Report no
 const openList = findings => Object.entries(findings).filter(([, f]) => f.status === 'open')
   .map(([id, f]) => `- ${id} [${f.severity} ${f.label}] ${f.title} (${f.location}): ${f.trigger}. Fix: ${f.fix}${f.reason ? `. Last answer: ${f.reason}` : ''}`).join('\n');
 
+// A test plan as the reviewers read it: its cases (or GPT's reason for none) and its tests, frozen now.
+function planOf(root, rel, plan) {
+  const lines = [`### Test plan of ${rel}`];
+  for (const c of plan.cases || []) lines.push(`- ${c.id}: ${c.text} (test: ${c.test})`);
+  if (plan.why) lines.push(`- no case: ${plan.why}`);
+  for (const t of plan.tests || []) {
+    const bytes = bytesOf(path.join(root, t));
+    lines.push(`- frozen test ${t}: ${bytes === null ? '(missing)' : snapFile(root, snapshot(root, bytes))}`);
+  }
+  return lines.join('\n');
+}
+
 // Freezes an attempt into its bundle: snapshots of the files and the task, the prompt built only from them, and
 // the manifest the answer is applied from. The fallback reviewer gets the same bundle. A follow-up (`chain`, the
 // chain as admitted) gets the open findings, Claude's `response` and only the requirements that changed.
@@ -330,10 +346,8 @@ function freeze(root, { attempt, session, names = [], files, admittedAt, rev, ta
   }
   // A plan counts only for this task and its current requirements; the cases (or GPT's reason for none) and the frozen
   // tests go to GPT.
-  const current = Object.fromEntries(Object.entries(plans).filter(([, p]) => p.task === taskId && p.reqHash === task.reqHash));
-  const planText = Object.entries(current).map(([key, p]) => [`### Test plan of ${files[key].path}`,
-    ...(p.cases || []).map(c => `- ${c.id}: ${c.text} (test: ${c.test})`), ...(p.why ? [`- no case: ${p.why}`] : []),
-    ...(p.tests || []).map(t => { const bytes = bytesOf(path.join(root, t)); return `- frozen test ${t}: ${bytes === null ? '(missing)' : snapFile(root, snapshot(root, bytes))}`; })].join('\n')).join('\n\n');
+  const current = Object.fromEntries(Object.entries(plans).filter(([, p]) => forTask({ id: taskId, reqHash: task.reqHash }, p)));
+  const planText = Object.entries(current).map(([key, p]) => planOf(root, files[key].path, p)).join('\n\n');
   const callers = paired ? callersOf(root, riskyKeys.map(k => files[k].path), new Set(Object.keys(files))) : [];
   const callerText = callers.slice(0, 20).map(p => `- ${p}: ${snapFile(root, snapshot(root, fs.readFileSync(path.join(root, p))))}`).join('\n')
     + (callers.length > 20 ? `\n(${callers.length - 20} more not shown)` : '');
@@ -465,6 +479,29 @@ const acknowledgeGaps = root => (write, before, after) => {
   write(stateFile, JSON.stringify(s, null, 2)); // (if it fails, the file differs from its acknowledgement: unreviewed)
 };
 
+// Records a round's answer in its chain: each answered finding's status and reason, then the new findings under the
+// next ids (in a follow-up within the round limit, a LOW one is a GAP). Returns the new ids, those of the new GAPs, and
+// the known gaps of the findings now resolved or conceded.
+function recordFindings(chain, kind, a) {
+  const fixedGaps = [];
+  for (const row of a.followups || []) {
+    const f = chain.findings[row.id];
+    f.reason = row.reason;
+    if (row.status === 'MAINTAIN') continue;
+    f.status = row.status === 'RESOLVED' ? 'resolved' : 'conceded';
+    if (f.gap) fixedGaps.push(f.gap);
+  }
+  const narrow = chain.rounds.length >= 3;
+  let n = Object.keys(chain.findings).length;
+  const added = [];
+  for (const f of findingsOf(a)) {
+    if (kind === 'followup' && !narrow && f.severity === 'LOW') f.label = 'GAP'; // (past the limit, a regression keeps its label)
+    chain.findings[`F${++n}`] = f;
+    added.push(`F${n}`);
+  }
+  return { added, newGaps: added.filter(fid => chain.findings[fid].label === 'GAP'), fixedGaps };
+}
+
 // Applies a checked answer in one locked write of the project state; KNOWN_GAPS.md changes under the same lock (the
 // round's new GAP findings before the state write, resolved or conceded ones marked fixed after it). A follow-up
 // applies only to the chain revision it began from. Returns { chain, added, acked, pending, escalated, taskChanged }
@@ -492,29 +529,13 @@ function apply(root, manifest, result) {
     const pairComplete = !!(manifest.paired && result.pairComplete);
     chain.riskyKeys = [...new Set([...(chain.riskyKeys || []), ...manifest.riskyKeys])];
     if (pairComplete) chain.paired = true;
-    const narrow = chain.rounds.length >= 3;
-    const fixedGaps = [];
-    for (const row of result.answer.followups || []) {
-      const f = chain.findings[row.id];
-      f.reason = row.reason;
-      if (row.status !== 'MAINTAIN') f.status = row.status === 'RESOLVED' ? 'resolved' : 'conceded';
-      if (row.status !== 'MAINTAIN' && f.gap) fixedGaps.push(f.gap);
-    }
-    let n = Object.keys(chain.findings).length;
-    const added = [];
-    for (const f of findingsOf(result.answer)) {
-      if (manifest.kind === 'followup' && !narrow && f.severity === 'LOW') f.label = 'GAP'; // (past the limit, a regression keeps its label)
-      chain.findings[`F${++n}`] = f;
-      added.push(`F${n}`);
-    }
-    const newGaps = added.filter(fid => chain.findings[fid].label === 'GAP');
+    const { added, newGaps, fixedGaps } = recordFindings(chain, manifest.kind, result.answer);
     // (GPT read only the task's Requirements, so only a change there voids the round; a Notes edit made while it ran doesn't)
     const taskBytes = bytesOf(manifest.task.path);
     const taskNow = taskBytes === null ? null : taskOf(textOf(taskBytes));
     const taskChanged = !taskNow || taskNow.reqHash !== manifest.task.reqHash;
     const ratedRisky = result.answer.class.level === 'risky' ? result.answer.class.files.map(state.pathKey) : [];
-    const { id: taskId, reqHash } = manifest.task;
-    const forThisTask = r => !!r && r.task === taskId && r.reqHash === reqHash;
+    const task = manifest.task;
     const acked = [], pending = [], escalated = [], unplanned = [];
     for (const [key, f] of Object.entries(manifest.files)) {
       const record = s.changes[key];
@@ -529,8 +550,8 @@ function apply(root, manifest, result) {
       }
       if (ratedRisky.includes(key)) {
         // (from now on only a real test plan counts for it in this task, never a skip; each task keeps its own record)
-        const records = [].concat(s.needsPlan[key] || []).filter(r => !forThisTask(r));
-        s.needsPlan[key] = [...records, { task: taskId, reqHash }];
+        const records = [].concat(s.needsPlan[key] || []).filter(r => !forTask(task, r));
+        s.needsPlan[key] = [...records, { task: task.id, reqHash: task.reqHash }];
         // (a file this chain's pair read in full needs a plan, not another pair; any other file that turns risky gets
         // its own paired review, as in a chain that isn't paired)
         if (!(chain.wholeKeys || []).includes(key)) {
@@ -541,12 +562,11 @@ function apply(root, manifest, result) {
       }
       // A risky file is acknowledged only with the test plan the reviewers saw, still current for this task; a
       // trading file may have a skip instead, unless GPT ever rated it risky for this task.
-      const planned = forThisTask(s.plans[key]) && manifest.plans[key] === sha(JSON.stringify(s.plans[key]));
-      const foundRisky = [].concat(s.needsPlan[key] || []).some(forThisTask);
-      const skipped = RISKY_FILE.test(key) && forThisTask(s.skips[key]) && !foundRisky;
+      const planned = forTask(task, s.plans[key]) && manifest.plans[key] === sha(JSON.stringify(s.plans[key]));
+      const skipped = skipCounts(s, key, task);
       // (once a file was found risky for this task or in this chain, it needs a plan however a later round rates it)
       const needsPlan = manifest.riskyKeys.includes(key) || ratedRisky.includes(key) || (chain.riskyKeys || []).includes(key)
-        || Object.keys(chain.risky || {}).includes(key) || foundRisky;
+        || Object.keys(chain.risky || {}).includes(key) || ratedRiskyIn(s, key, task);
       if (needsPlan && !planned && !skipped) unplanned.push(f.path);
       // (a paired attempt's risky files stay escalated until its pair completes; applied without that (a fallback answer)
       // they are escalated here too, for a bundle frozen before admission escalated them)
@@ -613,11 +633,17 @@ function summary(a, applied) {
   return lines.join('\n');
 }
 
+// Applies a checked answer and reports the round: DONE with its summary (and `note`), or NOT_DONE when apply refused.
+function applyAndSummarize(root, manifest, result, bundle, note = '') {
+  const applied = apply(root, manifest, result);
+  if (applied.refused) return { status: 'NOT_DONE', text: `NOT_DONE: ${applied.refused}`, bundle };
+  return { status: 'DONE', chain: applied.chain, text: `${summary(result.answer, applied)}${note}`, bundle };
+}
+
 // A fresh review of this session's pending changes plus the named files (`files`, from the project root), against
 // `taskFile`; paired when a file is risky (or `risky`). Returns { status, text, chain, bundle }: status DONE,
 // REFUSED, GPT_UNAVAILABLE, PAIR_INCOMPLETE or NOT_DONE (the bundle stays for another run or the fallback reviewer).
 async function review(root, { session = null, files = [], taskFile = null, evidenceFile = null, full = false, risky = false } = {}) {
-  const refused = why => ({ status: 'REFUSED', text: `REFUSED: ${why}` });
   if (!taskFile) return refused('a review needs its task file');
   if (!session && !files.length) return refused('without a session id, name the files to review');
   const resolved = resolveNamed(root, files);
@@ -638,9 +664,7 @@ async function review(root, { session = null, files = [], taskFile = null, evide
       const unavailable = result.status === 'GPT_UNAVAILABLE' || !!result.unavailable; // (then the fallback reviewer takes the bundle)
       return { status: result.status, unavailable, text: `${result.status}: ${result.why}`, bundle };
     }
-    const applied = apply(root, frozen.manifest, result);
-    if (applied.refused) return { status: 'NOT_DONE', text: `NOT_DONE: ${applied.refused}`, bundle };
-    return { status: 'DONE', chain: applied.chain, text: `${summary(result.answer, applied)}${held}`, bundle };
+    return applyAndSummarize(root, frozen.manifest, result, bundle, held);
   } finally {
     release(root, attempt, Object.keys(admitted.files));
   }
@@ -649,7 +673,6 @@ async function review(root, { session = null, files = [], taskFile = null, evide
 // The next round of a chain: its open findings by id, Claude's response (`responseFile`) and the code changed since
 // the last round. Returns the same shape as `review`.
 async function followup(root, { chain: id, responseFile, evidenceFile = null }) {
-  const refused = why => ({ status: 'REFUSED', text: `REFUSED: ${why}` });
   const response = responseFile ? bytesOf(responseFile) : null;
   if (response === null) return refused('a follow-up needs Claude\'s response file');
   const attempt = newAttempt();
@@ -664,9 +687,7 @@ async function followup(root, { chain: id, responseFile, evidenceFile = null }) 
     const effort = chain.paired || admitted.riskyKeys.length ? 'xhigh' : 'high';
     const result = await run(root, frozen.manifest, frozen.prompt, { resume: chain.codexSession, history: historyOf(root, chain), effort });
     if (result.status !== 'OK') return { status: result.status, text: `${result.status}: ${result.why}`, bundle };
-    const applied = apply(root, frozen.manifest, result);
-    if (applied.refused) return { status: 'NOT_DONE', text: `NOT_DONE: ${applied.refused}`, bundle };
-    return { status: 'DONE', chain: id, text: summary(result.answer, applied), bundle };
+    return applyAndSummarize(root, frozen.manifest, result, bundle);
   } finally {
     release(root, attempt, Object.keys(admitted.files));
   }
@@ -722,7 +743,6 @@ function close(root, { chain: id, notes = {}, rev }) {
 // Applies a fallback reviewer's answer (`answerFile`) to a bundle GPT couldn't finish: checked against the bundle's
 // own manifest, with its files reserved again, applied once and only to the frozen versions.
 function fallback(root, { bundle, answerFile }) {
-  const refused = why => ({ status: 'REFUSED', text: `REFUSED: ${why}` });
   let manifest;
   try {
     manifest = JSON.parse(fs.readFileSync(path.join(bundle, 'manifest.json'), 'utf8'));
@@ -747,9 +767,7 @@ function fallback(root, { bundle, answerFile }) {
   if (!reserved.ok || reserved.value) return refused(reserved.why || reserved.value);
   try {
     fs.writeFileSync(path.join(bundle, 'turn-fallback.md'), `# Prompt\n\n${fs.readFileSync(path.join(bundle, 'prompt.md'), 'utf8')}\n\n# Answer\n\n${textOf(given)}\n`);
-    const applied = apply(root, manifest, { answer: checked.answer, session: null });
-    if (applied.refused) return { status: 'NOT_DONE', text: `NOT_DONE: ${applied.refused}`, bundle };
-    return { status: 'DONE', chain: applied.chain, text: summary(checked.answer, applied), bundle };
+    return applyAndSummarize(root, manifest, { answer: checked.answer, session: null }, bundle);
   } finally {
     release(root, manifest.attempt, keys);
   }
@@ -762,7 +780,6 @@ function fallback(root, { bundle, answerFile }) {
 // risky for any task, one with a test plan, one in an open chain's risky list) and for a named file under review.
 // The reason is kept with the versions, apart from test-plan skips.
 function skip(root, { session = null, files = [], why = '' }) {
-  const refused = text => ({ status: 'REFUSED', text: `REFUSED: ${text}` });
   const reason = String(why).trim();
   if (!reason) return refused('a review skip needs its reason (--why "...")');
   if (!session && !files.length) return refused('without a session id, name the files to skip');
@@ -806,7 +823,6 @@ function stateOf(root) {
   if (current.unreadable) throw new Error(`the state can't be read (${current.unreadable})`);
   return withMaps(current.data);
 }
-const pending = (root, session) => Object.values(stateOf(root).changes).filter(c => !session || c.session === session);
 
 // The files a commit would be refused for now, in a state already read (the commit guard's check, which status shows
 // too): every change record plus the tracked files git reports changed, each whose current version isn't its last
@@ -830,6 +846,6 @@ const bugsIn = s => Object.entries(s.chains).filter(([, c]) => !c.closed)
   .flatMap(([chain, c]) => Object.entries(c.findings || {}).filter(([, f]) => f.label === 'BUG' && f.status === 'open').map(([id, f]) => ({ chain, id, ...f })));
 const openBugs = root => bugsIn(stateOf(root));
 
-module.exports = { review, followup, close, fallback, skip, pending, unreviewedForCommit, openChains, openBugs, bugsIn, acknowledgeGaps, DELETED,
-  RISKY_FILE, sessionTask, stateOf, withMaps, bytesOf, textOf, snapshot, snapFile, versionOf, asBaseline,
-  run, newAttempt, bundleDir, findingsOf, taskInfo, docsFor, DOCS_NOTE }; // (the last line: for modes.js)
+module.exports = { review, followup, close, fallback, skip, unreviewedForCommit, openChains, openBugs, bugsIn, acknowledgeGaps, DELETED,
+  RISKY_FILE, sessionTask, stateOf, withMaps, bytesOf, textOf, snapshot, snapFile, asBaseline, forTask, ratedRiskyIn,
+  run, newAttempt, bundleDir, findingsOf, taskInfo, docsFor, DOCS_NOTE, refused, fence }; // (the last line: for modes.js)

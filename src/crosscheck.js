@@ -245,7 +245,7 @@ async function simpleCommand(args) {
     if (!String(args.question || '').trim()) throw new Usage(`${kind} needs --question "..."`);
     input = `## Question\n${args.question}`;
     if (kind === 'digest') {
-      if (!args.files === !args.dir) throw new Usage('digest takes --files a,b or --dir <folder>: one of them');
+      if (Boolean(args.files) === Boolean(args.dir)) throw new Usage('digest takes --files a,b or --dir <folder>: one of them');
       material = args.dir ? [at(args.dir)] : listOf(args.files).map(at);
       const missing = material.filter(p => !fs.existsSync(p));
       if (missing.length) return { code: 1, text: `REFUSED: these don't exist: ${missing.join(', ')}` };

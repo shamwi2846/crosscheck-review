@@ -44,11 +44,10 @@ const openBugs = s => review.bugsIn(s).map(f => `${f.chain} ${f.id} (${f.locatio
 // Why a trading file can't be edited yet, or null: it needs a test plan, or a skip, bound to the session's task.
 function tradingGate(s, key, rel, task, taskFile) {
   if (!task) return `${rel} is a trading file: it needs a test plan or a skip first, and those belong to a task. Write this session's task file (${taskFile}, with a "## Requirements" section), then run ${CLI} testplan --files "${rel}" (or, when no test applies, ${CLI} skip --files "${rel}" --why "...").`;
-  const forTask = r => !!r && r.task === task.id && r.reqHash === task.reqHash;
-  if (forTask(s.plans[key])) return null;
-  const rated = [].concat(s.needsPlan[key] || []).some(forTask) || !!s.escalations[key];
+  if (review.forTask(task, s.plans[key])) return null;
+  const rated = review.ratedRiskyIn(s, key, task) || !!s.escalations[key];
   if (rated) return `GPT rated ${rel} risky, so a skip no longer counts: it needs a test plan for the current task first: ${CLI} testplan --files "${rel}".`;
-  if (forTask(s.skips[key])) return null;
+  if (review.forTask(task, s.skips[key])) return null;
   return `${rel} is a trading file: it needs a test plan for the current task first (${CLI} testplan --files "${rel}"), or, when no test applies, ${CLI} skip --files "${rel}" --why "...". A plan or skip made before the requirements changed no longer counts.`;
 }
 

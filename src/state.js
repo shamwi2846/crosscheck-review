@@ -185,7 +185,6 @@ function pathKey(rel) {
   const p = String(rel).replace(/\\/g, '/').replace(/^(\.\/)+/, '');
   return process.platform === 'win32' ? p.toLowerCase() : p;
 }
-const fileKey = (root, file) => pathKey(path.relative(root, path.resolve(root, file)));
 
 // The project a folder belongs to: the top folder of its git repository, or null outside git.
 function projectRoot(dir) {
@@ -229,4 +228,4 @@ function config() {
   return { ...DEFAULT_CONFIG, ...(read(files.config()).data || {}) };
 }
 
-module.exports = { HOME, read, update, withLock, alive, mayRun, pathKey, fileKey, projectRoot, repoOf, projectDir, files, config };
+module.exports = { HOME, read, update, withLock, alive, mayRun, pathKey, projectRoot, repoOf, projectDir, files, config };
