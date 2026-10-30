@@ -38,9 +38,11 @@ const SCHEMAS = {
     followups: list(object({ id: text, status: oneOf('RESOLVED', 'MAINTAIN', 'CONCEDE'), reason: text })),
     ...SHARED,
   }),
-  // a pair's cross-check: one mark for each of the other reviewer's findings
+  // a pair's cross-check: one mark for each of the other reviewer's findings (a CONFIRM with the checker's own harm
+  // judgement in `label`)
   crosscheck: object({
-    marks: list(object({ id: text, mark: oneOf('CONFIRM', 'DISPUTE', 'SAME_AS'), evidence: text, same_as: { type: ['string', 'null'] } })),
+    marks: list(object({ id: text, mark: oneOf('CONFIRM', 'DISPUTE', 'SAME_AS', 'UNCLEAR'), label: { type: ['string', 'null'], enum: ['BUG', 'GAP', null] },
+      evidence: text, same_as: { type: ['string', 'null'] } })),
   }),
   // GPT's other jobs (modes.js)
   testplan: object({ cases: list(CASE), no_case: list(NO_CASE), not_worth_testing: text }),
@@ -118,6 +120,8 @@ function read(kind, answerText, asked) {
     for (const m of answer.marks) {
       if (m.mark === 'SAME_AS' && !asked.ownIds.includes(m.same_as)) problems.push(`${m.id} is marked SAME_AS ${m.same_as}, which isn't one of your findings`);
       if (m.mark === 'DISPUTE' && !m.evidence.trim()) problems.push(`${m.id} is disputed without evidence: give the concrete reason it can't happen`);
+      if (m.mark === 'CONFIRM' && !m.label) problems.push(`${m.id} is confirmed without your label: BUG if it can cause real harm, else GAP`);
+      if (m.mark === 'UNCLEAR' && !m.evidence.trim()) problems.push(`${m.id} is marked UNCLEAR without saying what you couldn't check`);
     }
     return { answer, problems };
   }

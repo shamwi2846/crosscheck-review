@@ -191,9 +191,9 @@ test('plan authorization stays bound to the task, its requirements and the froze
   for (const rel of Object.keys(files)) assert.ok(s.acks[k[rel]], `${rel} acknowledged`);
 });
 
-test('one merge keeps severity, row provenance and dispute evidence', () => {
+test('one merge keeps the BUG author\'s account, row provenance and dispute evidence', () => {
   const twinA = finding('lot rounding', 'src/a.js:3', { severity: 'MEDIUM', title: 'A view', test: null });
-  const twinB = finding('lot rounding', 'src/a.js:3', { severity: 'HIGH', title: 'B view', test: 'lot 0.015 -> 0.01', label: 'GAP' }); // (mixed labels: a BUG)
+  const twinB = finding('lot rounding', 'src/a.js:3', { severity: 'HIGH', title: 'B view', test: 'lot 0.015 -> 0.01', label: 'GAP' }); // (mixed labels: a BUG, in A's words)
   const a = { verdict: 'ISSUES_FOUND', findings: [], requirements: rows('NOT_MET', 'NOT_MET'), possibly_missing: ['pa'], class: { level: 'normal', files: ['src/helper.js'], why: 'wa' }, coverage: 'ca' };
   const b = { verdict: 'ISSUES_FOUND', findings: [], requirements: rows('MET', 'PARTIAL'), possibly_missing: ['pb'], class: { level: 'risky', files: ['src/other.js'], why: 'wb' }, coverage: 'cb' };
   const found = {
@@ -206,10 +206,11 @@ test('one merge keeps severity, row provenance and dispute evidence', () => {
   const m = pair.merge(a, b, found, marksBy);
   const by = Object.fromEntries(m.findings.map(f => [f.title, f]));
   assert.deepStrictEqual(m.findings.map(f => [f.title, f.label, f.agreement]), [
-    ['B view', 'BUG', 'both'], ['gap twin', 'GAP', 'both'], ['confirmed', 'BUG', 'confirmed by B'],
+    ['A view', 'BUG', 'both'], ['gap twin', 'GAP', 'both'], ['confirmed', 'BUG', 'confirmed by B'],
     ['disputed', 'GAP', 'disputed by B: src/a.js:5 refuses it'], ['R2 is NOT MET', 'BUG', 'confirmed by B'], ['b on R2', 'GAP', 'disputed by A: R2 is checked at src/a.js:9']]);
-  assert.deepStrictEqual([by['B view'].severity, by['B view'].test, by['B view'].by], ['HIGH', 'lot 0.015 -> 0.01', 'A+B']);
-  assert.deepStrictEqual(m.requirements.map(r => r.status), ['NOT_MET', 'NOT_MET']);
+  assert.deepStrictEqual([by['A view'].severity, by['A view'].test, by['A view'].by], ['MEDIUM', null, 'A+B'], 'one account, the BUG author\'s, never a mix');
+  // (R1: only A rated it unmet, and A's one finding naming it was disputed, so B's MET stands; R2: both rated it unmet)
+  assert.deepStrictEqual(m.requirements.map(r => r.status), ['MET', 'NOT_MET']);
   for (const r of m.requirements) assert.ok(m.findings.some(f => f.reqs.includes(r.id)), `${r.id} is linked, so no extra BUG is made for it`);
   assert.deepStrictEqual(m.class, { level: 'risky', files: ['src/other.js'], why: 'A: wa / B: wb' });
   assert.deepStrictEqual([m.possibly_missing, m.coverage, m.verdict], [['pa', 'pb'], 'A: ca / B: cb', 'ISSUES_FOUND']);
@@ -428,4 +429,121 @@ test('a normal review\'s pair with Muse can\'t certify a file Muse newly rates r
   assert.strictEqual(f.status, 'REFUSED', f.text);
   assert.match(f.text, /escalated: each needs its own paired review first/, 'a follow-up can\'t stand in for its plan and paired review');
   assert.ok(state.update(state.files.global(), g => { delete g.muse; }).ok);
+});
+
+// ---- The merge's rules (test plan of the cross-check task) ----
+
+test('a one-sided SAME_AS can\'t erase a separate refund failure: both bugs stay, each with its own fix', () => {
+  const retry = finding('a retry pays a refund twice', 'src/refund.js:4', { severity: 'HIGH', trigger: 'the bank call times out', fix: 'an idempotency key', test: 'retry pays once', reqs: ['R1'] });
+  const webhook = finding('two webhooks pay a refund twice', 'src/hooks.js:9', { severity: 'HIGH', trigger: 'webhooks arrive together', fix: 'a row lock', test: 'parallel webhooks pay once', reqs: ['R2'] });
+  const a = JSON.parse(reviewAnswer([retry], { reqs: rows() }));
+  const b = JSON.parse(reviewAnswer([webhook], { reqs: rows() }));
+  const m = pair.merge(a, b, { A: { A1: retry }, B: { B1: webhook } },
+    { A: JSON.parse(marks([['B1', 'CONFIRM']])).marks, B: JSON.parse(marks([['A1', 'SAME_AS', 'B1']])).marks });
+  assert.deepStrictEqual(m.findings.map(f => [f.title, f.label, f.agreement, f.fix, f.test, f.reqs]), [
+    ['a retry pays a refund twice', 'BUG', 'confirmed by B', 'an idempotency key', 'retry pays once', ['R1']],
+    ['two webhooks pay a refund twice', 'BUG', 'confirmed by A', 'a row lock', 'parallel webhooks pay once', ['R2']]]);
+});
+
+test('checked cross-check judgements can\'t demote a destructive-migration BUG, and a judgement or reason left out is refused', () => {
+  const migration = (title, label) => finding(title, 'src/migrate.js:7', { severity: 'HIGH', label, test: 'rows survive', harm: 'rows are deleted' });
+  const found = { A: { A1: migration('drops rows on rerun', 'GAP'), A2: migration('no rollback on failure', 'BUG'), A3: migration('wrong target table', 'BUG') }, B: {} };
+  const asked = { otherIds: ['A1', 'A2', 'A3'], ownIds: [] };
+  const sent = marks([['A1', 'CONFIRM', null, '', 'BUG'], ['A2', 'CONFIRM', null, '', 'GAP'], ['A3', 'UNCLEAR', null, 'the migration runner is not in my material']]);
+  const checked = answer.read('crosscheck', sent, asked);
+  assert.deepStrictEqual([checked.problems, checked.answer], [[], JSON.parse(sent)], 'valid marks pass unchanged');
+  const a = JSON.parse(reviewAnswer(Object.values(found.A)));
+  const m = pair.merge(a, JSON.parse(reviewAnswer()), found, { A: [], B: checked.answer.marks });
+  assert.deepStrictEqual(m.findings.map(f => [f.title, f.label]), [['drops rows on rerun', 'BUG'], ['no rollback on failure', 'BUG'], ['wrong target table', 'BUG']]);
+  const bare = answer.read('crosscheck', marks([['A1', 'CONFIRM', null, '', null], ['A2', 'UNCLEAR', null, ' '], ['A3', 'DISPUTE', null, 'src/migrate.js:2 guards it']]), asked);
+  assert.ok(bare.problems.some(p => /A1 is confirmed without your label/.test(p)) && bare.problems.some(p => /A2 is marked UNCLEAR without saying/.test(p)), bare.problems.join('; '));
+});
+
+test('a reviewer that found nothing must still check the other\'s bug before the pair counts, and only that side needs its session', async () => {
+  const bypass = finding('authorization can be bypassed', 'src/auth.js:2', { severity: 'HIGH', test: 'a stranger is refused' });
+  const runs = [];
+  const runOne = sessions => async (prompt, options, side) => {
+    runs.push(options.label);
+    if (options.label === '1-A') return { status: 'OK', answer: JSON.parse(reviewAnswer()), session: sessions.A };
+    if (options.label === '1-B') return { status: 'OK', answer: JSON.parse(reviewAnswer([bypass])), session: sessions.B };
+    if (options.label === '2-A' && side === 'A' && options.resume === sessions.A) return { status: 'OK', answer: JSON.parse(marks([['B1', 'CONFIRM']])) };
+    throw new Error(`unexpected run ${side} ${options.label}`);
+  };
+  const done = await pair.runPair({ prompt: 'review', runOne: runOne({ A: 'sess-A', B: null }), materialize: review.findingsOf });
+  assert.deepStrictEqual([done.status, done.pairComplete, runs], ['OK', true, ['1-A', '1-B', '2-A']], 'B, with nothing to mark, needs no session and no cross-check');
+  assert.deepStrictEqual(done.answer.findings.map(f => [f.title, f.label, f.agreement]), [['authorization can be bypassed', 'BUG', 'confirmed by A']]);
+  runs.length = 0;
+  const unchecked = await pair.runPair({ prompt: 'review', runOne: runOne({ A: null, B: 'sess-B' }), materialize: review.findingsOf });
+  assert.deepStrictEqual([unchecked.status, unchecked.pairComplete, runs.some(l => l.startsWith('2-'))], ['PAIR_INCOMPLETE', undefined, false], 'A must check B1 and can\'t: no pair');
+});
+
+test('a receipt spares a later round only for the very version its pair certified, never for an edit or a receipt without a version', async () => {
+  const p = project('t-receipt', { 'src/auth.js': 'v0\n' });
+  const k = key('src/auth.js');
+  const risky = { level: 'risky', files: ['src/auth.js'], why: 'it guards logins' };
+  write(p.root, 'src/auth.js', 'v1\n');
+  seed(p.root, s => { s.changes = { [k]: pending('src/auth.js') }; s.plans = { [k]: plan(p) }; });
+  setPair({ A: [reviewAnswer()], B: [reviewAnswer()] });
+  const paired = await review.review(p.root, { session: 'A', taskFile: p.taskFile, risky: true });
+  assert.strictEqual(paired.status, 'DONE', paired.text);
+  const receipt = stateOf(p.root).riskyReviews[k];
+  assert.deepStrictEqual([!!receipt, stateOf(p.root).riskyVersions[k]], [true, sha('v1\n')], 'the receipt names the version it certified');
+  const ordinary = async () => { setPair({ single: [reviewAnswer([], { cls: risky })] }); return review.review(p.root, { files: ['src/auth.js'], taskFile: p.taskFile }); };
+  const same = await ordinary(); // (the certified version, rated risky again by an ordinary review: no second pair)
+  assert.strictEqual(same.status, 'DONE', same.text);
+  assert.deepStrictEqual([stateOf(p.root).escalations[k], stateOf(p.root).acks[k]], [undefined, sha('v1\n')]);
+  write(p.root, 'src/auth.js', 'v2\n'); // (an edit: the receipt doesn't cover it)
+  const edited = await ordinary();
+  const s = stateOf(p.root);
+  assert.ok(s.escalations[k] && s.changes[k] && s.acks[k] === sha('v1\n'), 'escalated, pending, still acknowledged at v1');
+  assert.strictEqual(s.riskyReviews[k], receipt, 'an ordinary review mints no receipt');
+  assert.strictEqual(review.close(p.root, { chain: edited.chain, rev: s.chains[edited.chain].rev, notes: {} }).status, 'REFUSED', 'its chain waits for its own pair');
+  const q = project('t-receipt-legacy', { 'src/auth.js': 'v0\n' });
+  const lk = key('src/auth.js');
+  write(q.root, 'src/auth.js', 'v1\n');
+  seed(q.root, s2 => { s2.acks = { [lk]: sha('v1\n') }; s2.riskyReviews = { [lk]: Date.now() }; s2.plans = { [lk]: plan(q) }; }); // (a receipt from before versions were recorded)
+  setPair({ single: [reviewAnswer([], { cls: risky })] });
+  const legacy = await review.review(q.root, { files: ['src/auth.js'], taskFile: q.taskFile });
+  assert.strictEqual(legacy.status, 'DONE', legacy.text);
+  assert.ok(stateOf(q.root).escalations[lk], 'a receipt without a version never spares a pair');
+});
+
+test('Muse can use a risky file shown whole without it being pasted twice, while a diff-only file\'s copy stays inline, and its BUG is recorded', async () => {
+  const museSpec = path.join(HOME, 'muse-spec-whole.json');
+  const museLog = path.join(HOME, 'muse-calls-whole.jsonl');
+  Object.assign(process.env, { FAKE_MUSE_SPEC: museSpec, FAKE_MUSE_LOG: museLog });
+  const config = JSON.parse(fs.readFileSync(state.files.config(), 'utf8'));
+  fs.writeFileSync(state.files.config(), JSON.stringify({ ...config, museCommand: [process.execPath, path.join(__dirname, 'fake-muse.js')], museVerified: '9.9.9-test', museSkills: ['bundled:git'] }));
+  assert.ok(state.update(state.files.global(), g => { g.muse = true; delete g.museCooldownUntil; }).ok);
+  const lines = sentinel => Array.from({ length: 30 }, (_, i) => (i === 27 ? sentinel : `line ${i + 1}`));
+  const pay = lines('PAY-SENTINEL refund once');
+  const helper = lines('HELPER-SENTINEL format amounts');
+  const p = project('t-whole', { 'src/pay.js': `${pay.join('\n')}\n`, 'src/helper.js': `${helper.join('\n')}\n` });
+  write(p.root, 'src/pay.js', `${['changed', ...pay.slice(1)].join('\n')}\n`);
+  write(p.root, 'src/helper.js', `${['changed', ...helper.slice(1)].join('\n')}\n`);
+  const [kp, kh] = [key('src/pay.js'), key('src/helper.js')];
+  const changed = (rel, text) => ({ ...pending(rel), baseline: snapshotOf(p.root, `${text.join('\n')}\n`) }); // (edits, shown as diffs)
+  seed(p.root, s => { s.changes = { [kp]: changed('src/pay.js', pay), [kh]: changed('src/helper.js', helper) }; s.plans = { [kp]: plan(p) }; });
+  setPair({ A: [reviewAnswer()], xA: [marks([['B1', 'CONFIRM']])] });
+  fs.writeFileSync(museSpec, JSON.stringify({ exec: [{ text: reviewAnswer([finding('a refund is paid twice', 'src/pay.js:28', { severity: 'HIGH', test: 'pay once' })]) }] }));
+  fs.rmSync(museLog, { force: true });
+  const r = await review.review(p.root, { session: 'A', files: ['src/pay.js'], taskFile: p.taskFile, risky: true });
+  assert.strictEqual(r.status, 'DONE', r.text);
+  const sent = fs.readFileSync(museLog, 'utf8').split('\n').filter(Boolean).map(JSON.parse).find(c => c.args[0] === 'exec' && c.args.includes('meta')).prompt;
+  const [shown, inline] = sent.split('## The listed copies, inline');
+  assert.match(sent, /use only what this prompt holds: the files it shows whole, and the copies inline at the end/);
+  assert.ok(shown.includes('PAY-SENTINEL') && !inline.includes('PAY-SENTINEL'), 'the risky file is shown whole once, not pasted again');
+  assert.ok(!shown.includes('HELPER-SENTINEL') && inline.includes('HELPER-SENTINEL'), 'the diff-only file\'s copy is inline');
+  const bugs = Object.values(stateOf(p.root).chains[r.chain].findings).map(f => [f.title, f.label, f.status]);
+  assert.deepStrictEqual(bugs, [['a refund is paid twice', 'BUG', 'open']]);
+  assert.ok(state.update(state.files.global(), g => { delete g.muse; }).ok);
+});
+
+test('a requirement only one side rated unmet follows that side\'s own findings, even when a merged pair names it through the other side', () => {
+  const a = JSON.parse(reviewAnswer([], { reqs: rows('NOT_MET', 'MET') }));
+  const b = JSON.parse(reviewAnswer([], { reqs: rows('MET', 'MET') }));
+  const found = { A: { A1: finding('R1 is NOT MET', '-', { reqs: ['R1'] }), A2: finding('slow query', 'src/a.js:3') }, B: { B1: finding('slow query', 'src/a.js:3', { reqs: ['R1'] }) } };
+  const m = pair.merge(a, b, found, { A: JSON.parse(marks([['B1', 'SAME_AS', 'A2']])).marks,
+    B: JSON.parse(marks([['A1', 'DISPUTE', null, 'src/a.js:9 meets R1'], ['A2', 'SAME_AS', 'B1']])).marks });
+  assert.deepStrictEqual(m.requirements.map(r => r.status), ['MET', 'MET'], 'A\'s only finding naming R1 was disputed, so B\'s MET stands');
 });

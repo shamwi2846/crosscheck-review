@@ -40,7 +40,7 @@ const waitFor = async file => { for (let i = 0; i < 500 && !fs.existsSync(file);
 const json = value => ({ text: JSON.stringify(value) });
 const reviewAnswer = (findings = [], over = {}) => json({ verdict: findings.length ? 'ISSUES_FOUND' : 'NO_ISSUES', findings,
   requirements: [{ id: 'R1', status: 'MET', evidence: 'it is there' }], possibly_missing: [], class: { level: 'normal', files: [], why: 'plain' }, coverage: 'all', ...over });
-const marks = list => json({ marks: list.map(([id, mark]) => ({ id, mark, evidence: mark === 'DISPUTE' ? 'no' : '', same_as: null })) });
+const marks = list => json({ marks: list.map(([id, mark]) => ({ id, mark, label: mark === 'CONFIRM' ? 'BUG' : null, evidence: mark === 'DISPUTE' ? 'no' : '', same_as: null })) });
 const testCase = (id, covers, test = `tests/${id}.test.js`) => ({ id, severity: 'HIGH', covers, reqs: ['R1'], input: 'an order', expected: 'it has a stop', test_file: test, test_name: id });
 const denial = a => (a && a.hookSpecificOutput && a.hookSpecificOutput.permissionDecision === 'deny' ? a.hookSpecificOutput.permissionDecisionReason : null);
 
