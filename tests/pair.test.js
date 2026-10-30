@@ -562,7 +562,7 @@ test('Muse can use a risky file shown whole without it being pasted twice, while
   assert.strictEqual(r.status, 'DONE', r.text);
   const sent = fs.readFileSync(museLog, 'utf8').split('\n').filter(Boolean).map(JSON.parse).find(c => c.args[0] === 'exec' && c.args.includes('meta')).prompt;
   const [shown, inline] = sent.split('## The listed copies, inline');
-  assert.match(sent, /use only what this prompt holds: the files it shows whole, and the copies inline at the end/);
+  assert.match(sent, /The files shown whole and the copies inline at the end are already here; use the tools for any other file/);
   assert.ok(shown.includes('PAY-SENTINEL') && !inline.includes('PAY-SENTINEL'), 'the risky file is shown whole once, not pasted again');
   assert.ok(!shown.includes('HELPER-SENTINEL') && inline.includes('HELPER-SENTINEL'), 'the diff-only file\'s copy is inline');
   const bugs = Object.values(stateOf(p.root).chains[r.chain].findings).map(f => [f.title, f.label, f.status]);

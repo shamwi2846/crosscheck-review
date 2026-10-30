@@ -240,9 +240,10 @@ for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) {
 // its output open, the run ends CLOSE_GRACE_MS after it exits, so they can't hang it. `onProcesses(pids)` hears the
 // run's processes once they are noted, and again whenever more are found (a computer run's desktop record keeps
 // them). `stopOn(chunk)` sees the output as it comes and may return a reason to stop the run, which is its failure.
-function spawnRun(program, args, { name = 'Codex', input = '', timeoutMs, onSpawn, onProcesses, stopOn } = {}) {
+// `env`: variables added for this child alone (Muse's docs settings), on top of the inherited environment.
+function spawnRun(program, args, { name = 'Codex', input = '', timeoutMs, onSpawn, onProcesses, stopOn, env = null } = {}) {
   return new Promise(resolve => {
-    const child = spawn(program, args, { windowsHide: true, detached: process.platform !== 'win32' });
+    const child = spawn(program, args, { windowsHide: true, detached: process.platform !== 'win32', ...(env ? { env: { ...process.env, ...env } } : {}) });
     const run = { child, since: Date.now(), known: [[child.pid, null]] };
     running.add(run);
     if (onSpawn) onSpawn(child);

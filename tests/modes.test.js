@@ -738,3 +738,59 @@ test('a tracked risky plan that names its own path is never pasted again for Mus
   assert.ok(inline.includes('### src/order.js\n') && !inline.includes('### notes/plan.md'), inline.slice(0, 300));
   assert.ok(state.update(state.files.global(), g => { delete g.muse; }).ok);
 });
+
+// (what Muse's file tool answered, call by call, in each run that called it)
+const fileAnswers = name => fs.readFileSync(path.join(HOME, `muse-calls-${name}.jsonl`), 'utf8').split('\n').filter(Boolean).map(JSON.parse).filter(c => c.fileCalls).map(c => c.fileCalls);
+const call = (name, args) => ({ name, arguments: args });
+
+test('Muse\'s file calls keep a review\'s frozen copy, in its first review and its cross-check, and never reach the plan under review', async () => {
+  // (a risky code review: the reviewed file changes while Muse's first run waits; Muse reads and searches it by its
+  // own name and through a folder link, then again in its cross-check)
+  const root = project('t8a', { 'src/payments.js': 'p0\n' });
+  fs.writeFileSync(path.join(root, 'src/payments.js'), 'FROZEN-REVISION refund once\nsecond line\n');
+  fs.symlinkSync(path.join(root, 'src'), path.join(root, 'alias'), 'junction');
+  const t = review.sessionTask(root, 'A');
+  seed(root, s => { s.plans = { [key('src/payments.js')]: { task: t.id, reqHash: t.reqHash, at: 1, cases: [], tests: [], why: 'covered' } }; });
+  const reads = [call('read_file', { path: 'src/payments.js' }), call('read_file', { path: 'src/payments.js', start_line: 1, end_line: 1 }),
+    call('read_file', { path: 'alias/payments.js' }), call('search', { text: 'FROZEN-REVISION' }), call('search', { text: 'LIVE-REVISION' })];
+  const hold = fs.mkdtempSync(path.join(HOME, 't8a-hold-'));
+  const bug = { severity: 'HIGH', title: 'a refund can be paid twice', location: 'src/payments.js:1', trigger: 't', harm: 'lost money', failure: 'f', fix: 'x', test: 'pay once', label: 'BUG', reqs: [] };
+  museWith('t8a', [{ hold, calls: reads, ...reviewAnswer() }, { calls: reads, ...marks([['A1', 'CONFIRM']]) }]);
+  setSpec({ byPrompt: [{ match: 'reviewer A. Check', answers: [reviewAnswer([bug])] }] });
+  const child = spawn(process.execPath, [CLI, 'review', '--files', 'src/payments.js', '--risky'], { cwd: root, env: env('A'), stdio: ['ignore', 'pipe', 'ignore'] });
+  let out = '';
+  child.stdout.on('data', d => { out += d; });
+  const exited = new Promise(resolve => child.on('close', resolve));
+  await waitFor(path.join(hold, 'started'));
+  fs.writeFileSync(path.join(root, 'src/payments.js'), 'LIVE-REVISION refund twice\n');
+  fs.writeFileSync(path.join(hold, 'go'), '');
+  assert.strictEqual(await exited, 0, out);
+  const answered = fileAnswers('t8a');
+  assert.strictEqual(answered.length, 2, 'the first review and the cross-check each called the tool');
+  for (const [a, b, c, d, e] of answered) {
+    assert.ok(a.includes('FROZEN-REVISION refund once') && b === 'src/payments.js, lines 1-1 of 3:\nFROZEN-REVISION refund once' && c.includes('FROZEN-REVISION'), [a, b, c].join(' | '));
+    assert.ok(d.includes('payments.js:1: FROZEN-REVISION') && e === 'No match.', [d, e].join(' | '));
+    assert.ok(![a, b, c, d, e].some(x => x.includes('LIVE-REVISION')), 'the live revision never reaches Muse');
+  }
+  const logs = filesUnder(state.projectDir(root)).filter(f => path.basename(f) === 'muse-files.log');
+  const logged = logs.flatMap(f => fs.readFileSync(f, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l).answer));
+  assert.ok(logs.length === 1 && logged.length === 10 && logged.some(a => a.includes('FROZEN-REVISION')) && !logged.some(a => a.includes('LIVE-REVISION')), 'every answer is logged, none live');
+  assert.ok(stateOf(root).changes[key('src/payments.js')], 'the live revision stays pending');
+  // (a risky plan review: the plan file, tracked, changes while Muse's run waits; Muse asks for it by its name and a link)
+  const P = '# Plan\n\nPLAN-LITERAL: move the stop loss into src/order.js.\n';
+  const plan = project('t8b', { 'notes/plan.md': P, 'src/order.js': 'order\n' });
+  fs.symlinkSync(path.join(plan, 'notes'), path.join(plan, 'notesalias'), 'junction');
+  const hold2 = fs.mkdtempSync(path.join(HOME, 't8b-hold-'));
+  museWith('t8b', [{ hold: hold2, calls: [call('read_file', { path: 'notes/plan.md' }), call('read_file', { path: 'notesalias/plan.md' }), call('search', { text: 'PLAN-LITERAL' })], ...reviewAnswer() }]);
+  setSpec({ byPrompt: [{ match: 'reviewer A. Check', answers: [reviewAnswer()] }] });
+  const run = planRun(plan, path.join(plan, 'notes', 'plan.md'));
+  await waitFor(path.join(hold2, 'started'));
+  fs.writeFileSync(path.join(plan, 'notes', 'plan.md'), `${P}LIVE-PLAN-EDIT drop the stop loss.\n`);
+  fs.writeFileSync(path.join(hold2, 'go'), '');
+  assert.strictEqual(await run.exited, 0, run.out);
+  const [[own, linked, searched]] = fileAnswers('t8b');
+  assert.deepStrictEqual([own, linked], ['notes/plan.md: already in your prompt (the plan under review)', 'notesalias/plan.md: already in your prompt (the plan under review)']);
+  assert.strictEqual(searched, 'No match.', 'the plan adds no search result');
+  assert.ok(planRecord(plan, P), 'the plan as read is the one recorded');
+  assert.ok(state.update(state.files.global(), g => { delete g.muse; }).ok);
+});

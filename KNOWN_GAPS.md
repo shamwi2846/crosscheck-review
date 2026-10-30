@@ -613,3 +613,39 @@ Findings left unfixed on purpose. Entries are never deleted, only marked fixed.
 - Fix: Give modes.targetsOf the same segment-based outside check as src/review.js (export and reuse outsidePath, or repeat the .. / ../ test there), with no other change.
 - Log: 20261030205514-f75593
 - Why skipped: pair: confirmed by A
+
+## G69 · open · 2026-10-30 · MEDIUM
+- Task: Muse reads the project itself: a read-only file tool, the MQL5 docs, training on
+- Where: src/muse-files.js:39-43
+- Problem: F2: Frozen-file reads bypass the secrets and git eligibility checks
+- Trigger: Muse requests a secrets-named alias to a reviewed file, or a reviewed path is redirected to an ignored in-project location.
+- Fix: Apply unsendable to the requested and resolved names before returning a frozen copy.
+- Log: 20261030231119-1b43d2
+- Why skipped: pair: disputed by B: src/muse-files.js:37-40: located first requires the real path inside the project, and the frozen branch reads fs.readFileSync(frozen) (the snapshot), never at.real, so an ineligible or secrets-named alias cannot return the ignored or redirected target's content; the same frozen copy is already in Muse's prompt, shown whole or inline by freeze/inlined in src/review.js:470-480. It discloses nothing the run does not already hold.
+
+## G70 · fixed · 2026-10-30 · LOW
+- Task: Muse reads the project itself: a read-only file tool, the MQL5 docs, training on
+- Where: src/muse-files.js:28-31
+- Problem: F3: File listing does not validate resolved paths
+- Trigger: A tracked directory becomes a junction to an ignored or outside-project directory, as in T1.
+- Fix: Resolve each listing candidate and filter using both names; update T1 to assert that the forbidden pathname disappears.
+- Log: 20261030231119-1b43d2
+- Why skipped: pair: confirmed by B
+
+## G71 · fixed · 2026-10-30 · LOW
+- Task: Muse reads the project itself: a read-only file tool, the MQL5 docs, training on
+- Where: DESIGN.md
+- Problem: F5: DESIGN.md still says Muse has no tools in the cross-check rationale
+- Trigger: A reader consults DESIGN.md section 7 (Pairs) for what Muse's cross-check can check after this change.
+- Fix: Reword that parenthetical to say Muse marks UNCLEAR only for what its prompt and its read-only tools still cannot settle.
+- Log: 20261030231119-1b43d2
+- Why skipped: pair: confirmed by A
+
+## G72 · fixed · 2026-10-30 · MEDIUM
+- Task: Muse reads the project itself: a read-only file tool, the MQL5 docs, training on
+- Where: -
+- Problem: F6: R5 is PARTIAL
+- Trigger: the task as asked
+- Fix: -
+- Log: 20261030231119-1b43d2
+- Why skipped: pair: disputed by A: The task explicitly assigns removal of the files round to step 2, and the supplied evidence identifies this change as step 1. src/review.js:462-481 updates tool guidance while retaining that deferred machinery. Its presence at this intermediate step is planned scope, not an unmet-requirement BUG.
