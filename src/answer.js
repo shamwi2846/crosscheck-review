@@ -199,7 +199,7 @@ function render(answer) {
   for (const f of answer.followups || []) lines.push(`${f.id} ${f.status}: ${f.reason}`);
   for (const f of answer.findings) {
     lines.push(`[${f.severity}] ${f.label}${f.id ? ` ${f.id}` : ''}: ${f.title} (${f.location})`);
-    lines.push(`  trigger: ${f.trigger}`, `  harm: ${f.harm}`, `  fix: ${f.fix}${f.test ? ` · test: ${f.test}` : ''}`);
+    lines.push(`  trigger: ${f.trigger}`, `  harm: ${f.harm}`, `  failure: ${f.failure}`, `  fix: ${f.fix}${f.test ? ` · test: ${f.test}` : ''}`);
     if (f.agreement) lines.push(`  pair: ${f.agreement}`); // (a paired review: who found it, and any dispute's evidence)
   }
   // (the requirements this change doesn't touch share a line: a long task's rows once pushed the findings out of view)

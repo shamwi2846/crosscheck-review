@@ -14,6 +14,7 @@ const pair = require('./pair');
 const muse = require('./muse');
 const { planKey } = require('./hook');
 
+const CLI = `node "${path.join(__dirname, 'crosscheck.js')}"`;
 const { refused, fence } = review;
 const failed = r => ({ status: r.status, unavailable: r.status === 'GPT_UNAVAILABLE' || !!r.unavailable, text: `${r.status}: ${r.why}`, bundle: r.bundle });
 
@@ -95,6 +96,26 @@ keep: the ids of the plan's cases that stand. dropped: each case you drop, with 
 added: the realistic loss paths the plan and the existing tests miss, ids M1, M2, ... in order, each with the fields of a case: severity (CRITICAL, HIGH or MEDIUM); covers: target paths exactly as listed; reqs: requirement ids; input; expected; test_file (a path inside the project) and test_name.
 no_case: for each target no final case covers, the concrete reason it needs none. not_worth_testing: one line.`;
 
+// The project files a text names: each file git lists whose path it holds whole, relative (with / or \ and an
+// optional ./) or under the project's own path, in any letter case on Windows, so a name with a space or without an
+// extension counts too (src/a.js inside lib/src/a.js or src/a.json doesn't).
+function namedFiles(root, text) {
+  const plain = state.pathKey(text).split(`${state.pathKey(root)}/`).join(' ');
+  return review.listedFiles(root).map(rel => [rel, state.pathKey(rel)]).filter(([, k]) => plain.includes(k)
+    && new RegExp(`(?<![\\w./-])(?:\\./)?${review.escapeRe(k)}(?![\\w/-]|\\.\\w)`).test(plain)).map(([rel]) => rel);
+}
+
+// Of `paths`, the project files git lists, once each, with forward slashes: an ignored file (a .env with its keys)
+// or a link to a file elsewhere never counts, so its content never reaches Muse.
+function projectFiles(root, paths) {
+  const listed = new Set(review.listedFiles(root).map(state.pathKey));
+  return [...new Set(paths.map(p => path.relative(root, path.resolve(root, p)).replace(/\\/g, '/')))]
+    .filter(p => listed.has(state.pathKey(p)) && review.insideProject(root, path.resolve(root, p)));
+}
+
+// Files inline for Muse, which has no tools: each under its path, fenced.
+const inlineFiles = (root, files) => files.map(p => `### ${p}\n${fence(review.textOf(fs.readFileSync(path.resolve(root, p))))}`).join('\n\n') || 'None.';
+
 // Muse's check of GPT's test plan: the same task, targets and context, GPT's plan, and inline the files it may read
 // (the targets and context files, the test files GPT's cases name, any project file GPT's reasons cite, and every test
 // file that mentions a target's name, found apart from GPT). Its final plan replaces GPT's only after passing every
@@ -102,12 +123,11 @@ no_case: for each target no final case covers, the concrete reason it needs none
 async function museCheck(root, { task, rels, context, plan }) {
   const why = await muse.ready();
   if (why) return { plan, notes: [`Muse didn't check the plan: ${why}`] };
-  const cited = `${plan.no_case.map(n => n.why).join(' ')} ${plan.not_worth_testing}`.match(/[\w./\\-]+\.[A-Za-z0-9]+/g) || [];
+  const cited = namedFiles(root, `${plan.no_case.map(n => n.why).join(' ')} ${plan.not_worth_testing}`);
   const tests = review.callersOf(root, rels, new Set()).filter(p => /(^|\/)(tests?|spec|__tests__)\/|\.(test|spec)\.[^/]+$/i.test(p));
-  const files = [...new Set([...rels, ...context, ...plan.cases.map(c => c.test_file.trim()), ...cited, ...tests].map(p => p.replace(/\\/g, '/')))]
-    .filter(p => { const abs = path.resolve(root, p); return fs.existsSync(abs) && fs.statSync(abs).isFile() && review.insideProject(root, abs); });
+  const files = projectFiles(root, [...rels, ...context, ...plan.cases.map(c => c.test_file.trim()), ...cited, ...tests]);
   const prompt = `${TESTPLAN_CHECK_RULES}\n\n## Task requirements\n${task.requirements}\n\n## Target files\n${rels.map(r => `- ${r}`).join('\n')}\n\n`
-    + `## The plan\n${fence(JSON.stringify(plan, null, 2))}\n\n## The files, inline\n${files.map(p => `### ${p}\n${fence(review.textOf(fs.readFileSync(path.resolve(root, p))))}`).join('\n\n') || 'None.'}\n`;
+    + `## The plan\n${fence(JSON.stringify(plan, null, 2))}\n\n## The files, inline\n${inlineFiles(root, files)}\n`;
   // (as for a review: material past the limit is GPT's alone, so GPT's plan never waits on a Muse run bound to fail)
   if (prompt.length > review.MUSE_PROMPT_MAX) return { plan, notes: ['Muse didn\'t check the plan: the material is too large for its prompt'] };
   const manifest = bundleFor(root, 'testplan_check', prompt);
@@ -172,14 +192,25 @@ async function plan(root, { file, taskFile, risky, skipWhy }) {
   const prompt = `${PLAN_RULES}\n\n## Task requirements\n${task ? task.requirements : 'No task file: rate no requirement.'}\n\n`
     + `## Project lessons (confirmed past mistakes)\n${gaps.lessons(root).trim() || 'None.'}\n\n## The plan (${name})\n${fence(text)}\n`;
   const manifest = bundleFor(root, 'review', prompt, { files: [name], task });
-  // (a pair's cross-check passes its own `asked`; the plan's comes from the manifest)
-  const r = risky
-    ? await pair.runPair({ prompt, materialize: review.findingsOf, runOne: (p, options) => review.run(root, manifest, p, { ...options, effort: 'xhigh' }) })
-    : await review.run(root, manifest, prompt, { effort: 'high' });
-  if (r.status !== 'OK') return failed({ ...r, bundle: manifest.dir });
+  // (a pair's cross-check passes its own `asked`; the plan's comes from the manifest. A risky plan is GPT A + Muse B
+  // while the switch is on, as a code review is, with the files the plan names inline for Muse; when Muse can't take
+  // part, a second GPT takes its seat)
+  const museOn = risky && !!(state.read(state.files.global()).data || {}).muse;
+  let museOut = museOn ? await muse.ready() : null;
+  const musePrompt = museOn && !museOut ? `${review.MUSE_NO_TOOLS}\n\n${prompt}\n\n## The files the plan names, inline\n${inlineFiles(root, projectFiles(root, namedFiles(root, text)))}\n` : null;
+  if (musePrompt && musePrompt.length > review.MUSE_PROMPT_MAX) museOut = 'the material is too large for its prompt';
+  else if (musePrompt) fs.writeFileSync(path.join(manifest.dir, 'prompt-muse.md'), musePrompt);
+  let r;
+  if (museOn && !museOut) ({ result: r, museOut } = await review.withMuse(root, { manifest: { ...manifest, paired: true }, prompt, musePrompt }));
+  else r = risky ? await review.gptPair(root, manifest, prompt) : await review.run(root, manifest, prompt, { effort: 'high' });
+  const note = museOut ? `\nMuse didn't take part: ${museOut}` : '';
+  if (r.status !== 'OK') {
+    const out = failed({ ...r, bundle: manifest.dir });
+    return { ...out, text: `${out.text}${note}` };
+  }
   const problem = record({ verdict: r.answer.verdict, bundle: manifest.dir });
-  if (problem) return refused(problem);
-  return { status: 'DONE', text: `${answer.render({ ...r.answer, findings: review.findingsOf(r.answer) })}\nrecorded: this exact plan text may leave plan mode; a revised plan needs another review, or a plan skip with its reason.` };
+  if (problem) return refused(`${problem}${note}`);
+  return { status: 'DONE', text: `${answer.render({ ...r.answer, findings: review.findingsOf(r.answer) })}${note}\nrecorded: this exact plan text may leave plan mode. A revision needs another review only when it adds new risky scope (money, data, security, an interface, anything irreversible); one that only adopts these points or narrows scope: ${CLI} plan --skip --why "adopts the review's points" --file <plan.md>.` };
 }
 
 // The simple jobs: one input, one answer shape, shown as text. `write` saves its document as a draft, unapplied.

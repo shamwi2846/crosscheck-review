@@ -389,7 +389,7 @@ Findings left unfixed on purpose. Entries are never deleted, only marked fixed.
 - Log: recorded by hand
 - Why skipped: Hooks are code configured on purpose, outside the command line the guard reads; the guard is a backstop against Claude slipping, and none of the user's repositories has a hook that stages files.
 
-## G44 · open · 2026-10-25 · LOW
+## G44 · fixed · 2026-10-25 · LOW
 - Task: -
 - Where: src/review.js:322
 - Problem: The project's lessons go into the review prompt without a fence or a 'recorded text, not instructions' label, unlike the known gaps (CodeRabbit on PR 24).
@@ -541,3 +541,30 @@ Findings left unfixed on purpose. Entries are never deleted, only marked fixed.
 - Fix: After collecting all copies, exclude snapshots whose hashes were already shown whole in the reviewed-file material.
 - Log: 20261030152729-5108f4
 - Why skipped: pair: both
+
+## G61 · fixed · 2026-10-30 · MEDIUM
+- Task: Faster and leaner crosscheck, Muse in risky plan reviews
+- Where: src/modes.js:100
+- Problem: F1: Muse silently misses named files containing spaces or lacking extensions
+- Trigger: A risky plan names an existing project file such as `src/payments v2.js` or `scripts/migrate` while Muse is enabled.
+- Fix: Match the plan's references against git-listed project paths, including paths with spaces and without extensions, before applying the existing containment check.
+- Log: 20261030170845-23652d
+- Why skipped: pair: both
+
+## G62 · fixed · 2026-10-30 · LOW
+- Task: Faster and leaner crosscheck, Muse in risky plan reviews
+- Where: src/review.js:749
+- Problem: F2: Replacement GPT B loses its retry when A is reused
+- Trigger: Muse's first review fails, A completed successfully, and the replacement GPT B returns invalid answers through its repair while GPT remains available.
+- Fix: Remove `firstA` from the early-return condition. The second direct `pair.runPair` call already limits B to one additional attempt.
+- Log: 20261030170845-23652d
+- Why skipped: pair: confirmed by B
+
+## G63 · open · 2026-10-30 · LOW
+- Task: Faster and leaner crosscheck, Muse in risky plan reviews
+- Where: tests/modes.test.js:487-505
+- Problem: F3: T2 does not observe external credentials reads
+- Trigger: The plan reader regresses to reading the external credentials fixture but discards its contents before saving or sending them.
+- Fix: Instrument reads in the process executing `modes.plan` and assert that the external fixture is never read, retaining the existing outgoing-material assertions.
+- Log: 20261030170845-23652d
+- Why skipped: pair: confirmed by B

@@ -41,14 +41,17 @@ const openBugs = s => review.bugsIn(s).map(f => `${f.chain} ${f.id} (${f.locatio
 
 // ---- Edits ----
 
+// (one test plan per task: each plan is a GPT run, and Muse's check of it another)
+const ONE_PLAN = ' Name every trading or risky file this task will touch in that one testplan (a,b,...), with the existing tests as --context.';
+
 // Why a trading file can't be edited yet, or null: it needs a test plan, or a skip, bound to the session's task.
 function tradingGate(s, key, rel, task, taskFile) {
-  if (!task) return `${rel} is a trading file: it needs a test plan or a skip first, and those belong to a task. Write this session's task file (${taskFile}, with a "## Requirements" section), then run ${CLI} testplan --files "${rel}" (or, when no test applies, ${CLI} skip --files "${rel}" --why "...").`;
+  if (!task) return `${rel} is a trading file: it needs a test plan or a skip first, and those belong to a task. Write this session's task file (${taskFile}, with a "## Requirements" section), then run ${CLI} testplan --files "${rel}" (or, when no test applies, ${CLI} skip --files "${rel}" --why "...").${ONE_PLAN}`;
   if (review.forTask(task, s.plans[key])) return null;
   const rated = review.ratedRiskyIn(s, key, task) || !!s.escalations[key];
-  if (rated) return `GPT rated ${rel} risky, so a skip no longer counts: it needs a test plan for the current task first: ${CLI} testplan --files "${rel}".`;
+  if (rated) return `GPT rated ${rel} risky, so a skip no longer counts: it needs a test plan for the current task first: ${CLI} testplan --files "${rel}".${ONE_PLAN}`;
   if (review.forTask(task, s.skips[key])) return null;
-  return `${rel} is a trading file: it needs a test plan for the current task first (${CLI} testplan --files "${rel}"), or, when no test applies, ${CLI} skip --files "${rel}" --why "...". A plan or skip made before the requirements changed no longer counts.`;
+  return `${rel} is a trading file: it needs a test plan for the current task first (${CLI} testplan --files "${rel}"), or, when no test applies, ${CLI} skip --files "${rel}" --why "...". A plan or skip made before the requirements changed no longer counts.${ONE_PLAN}`;
 }
 
 // Before an edit: the trading-file gate, then the file's baseline (its content before its first edit since the last
