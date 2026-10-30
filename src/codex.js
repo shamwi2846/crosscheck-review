@@ -235,19 +235,21 @@ for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) {
   if (os.constants.signals[signal]) process.on(signal, () => process.exit(130)); // (exit stops the runs)
 }
 
-// Starts Codex with the prompt on stdin. Resolves { stdout, stderr, failure } (failure: null, 'TIMEOUT' or a
-// reason) once everything the run started has been stopped. If processes Codex leaves behind hold its output
-// open, the run ends CLOSE_GRACE_MS after Codex exits, so they can't hang it. `onProcesses(pids)` hears the run's
-// processes once they are noted, and again whenever more are found (a computer run's desktop record keeps them).
-function spawnCodex(args, prompt, timeoutMs, onSpawn, onProcesses) {
+// Starts a model's CLI (`name`: Codex or Muse) with `input` on stdin. Resolves { stdout, stderr, failure } (failure:
+// null, 'TIMEOUT' or a reason) once everything the run started has been stopped. If processes it leaves behind hold
+// its output open, the run ends CLOSE_GRACE_MS after it exits, so they can't hang it. `onProcesses(pids)` hears the
+// run's processes once they are noted, and again whenever more are found (a computer run's desktop record keeps
+// them). `stopOn(chunk)` sees the output as it comes and may return a reason to stop the run, which is its failure.
+function spawnRun(program, args, { name = 'Codex', input = '', timeoutMs, onSpawn, onProcesses, stopOn } = {}) {
   return new Promise(resolve => {
-    const child = spawn(process.execPath, args, { windowsHide: true, detached: process.platform !== 'win32' });
+    const child = spawn(program, args, { windowsHide: true, detached: process.platform !== 'win32' });
     const run = { child, since: Date.now(), known: [[child.pid, null]] };
     running.add(run);
     if (onSpawn) onSpawn(child);
     const output = { stdout: '', stderr: '' };
     let noteTries = process.platform === 'win32' ? 3 : 0;
     let timedOut = false;
+    let stoppedFor = null;
     let settled = false;
     let grace;
     const timer = setTimeout(() => { timedOut = true; stopRun(run); }, timeoutMs);
@@ -257,6 +259,11 @@ function spawnCodex(args, prompt, timeoutMs, onSpawn, onProcesses) {
       ? setInterval(() => { const rows = processTable(); if (rows.length && noteProcesses(run, rows)) onProcesses(pids()); }, WATCH_MS) : null;
     const collect = stream => d => {
       output[stream] += d;
+      const why = stream === 'stdout' && stopOn && !stoppedFor ? stopOn(d) : null;
+      if (why) {
+        stoppedFor = why;
+        stopRun(run);
+      }
       if (noteTries > 0) { // (the process table may fail to load: the next output tries again, three times in all)
         const rows = processTable();
         noteTries = rows.length ? 0 : noteTries - 1;
@@ -268,7 +275,7 @@ function spawnCodex(args, prompt, timeoutMs, onSpawn, onProcesses) {
     child.stderr.setEncoding('utf8');
     child.stdout.on('data', collect('stdout'));
     child.stderr.on('data', collect('stderr'));
-    const failureFor = code => (timedOut ? 'TIMEOUT' : code === 0 ? null : `Codex exited with ${code}`);
+    const failureFor = code => (timedOut ? 'TIMEOUT' : stoppedFor || (code === 0 ? null : `${name} exited with ${code}`));
     const settle = failure => {
       if (settled) return;
       settled = true;
@@ -279,7 +286,7 @@ function spawnCodex(args, prompt, timeoutMs, onSpawn, onProcesses) {
       running.delete(run);
       resolve({ ...output, failure });
     };
-    child.on('error', e => settle(`Codex could not start (${e.message})`));
+    child.on('error', e => settle(`${name} could not start (${e.message})`));
     child.on('exit', code => {
       grace = setTimeout(() => {
         child.stdout.destroy();
@@ -288,8 +295,8 @@ function spawnCodex(args, prompt, timeoutMs, onSpawn, onProcesses) {
       }, CLOSE_GRACE_MS);
     });
     child.on('close', code => settle(failureFor(code))); // (all its output has been read)
-    child.stdin.on('error', () => {}); // (Codex may exit before reading the prompt)
-    child.stdin.end(prompt);
+    child.stdin.on('error', () => {}); // (it may exit before reading its input)
+    child.stdin.end(input);
   });
 }
 
@@ -336,7 +343,7 @@ async function runOnce(request) {
     }
     const args = buildArgs({ ...request, outFile, schemaFile, cwd: request.cwd || process.cwd() });
     const timeoutMs = request.timeoutMs || (TIMEOUT_MINUTES[request.effort] || 30) * 60000;
-    const { stdout, stderr, failure } = await spawnCodex(args, request.prompt, timeoutMs, request.onSpawn, request.onProcesses);
+    const { stdout, stderr, failure } = await spawnRun(process.execPath, args, { input: request.prompt, timeoutMs, onSpawn: request.onSpawn, onProcesses: request.onProcesses });
     let text = '';
     try { text = fs.readFileSync(outFile, 'utf8'); } catch {}
     const problem = failure || (text.trim() ? null : 'GPT returned no answer');
@@ -392,4 +399,4 @@ async function ask(request) {
   return result;
 }
 
-module.exports = { buildArgs, computerLockdown, ask, docsServer, CU_PLUGINS, CU_SERVERS, ISOLATION_OFF };
+module.exports = { buildArgs, computerLockdown, ask, docsServer, spawnRun, TIMEOUT_MINUTES, COOLDOWN_MS, CU_PLUGINS, CU_SERVERS, ISOLATION_OFF };

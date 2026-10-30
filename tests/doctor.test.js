@@ -15,8 +15,10 @@ const SPEC = path.join(HOME, 'spec.json');
 const LOG = path.join(HOME, 'calls.jsonl');
 const PROFILE = path.join(HOME, 'profile');
 const CLAUDE = path.join(HOME, 'fake-claude.js'); // (a supported Claude Code, as install records how it found it)
+const MUSE_SPEC = path.join(HOME, 'muse-spec.json');
+const MUSE_LOG = path.join(HOME, 'muse-calls.jsonl');
 Object.assign(process.env, { CROSSCHECK_HOME: path.join(HOME, 'state'), CLAUDE_CONFIG_DIR: PROFILE, CODEX_HOME: path.join(HOME, 'codex'),
-  FAKE_CODEX_SPEC: SPEC, FAKE_CODEX_LOG: LOG });
+  FAKE_CODEX_SPEC: SPEC, FAKE_CODEX_LOG: LOG, FAKE_MUSE_SPEC: MUSE_SPEC, FAKE_MUSE_LOG: MUSE_LOG });
 fs.mkdirSync(process.env.CROSSCHECK_HOME, { recursive: true });
 fs.writeFileSync(CLAUDE, 'process.stdout.write("2.1.299 (Claude Code)\\n");');
 const state = require('../src/state');
@@ -241,4 +243,27 @@ test('doctor probes and usage indicator follow the fast switch', async () => {
     }
     assert.match(line(live.stdout, 'Read-only'), /^ok /);
   }
+});
+
+test('a Muse that writes the probe file fails doctor --live, whatever it reports, and loses its verification', async () => {
+  const fake = { museCommand: [process.execPath, path.join(__dirname, 'fake-muse.js')] };
+  await freshInstall({ ...fake, museVerified: '9.9.9-test', museSkills: ['bundled:git'] });
+  assert.ok(state.update(state.files.global(), g => { g.muse = true; }).ok);
+  const setMuse = spec => { fs.writeFileSync(MUSE_SPEC, JSON.stringify(spec)); fs.rmSync(MUSE_LOG, { force: true }); };
+  setSpec([probe('probe.txt'), probe('probe-resumed.txt')]);
+  setMuse({ exec: [{ write: true, text: 'The write was refused: I have no tools.' }] }); // (and a clean session record)
+  const r = doctor(true);
+  assert.strictEqual(r.status, 1, r.stdout);
+  assert.match(line(r.stdout, 'Muse verified'), /^PROBLEM .*Muse WROTE the probe file/);
+  const now = configNow();
+  assert.deepStrictEqual([now.museVerified, now.museSkills, now.codexVerified], [undefined, undefined, '0.162.1'], 'only Muse loses its verification');
+  const wrote = fs.readFileSync(MUSE_LOG, 'utf8').split('\n').filter(Boolean).map(JSON.parse).find(c => c.wrote).wrote;
+  assert.ok(!fs.existsSync(path.dirname(path.dirname(wrote))), 'the probe folder is removed');
+  // (a Muse that writes nothing, with a clean record, passes and is verified with its skills)
+  setSpec([probe('probe.txt'), probe('probe-resumed.txt')]);
+  setMuse({ exec: [{ text: 'I have no tools, so I could not create it.' }] });
+  const clean = doctor(true);
+  assert.strictEqual(clean.status, 0, clean.stdout);
+  assert.deepStrictEqual([configNow().museVerified, configNow().museSkills], ['9.9.9-test', ['bundled:git']]);
+  assert.ok(state.update(state.files.global(), g => { delete g.muse; }).ok);
 });

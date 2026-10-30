@@ -11,6 +11,7 @@ const answer = require('./answer');
 const review = require('./review');
 const gaps = require('./gaps');
 const pair = require('./pair');
+const muse = require('./muse');
 const { planKey } = require('./hook');
 
 const { refused, fence } = review;
@@ -65,24 +66,57 @@ async function testplan(root, { taskFile, files, context = [] }) {
     + `## Target files\n${rels.map(r => `- ${r}${fs.existsSync(path.join(root, r)) ? '' : ' (new)'}`).join('\n')}\n\n## Context files\n${context.map(c => `- ${c}`).join('\n') || 'None.'}\n`;
   const r = await ask(root, 'testplan', prompt, { asked: { targets: rels, linkIds: task.ids }, effort: 'xhigh', docs });
   if (r.status !== 'OK') return failed(r);
-  // (the answer's check made sure every target has a case or one reason)
+  // (while the switch is on, Muse checks GPT's plan; the final plan passed the same checks either way: every target has
+  // a case or one reason)
+  const checked = (state.read(state.files.global()).data || {}).muse ? await museCheck(root, { task, rels, context, plan: r.answer }) : { plan: r.answer, notes: [] };
+  const plan = checked.plan;
   const done = state.update(state.files.project(root), data => {
     const s = review.withMaps(data);
     const now = review.taskInfo(taskFile);
     if (!now || now.reqHash !== task.reqHash) return 'the task\'s requirements changed while GPT designed the cases, so nothing was stored: run testplan again';
     for (const rel of rels) {
-      const cases = r.answer.cases.filter(c => c.covers.includes(rel));
-      const none = r.answer.no_case.find(n => n.target === rel);
+      const cases = plan.cases.filter(c => c.covers.includes(rel));
+      const none = plan.no_case.find(n => n.target === rel);
       s.plans[state.pathKey(rel)] = { task: task.id, reqHash: task.reqHash, at: Date.now(),
-        cases: cases.map(c => ({ id: c.id, text: `[${c.severity}] ${c.input} -> ${c.expected} (${c.reqs.join(', ')})`, test: `${c.test_file} — ${c.test_name}` })),
+        cases: cases.map(c => ({ id: c.id, text: `[${c.severity}] ${c.input} -> ${c.expected} (${c.reqs.join(', ')})`, test: `${c.test_file} — ${c.test_name}`, ...(c.by ? { by: c.by } : {}) })),
         tests: [...new Set(cases.map(c => c.test_file.trim().replace(/\\/g, '/')))], ...(none ? { why: none.why.trim() } : {}) };
     }
     return null;
   });
   if (!done.ok || done.value) return refused(done.why || done.value);
-  return { status: 'DONE', text: [...r.answer.cases.map(c => `${c.id} [${c.severity}] covers ${c.covers.join(', ')} (${c.reqs.join(', ')}): ${c.input} -> ${c.expected} (test: ${c.test_file} — ${c.test_name})`),
-    ...r.answer.no_case.map(n => `no case for ${n.target}: ${n.why.trim()}`),
-    `not worth testing: ${r.answer.not_worth_testing}`, `stored as this task's test plan of: ${rels.join(', ')}`].join('\n') };
+  return { status: 'DONE', text: [...plan.cases.map(c => `${c.id}${c.by ? ' (Muse)' : ''} [${c.severity}] covers ${c.covers.join(', ')} (${c.reqs.join(', ')}): ${c.input} -> ${c.expected} (test: ${c.test_file} — ${c.test_name})`),
+    ...plan.no_case.map(n => `no case for ${n.target}: ${n.why.trim()}`),
+    `not worth testing: ${plan.not_worth_testing}`, ...checked.notes, `stored as this task's test plan of: ${rels.join(', ')}`].join('\n') };
+}
+
+const TESTPLAN_CHECK_RULES = `You check another reviewer's test plan for a change, before its code is written. You have no tools: the files you may read are inline at the end; nothing else of the project is available to you.
+The plan's cases are realistic ways the change could lose money, lose data or open a security hole (rare ones included) that no existing test already catches; at most 5 in all, and only as many as earn their cost.
+keep: the ids of the plan's cases that stand. dropped: each case you drop, with why; drop one only to make room for a case of yours that matters more, when the plan would otherwise pass 5 cases. Every case of the plan is kept or dropped, once.
+added: the realistic loss paths the plan and the existing tests miss, ids M1, M2, ... in order, each with the fields of a case: severity (CRITICAL, HIGH or MEDIUM); covers: target paths exactly as listed; reqs: requirement ids; input; expected; test_file (a path inside the project) and test_name.
+no_case: for each target no final case covers, the concrete reason it needs none. not_worth_testing: one line.`;
+
+// Muse's check of GPT's test plan: the same task, targets and context, GPT's plan, and inline the files it may read
+// (the targets and context files, the test files GPT's cases name, any project file GPT's reasons cite, and every test
+// file that mentions a target's name, found apart from GPT). Its final plan replaces GPT's only after passing every
+// check of a plan (with its one repair); else GPT's plan stands and the notes say why. Returns { plan, notes }.
+async function museCheck(root, { task, rels, context, plan }) {
+  const why = await muse.ready();
+  if (why) return { plan, notes: [`Muse didn't check the plan: ${why}`] };
+  const cited = `${plan.no_case.map(n => n.why).join(' ')} ${plan.not_worth_testing}`.match(/[\w./\\-]+\.[A-Za-z0-9]+/g) || [];
+  const tests = review.callersOf(root, rels, new Set()).filter(p => /(^|\/)(tests?|spec|__tests__)\/|\.(test|spec)\.[^/]+$/i.test(p));
+  const files = [...new Set([...rels, ...context, ...plan.cases.map(c => c.test_file.trim()), ...cited, ...tests].map(p => p.replace(/\\/g, '/')))]
+    .filter(p => { const abs = path.resolve(root, p); return fs.existsSync(abs) && fs.statSync(abs).isFile() && review.insideProject(root, abs); });
+  const prompt = `${TESTPLAN_CHECK_RULES}\n\n## Task requirements\n${task.requirements}\n\n## Target files\n${rels.map(r => `- ${r}`).join('\n')}\n\n`
+    + `## The plan\n${fence(JSON.stringify(plan, null, 2))}\n\n## The files, inline\n${files.map(p => `### ${p}\n${fence(review.textOf(fs.readFileSync(path.resolve(root, p))))}`).join('\n\n') || 'None.'}\n`;
+  const manifest = bundleFor(root, 'testplan_check', prompt);
+  const r = await review.run(root, manifest, prompt, { kind: 'testplan_check', asked: { targets: rels, linkIds: task.ids, cases: plan.cases }, effort: 'xhigh', reviewer: 'muse' });
+  if (r.status !== 'OK') return { plan, notes: [`Muse didn't check the plan: ${r.why}`] };
+  const a = r.answer;
+  return {
+    plan: { cases: [...plan.cases.filter(c => a.keep.includes(c.id)), ...a.added.map(c => ({ ...c, by: 'muse' }))], no_case: a.no_case,
+      not_worth_testing: `${plan.not_worth_testing} / Muse: ${a.not_worth_testing}` },
+    notes: [`Muse checked the plan: ${a.added.length} case(s) added${a.dropped.length ? `, dropped: ${a.dropped.map(d => `${d.id} (${d.why})`).join('; ')}` : ''}`],
+  };
 }
 
 // Records that files need no test plan in this task; refused once GPT rated one risky in it, or while it is escalated.

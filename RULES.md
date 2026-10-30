@@ -63,3 +63,4 @@ When an external tool's behavior matters and is uncertain, check its docs and ru
 - If GPT is unavailable, run the fallback-reviewer agent on the handed-off bundle, record its answer, and tell the user. A risky file still waits for a paired review once GPT is back.
 - Screen: avoid it (files, logs, CLI tools and APIs first; MT5 logs and tester reports are files). Delegate screen control to GPT; use your own screen tools only when delegating is clearly worse, in a window you open with its reason.
 - Long documents are drafted by GPT and checked by you; short texts you write yourself.
+- While `crosscheck muse on`, Muse Wonder Full is reviewer B next to GPT in every review and checks test plans; treat its findings like GPT's. "Muse didn't take part" means GPT covered its seat: nothing to do unless it says to run `doctor --live`.

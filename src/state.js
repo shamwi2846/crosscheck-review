@@ -221,6 +221,7 @@ const DEFAULT_CONFIG = {
   model: 'gpt-6.1-sol',
   windowsSandbox: 'unelevated',
   codexJs: path.join(process.env.APPDATA || '', 'npm', 'node_modules', '@openai', 'codex', 'bin', 'codex.js'),
+  museDir: path.join(process.env.LOCALAPPDATA || '', 'Programs', 'muse'), // (where Muse Code's installer puts it)
 };
 
 // The config: the defaults, overridden by config.json (written once at install).

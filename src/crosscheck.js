@@ -9,6 +9,7 @@ const review = require('./review');
 const gaps = require('./gaps');
 const pair = require('./pair');
 const modes = require('./modes');
+const muse = require('./muse');
 
 const CLI = `node "${__filename}"`;
 const USAGE = `Usage: crosscheck <command>
@@ -24,6 +25,7 @@ const USAGE = `Usage: crosscheck <command>
   lesson --text "..."
   on | off                                         (only when the user asks)
   fast on | fast off                               (Codex's Fast tier for every GPT run: faster, higher usage)
+  muse on | muse off                               (Muse Wonder Full as reviewer B in every review and test plan; doctor --live verifies it)
   testplan --files a,b [--context c,d]             (at most 5 cases, or GPT's reason for none, stored as the files' plan for this task)
   skip --files a,b --why "..."                     (no test plan needed for these files in this task)
   plan --file plan.md [--risky] | plan --skip --why "..." --file plan.md
@@ -129,6 +131,7 @@ function statusCommand(args) {
   const shared = g.data || {};
   const lines = [`project: ${root}`, `crosscheck: ${g.unreadable ? `the shared state can't be read (${g.unreadable})` : shared.off ? 'OFF' : 'on'}`];
   if (shared.fast) lines.push('GPT speed: Fast (higher usage)');
+  if (shared.muse) lines.push(`Muse: ${muse.status().info}`);
   if (shared.cooldownUntil > Date.now()) lines.push(`GPT is cooling down until ${new Date(shared.cooldownUntil).toLocaleTimeString()}: ${shared.cooldownReason}`);
   lines.push(`session: ${session || 'none (outside Claude Code: use --task and name the files)'}`);
   lines.push(`task file: ${taskFile ? `${taskFile}${fs.existsSync(taskFile) ? '' : ' (not written yet)'}` : 'none'}`);
@@ -195,6 +198,14 @@ function fastCommand(args) {
     fast ? 'GPT speed: Fast (higher usage), until `crosscheck fast off`' : 'GPT speed: normal');
 }
 
+// Muse Wonder Full as reviewer B in every review and as the checker of every test plan, next to GPT.
+function museCommand(args) {
+  if (args._.length !== 2 || !['on', 'off'].includes(args._[1])) throw new Usage('muse takes on or off');
+  const on = args._[1] === 'on';
+  const saved = state.update(state.files.global(), g => { g.muse = on; });
+  return done(saved, on ? `Muse: ${muse.status().info}` : 'Muse: off (GPT reviews alone)');
+}
+
 async function computerCommand(args) {
   return reported(await modes.computer(where(args).root, { task: args.task }), false);
 }
@@ -255,20 +266,20 @@ async function simpleCommand(args) {
   return reported(await modes.simple(root, kind, input, { material }), false);
 }
 
-const COMMANDS = { review: reviewCommand, close: closeCommand, status: statusCommand, gap: gapCommand, lesson: lessonCommand, on: switchCommand, off: switchCommand, fast: fastCommand,
+const COMMANDS = { review: reviewCommand, close: closeCommand, status: statusCommand, gap: gapCommand, lesson: lessonCommand, on: switchCommand, off: switchCommand, fast: fastCommand, muse: museCommand,
   testplan: testplanCommand, skip: skipCommand, plan: planCommand, idea: simpleCommand, digest: simpleCommand, research: simpleCommand, write: simpleCommand,
   computer: computerCommand, 'allow-screen': allowScreenCommand, doctor: doctorCommand };
 // The options each command takes; any other is wrong usage, so a typo never silently changes what runs.
 const OPTIONS = {
   review: ['files', 'risky', 'full', 'evidence-file', 'followup', 'file', 'fallback', 'answer', 'skip', 'why', 'task'],
-  close: ['note', 'task'], status: ['task'], lesson: ['text', 'task'], on: [], off: [], fast: [],
+  close: ['note', 'task'], status: ['task'], lesson: ['text', 'task'], on: [], off: [], fast: [], muse: [],
   gap: ['fixed', 'real-bug', 'add', 'where', 'problem', 'why', 'severity', 'trigger', 'fix', 'log', 'task'],
   testplan: ['files', 'context', 'task'], skip: ['files', 'why', 'task'], plan: ['file', 'risky', 'skip', 'why', 'task'],
   idea: ['file'], digest: ['files', 'dir', 'question'], research: ['question'], write: ['brief'], computer: ['task'], 'allow-screen': ['why'], doctor: ['live'],
 };
 // The plain words a command takes after its name; any other is wrong usage too (`skip --files a b` once skipped
 // only a).
-const WORDS = { close: 1, gap: 1, fast: 1 };
+const WORDS = { close: 1, gap: 1, fast: 1, muse: 1 };
 
 // Runs one command line. Returns { code, text }; it never throws.
 async function main(argv) {

@@ -398,7 +398,7 @@ Findings left unfixed on purpose. Entries are never deleted, only marked fixed.
 - Log: recorded by hand
 - Why skipped: Older than this change, and the lessons hold only lines Claude records itself with crosscheck's lesson command; it gets its own look rather than widening this pull request.
 
-## G45 · open · 2026-10-26 · LOW
+## G45 · fixed · 2026-10-26 · LOW
 - Task: Fixes from the 2026-10-26 review of the chats: status as a commit preflight, busy files left out, test plan first
 - Where: src/review.js:625-639
 - Problem: F3: Failed reviews omit the held-file notice
@@ -487,3 +487,48 @@ Findings left unfixed on purpose. Entries are never deleted, only marked fixed.
 - Fix: -
 - Log: recorded by hand
 - Why skipped: A timing flake in a test; the gate errs toward keeping the desktop held, never toward two operators on one screen. When it fails, rerun it alone before treating it as a regression.
+
+## G55 · fixed · 2026-10-30 · HIGH
+- Task: Muse Wonder Full as a second reviewer, behind a switch
+- Where: tests/muse.test.js:37
+- Problem: F1: T1 cannot detect removal of privacy safeguards
+- Trigger: The contributor-mode override is removed from READ_ONLY while the user's Muse setting enables contributor mode.
+- Fix: Assert the required launch flags against independent literal expectations, including '--contributor-mode off', for both preflight and model calls. — test: Remove the contributor-mode override and confirm T1 fails; restore it and confirm T1 passes.
+- Log: 20261030122925-565033
+- Why skipped: pair: both
+
+## G56 · fixed · 2026-10-30 · MEDIUM
+- Task: Muse Wonder Full as a second reviewer, behind a switch
+- Where: src/muse.js:219-236
+- Problem: F2: Live probes bypass Muse's cooldown
+- Trigger: Run doctor --live during an active Muse cooldown, or have its Muse probe encounter a usage or login failure.
+- Fix: Check Muse's cooldown before probing and record a Muse-only cooldown when the probe reports a usage or login failure.
+- Log: 20261030122925-565033
+- Why skipped: pair: both
+
+## G57 · fixed · 2026-10-30 · MEDIUM
+- Task: Muse Wonder Full as a second reviewer, behind a switch
+- Where: src/muse.js:148
+- Problem: F3: Nonzero exits hide Muse's reported failure reason
+- Trigger: Muse emits a terminal failure explaining a login or usage problem and exits with code 1, as the supplied stub does.
+- Fix: Preserve timeout and watchdog reasons, but prefer the terminal failure reason over a generic nonzero-exit message.
+- Log: 20261030122925-565033
+- Why skipped: pair: both
+
+## G58 · fixed · 2026-10-30 · LOW
+- Task: Muse Wonder Full as a second reviewer, behind a switch
+- Where: src/muse.js:248
+- Problem: F4: Doctor omits installation and version information while Muse is off
+- Trigger: Run doctor with the default Muse switch state, or after muse off.
+- Fix: Include installation and version information in doctor's Muse check regardless of the switch, while keeping model probes conditional on the switch.
+- Log: 20261030122925-565033
+- Why skipped: pair: both
+
+## G59 · fixed · 2026-10-30 · LOW
+- Task: Muse Wonder Full as a second reviewer, behind a switch
+- Where: src/review.js:735-740
+- Problem: F3: G45 now also suppresses Muse's required fallback disclosure
+- Trigger: Muse fails, the GPT fallback succeeds, and applying the answer is refused because the state lock is busy or required state cannot be read.
+- Fix: Append note to applyAndSummarize's refusal text.
+- Log: 20261030125102-78deb1
+- Why skipped: pair: both

@@ -9,6 +9,7 @@ const { spawnSync } = require('child_process');
 const state = require('./state');
 const codex = require('./codex');
 const answer = require('./answer');
+const muse = require('./muse');
 
 const MIN_CLAUDE = [2, 1, 295]; // (the first Claude Code that honors a hook's "onFailure": "block")
 const run = (cmd, args) => spawnSync(cmd, args, { encoding: 'utf8', windowsHide: true, timeout: 60000 });
@@ -116,6 +117,7 @@ function checks() {
     return [!missing.length, missing.length ? `missing: ${missing.join(', ')}` : `${docs.command} ${docs.args.join(' ')}`];
   });
   if ((state.read(state.files.global()).data || {}).fast) check('GPT speed', () => [true, 'Fast (higher usage)']);
+  check('Muse', () => { const s = muse.status(); return [s.ok, s.info]; });
   check('Hook problems', () => {
     const log = path.join(state.HOME, 'hooks.log');
     const recent = fs.existsSync(log) ? fs.readFileSync(log, 'utf8').split('\n').filter(l => Date.parse(l.slice(0, 24)) > Date.now() - 86400000) : [];
@@ -199,6 +201,17 @@ async function doctor({ live: liveToo = false } = {}) {
       Object.assign(verified, { ok: false, info: `no version is verified: GPT could write in a read-only run of ${before.version || 'Codex'}` });
     } else if (!same) {
       Object.assign(verified, { ok: false, info: 'Codex changed during the checks, so nothing was verified: run doctor --live again' });
+    }
+    // (only while the switch is on: the probe is a real Muse run)
+    if ((state.read(state.files.global()).data || {}).muse) {
+      let checked;
+      try {
+        checked = await muse.probe();
+      } catch (e) {
+        checked = { ok: false, info: `the probe failed: ${e.message}` };
+      }
+      results.push({ name: 'Muse verified', ...checked });
+      Object.assign(results.find(r => r.name === 'Muse'), muse.status()); // (what the probe changed: verified, or no longer)
     }
   }
   return { ok: results.every(r => r.ok), text: results.map(r => `${r.ok ? 'ok     ' : 'PROBLEM'} ${r.name}: ${r.info}`).join('\n') };

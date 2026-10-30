@@ -88,16 +88,23 @@ function merge(a, b, found, marks) {
   };
 }
 
-// Runs a pair on a frozen bundle's prompt. `runOne(prompt, options)` runs one reviewer (review.js's run, with one
-// repair); `materialize(answer)` gives an answer's findings with its unmet rows among them. Returns
-// { status: 'OK', answer, session, pairComplete: true }, or { status: 'PAIR_INCOMPLETE', why, unavailable } where
-// `unavailable` says GPT itself was unavailable (a usage limit, a login problem, a timeout), for the fallback.
-async function runPair({ prompt, runOne, materialize }) {
+// Runs a pair on a frozen bundle's prompt. `runOne(prompt, options, side)` runs one reviewer (review.js's run, with
+// one repair); `materialize(answer)` gives an answer's findings with its unmet rows among them. Reviewer B may read
+// its own version of the prompt (`promptB`: Muse's, with the material inline), and a finished first review of
+// reviewer A may be reused (`firstA`), so A never runs twice. Returns { status: 'OK', answer, session,
+// pairComplete: true }, or { status: 'PAIR_INCOMPLETE', why, unavailable, step, whyB, firstA } where `unavailable`
+// says GPT itself was unavailable (a usage limit, a login problem, a timeout), for the fallback, `step` says which
+// step failed, `whyB` why reviewer B's run in it failed (null when it didn't, even if A's did too), and `firstA` is A's
+// first review if it completed.
+async function runPair({ prompt, promptB = prompt, runOne, materialize, firstA = null }) {
+  const prompts = { A: prompt, B: promptB };
+  const first = await Promise.all(['A', 'B'].map(side => (side === 'A' && firstA ? firstA
+    : runOne(`${prompts[side]}\n\n${ROLES[side]}`, { label: `1-${side}` }, side))));
   // (`unavailable` looks at both sides' runs: one side's bad answer mustn't hide that GPT was down for the other)
   const failed = (side, step, r, runs) => ({ status: 'PAIR_INCOMPLETE', unavailable: runs.some(x => x.status === 'GPT_UNAVAILABLE'),
-    why: `reviewer ${side}'s ${step} didn't complete (${r.why}), so nothing was recorded` });
+    why: `reviewer ${side}'s ${step} didn't complete (${r.why}), so nothing was recorded`, step, whyB: runs[1].status === 'OK' ? null : runs[1].why,
+    firstA: first[0].status === 'OK' ? first[0] : null });
   const reviews = {};
-  const first = await Promise.all(['A', 'B'].map(side => runOne(`${prompt}\n\n${ROLES[side]}`, { label: `1-${side}` })));
   for (const [i, side] of ['A', 'B'].entries()) {
     if (first[i].status !== 'OK') return failed(side, 'review', first[i], first);
     if (!first[i].session) return failed(side, 'review', { why: 'no session to resume for the cross-check' }, first);
@@ -112,7 +119,7 @@ async function runPair({ prompt, runOne, materialize }) {
   const checks = await Promise.all(['A', 'B'].map(side => runOne(crosscheckPrompt(side, found), {
     label: `2-${side}`, resume: reviews[side].session, strict: true, kind: 'crosscheck',
     asked: { otherIds: Object.keys(found[other(side)]), ownIds: Object.keys(found[side]) },
-  })));
+  }, side)));
   for (const [i, side] of ['A', 'B'].entries()) if (checks[i].status !== 'OK') return failed(side, 'cross-check', checks[i], checks);
   const answer = merge(reviews.A.answer, reviews.B.answer, found, { A: checks[0].answer.marks, B: checks[1].answer.marks });
   return { status: 'OK', answer, session: reviews.A.session, pairComplete: true };

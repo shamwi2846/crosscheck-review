@@ -514,3 +514,49 @@ test('an automatic gap write cannot acknowledge a shell edit made during the rev
 });
 
 test.after(() => fs.rmSync(HOME, { recursive: true, force: true }));
+
+test('Muse\'s inline material ignores a snapshot path written into the reviewed code: the task\'s private notes never reach it', async () => {
+  const { root, taskFile } = project('t-muse', { 'src/a.js': 'a0\n' });
+  const museSpec = path.join(HOME, 'muse-spec.json');
+  const museLog = path.join(HOME, 'muse-calls.jsonl');
+  Object.assign(process.env, { FAKE_MUSE_SPEC: museSpec, FAKE_MUSE_LOG: museLog });
+  const config = JSON.parse(fs.readFileSync(state.files.config(), 'utf8'));
+  fs.writeFileSync(state.files.config(), JSON.stringify({ ...config, museCommand: [process.execPath, path.join(__dirname, 'fake-muse.js')], museVerified: '9.9.9-test', museSkills: ['bundled:git'] }));
+  assert.ok(state.update(state.files.global(), g => { g.muse = true; }).ok);
+  // (the task file's snapshot, which every review freezes, holds the Notes: Claude's reasoning, never a reviewer's)
+  const taskSnapshot = path.join(state.projectDir(root), 'snap', sha(fs.readFileSync(taskFile)));
+  fs.writeFileSync(path.join(root, 'src/a.js'), `// see\n// ${taskSnapshot}\nmodule.exports = 'REVIEWED-CODE';\n`);
+  setSpec({ exec: [{ text: answerOf() }] }); // (GPT A, clean: no cross-check)
+  fs.writeFileSync(museSpec, JSON.stringify({ exec: [{ text: answerOf() }] }));
+  fs.rmSync(museLog, { force: true });
+  const r = await review.review(root, { session: 'A', files: ['src/a.js'], taskFile });
+  assert.strictEqual(r.status, 'DONE', r.text);
+  const sent = fs.readFileSync(museLog, 'utf8').split('\n').filter(Boolean).map(JSON.parse).find(c => c.args[0] === 'exec' && c.args.includes('meta')).prompt;
+  assert.ok(sent.includes("module.exports = 'REVIEWED-CODE'"), 'Muse got the reviewed file inline');
+  assert.ok(!sent.includes('NOTES-SENTINEL'), 'but never the task snapshot the code named');
+  assert.ok(state.update(state.files.global(), g => { delete g.muse; }).ok);
+});
+
+test('a test a stored plan names through a link to somewhere outside the project is never read, so it never reaches Muse', async () => {
+  const { root, taskFile } = project('t-muse-link', { 'src/a.js': 'a0\n', 'src/local.test.js': 'LOCAL-TEST\n' });
+  const outside = fs.mkdtempSync(path.join(HOME, 'outside-'));
+  fs.writeFileSync(path.join(outside, 'ext.test.js'), 'PRIVATE-SENTINEL\n');
+  fs.symlinkSync(outside, path.join(root, 'src', 'linked'), 'junction');
+  const museSpec = path.join(HOME, 'muse-spec-link.json');
+  const museLog = path.join(HOME, 'muse-calls-link.jsonl');
+  Object.assign(process.env, { FAKE_MUSE_SPEC: museSpec, FAKE_MUSE_LOG: museLog });
+  const config = JSON.parse(fs.readFileSync(state.files.config(), 'utf8'));
+  fs.writeFileSync(state.files.config(), JSON.stringify({ ...config, museCommand: [process.execPath, path.join(__dirname, 'fake-muse.js')], museVerified: '9.9.9-test', museSkills: ['bundled:git'] }));
+  assert.ok(state.update(state.files.global(), g => { g.muse = true; }).ok);
+  fs.writeFileSync(path.join(root, 'src/a.js'), 'a1\n');
+  seed(root, s => { s.plans = { [key('src/a.js')]: { ...planFor(taskFile), tests: ['src/local.test.js', 'src/linked/ext.test.js'] } }; });
+  setSpec({ exec: [{ text: answerOf() }] });
+  fs.writeFileSync(museSpec, JSON.stringify({ exec: [{ text: answerOf() }] }));
+  fs.rmSync(museLog, { force: true });
+  const r = await review.review(root, { session: 'A', files: ['src/a.js'], taskFile });
+  assert.strictEqual(r.status, 'DONE', r.text);
+  const sent = fs.readFileSync(museLog, 'utf8').split('\n').filter(Boolean).map(JSON.parse).find(c => c.args[0] === 'exec' && c.args.includes('meta')).prompt;
+  assert.ok(sent.includes('LOCAL-TEST'), 'the plan\'s own test is inline');
+  assert.ok(!sent.includes('PRIVATE-SENTINEL') && sent.includes('frozen test src/linked/ext.test.js: (outside the project: not read)'), 'the linked one is named, never read');
+  assert.ok(state.update(state.files.global(), g => { delete g.muse; }).ok);
+});

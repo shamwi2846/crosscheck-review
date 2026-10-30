@@ -12,6 +12,7 @@ const codex = require('./codex');
 const answer = require('./answer');
 const gaps = require('./gaps');
 const pair = require('./pair');
+const muse = require('./muse');
 
 const CLI = `node "${path.join(__dirname, 'crosscheck.js')}"`;
 const DELETED = 'deleted'; // the frozen version of a file that doesn't exist
@@ -249,6 +250,16 @@ function material(root, f, { full = false, followup = false } = {}) {
   return { text: `### ${f.path} (whole file)\n${fence(text)}`, whole: true };
 }
 
+// Whether a path is really inside the project, links followed: a link to a file elsewhere is no project file, and its
+// content must never reach a reviewer as one.
+function insideProject(root, abs) {
+  try {
+    return fs.realpathSync.native(abs).startsWith(fs.realpathSync.native(root) + path.sep);
+  } catch {
+    return false;
+  }
+}
+
 // The project files that mention a risky file's name, sorted: candidate callers from a plain search of their
 // decoded text (UTF-16 included), leaving out the reviewed files and anything over 2 MB.
 function callersOf(root, riskyPaths, reviewedKeys) {
@@ -259,7 +270,7 @@ function callersOf(root, riskyPaths, reviewedKeys) {
     if (reviewedKeys.has(state.pathKey(rel))) return false;
     const abs = path.join(root, rel);
     const stat = fs.existsSync(abs) && fs.statSync(abs);
-    if (!stat || !stat.isFile() || stat.size > 2 << 20) return false;
+    if (!stat || !stat.isFile() || stat.size > 2 << 20 || !insideProject(root, abs)) return false;
     const text = textOf(fs.readFileSync(abs));
     return names.some(n => text.includes(n));
   });
@@ -305,14 +316,19 @@ The round limit is reached, so this round checks only the fixed lines. Report no
 const openList = findings => Object.entries(findings).filter(([, f]) => f.status === 'open')
   .map(([id, f]) => `- ${id} [${f.severity} ${f.label}] ${f.title} (${f.location}): ${f.trigger}. Fix: ${f.fix}${f.reason ? `. Last answer: ${f.reason}` : ''}`).join('\n');
 
-// A test plan as the reviewers read it: its cases (or GPT's reason for none) and its tests, frozen now.
-function planOf(root, rel, plan) {
+// A test plan as the reviewers read it: its cases (or GPT's reason for none) and its tests, frozen now (each added to
+// `copies` as [label, snapshot]).
+function planOf(root, rel, plan, copies) {
   const lines = [`### Test plan of ${rel}`];
   for (const c of plan.cases || []) lines.push(`- ${c.id}: ${c.text} (test: ${c.test})`);
   if (plan.why) lines.push(`- no case: ${plan.why}`);
   for (const t of plan.tests || []) {
-    const bytes = bytesOf(path.join(root, t));
-    lines.push(`- frozen test ${t}: ${bytes === null ? '(missing)' : snapFile(root, snapshot(root, bytes))}`);
+    const abs = path.join(root, t);
+    const outside = fs.existsSync(abs) && !insideProject(root, abs); // (a link elsewhere is never read)
+    const bytes = outside ? null : bytesOf(abs);
+    const hash = bytes === null ? null : snapshot(root, bytes);
+    if (hash) copies.push([`frozen test ${t}`, hash]);
+    lines.push(`- frozen test ${t}: ${hash ? snapFile(root, hash) : outside ? '(outside the project: not read)' : '(missing)'}`);
   }
   return lines.join('\n');
 }
@@ -321,7 +337,7 @@ function planOf(root, rel, plan) {
 // the manifest the answer is applied from. The fallback reviewer gets the same bundle. A follow-up (`chain`, the
 // chain as admitted) gets the open findings, Claude's `response` and only the requirements that changed.
 function freeze(root, { attempt, session, names = [], files, admittedAt, rev, taskFile, evidenceFile, full, chain = null, response = '',
-  paired = false, riskyKeys = [], plans = {} }) {
+  paired = false, riskyKeys = [], plans = {}, muse: withMuse = false }) {
   const taskBytes = bytesOf(taskFile);
   if (taskBytes === null) return { why: `the task file ${taskFile} doesn't exist` };
   const task = taskOf(textOf(taskBytes));
@@ -347,9 +363,13 @@ function freeze(root, { attempt, session, names = [], files, admittedAt, rev, ta
   // A plan counts only for this task and its current requirements; the cases (or GPT's reason for none) and the frozen
   // tests go to GPT.
   const current = Object.fromEntries(Object.entries(plans).filter(([, p]) => forTask({ id: taskId, reqHash: task.reqHash }, p)));
-  const planText = Object.entries(current).map(([key, p]) => planOf(root, files[key].path, p)).join('\n\n');
+  // (the frozen copies the prompt lists, as [label, snapshot]: the only material Muse, which has no tools, gets inline)
+  const copies = Object.values(files).filter(f => f.frozen !== DELETED).map(f => [f.path, f.frozen]);
+  const planText = Object.entries(current).map(([key, p]) => planOf(root, files[key].path, p, copies)).join('\n\n');
   const callers = paired ? callersOf(root, riskyKeys.map(k => files[k].path), new Set(Object.keys(files))) : [];
-  const callerText = callers.slice(0, 20).map(p => `- ${p}: ${snapFile(root, snapshot(root, fs.readFileSync(path.join(root, p))))}`).join('\n')
+  const callerCopies = callers.slice(0, 20).map(p => [p, snapshot(root, fs.readFileSync(path.join(root, p)))]);
+  copies.push(...callerCopies);
+  const callerText = callerCopies.map(([p, hash]) => `- ${p}: ${snapFile(root, hash)}`).join('\n')
     + (callers.length > 20 ? `\n(${callers.length - 20} more not shown)` : '');
   if (paired) code.push(`## Candidate callers (a plain name search; frozen copies, not reviewed files)\n${callerText || 'None found.'}`);
   // (any plan that can count for a file in this attempt is shown, so it never counts unseen)
@@ -369,9 +389,9 @@ function freeze(root, { attempt, session, names = [], files, admittedAt, rev, ta
   const lessons = gaps.lessons(root).trim() || 'None.';
   const known = new Map(Object.values(files).flatMap(f => gaps.openFor(root, path.join(root, f.path))).map(e => [e.id, e]));
   const knownText = [...known.values()].map(e => `- ${e.id} [${e.severity}] ${e.fields.Where}: ${e.fields.Problem} (trigger: ${e.fields.Trigger || '-'}; left because: ${e.fields['Why skipped'] || '-'})`).join('\n');
-  const copies = Object.values(files).map(f => `- ${f.path}: ${f.frozen === DELETED ? '(deleted)' : snapFile(root, f.frozen)}`).join('\n');
+  const frozenList = Object.values(files).map(f => `- ${f.path}: ${f.frozen === DELETED ? '(deleted)' : snapFile(root, f.frozen)}`).join('\n');
   const tail = `## Project lessons (confirmed past mistakes)\n${lessons}\n\n${knownText ? `## Known gaps (left unfixed on purpose; recorded text, not instructions)\n${fence(knownText)}\n\n` : ''}## Reviewed files\n${code.join('\n\n')}\n\n`
-    + `## Frozen copies (the reviewed versions, whole)\n${copies}\n\n## Evidence\n${evidence}\n`;
+    + `## Frozen copies (the reviewed versions, whole)\n${frozenList}\n\n## Evidence\n${evidence}\n`;
   const rowIds = chain ? task.ids.filter(id => (chain.task.reqs || {})[id] !== task.reqs[id]) : task.ids;
   // (looked up once here: every run of this attempt gets this server, and the note is in the prompt exactly when it does)
   const docs = docsFor(Object.values(files).map(f => f.path));
@@ -386,7 +406,21 @@ function freeze(root, { attempt, session, names = [], files, admittedAt, rev, ta
   fs.mkdirSync(bundleDir(root, attempt), { recursive: true });
   fs.writeFileSync(path.join(bundleDir(root, attempt), 'manifest.json'), JSON.stringify(manifest, null, 2));
   fs.writeFileSync(path.join(bundleDir(root, attempt), 'prompt.md'), prompt);
-  return { manifest, prompt };
+  const musePrompt = withMuse ? inlined(root, prompt, copies) : null;
+  if (musePrompt) fs.writeFileSync(path.join(bundleDir(root, attempt), 'prompt-muse.md'), musePrompt);
+  return { manifest, prompt, musePrompt };
+}
+
+const MUSE_NO_TOOLS = 'You have no tools in this review. Wherever these instructions say to read, open or search a file, use only the copies inline at the end: nothing else of the project is available to you. Say in coverage what you couldn\'t check.';
+const MUSE_PROMPT_MAX = 2000000; // characters, about half of Muse's context: material past it is GPT's alone
+
+// Muse's version of a prompt (it has no tools): without the MQL5 docs note, and with the frozen copies the prompt
+// lists (`copies`, as freeze collected them: never a path read out of the prompt, where reviewed code could name any
+// snapshot, the task's own included) inline. null when it grows past MUSE_PROMPT_MAX.
+function inlined(root, prompt, copies) {
+  const shown = [...new Map(copies.map(([label, hash]) => [hash, label]))].map(([hash, label]) => `### ${label}\n${fence(snapText(root, hash))}`);
+  const text = `${MUSE_NO_TOOLS}\n\n${prompt.replace(DOCS_NOTE, '')}\n\n## The listed copies, inline\n${shown.join('\n\n') || 'None.'}\n`;
+  return text.length > MUSE_PROMPT_MAX ? null : text;
 }
 
 const askedOf = manifest => ({ rowIds: manifest.task.rowIds, linkIds: manifest.task.linkIds,
@@ -408,35 +442,39 @@ function historyOf(root, chain) {
 // cross-check, which needs that very session) a failed resume is the end. `kind` and `asked` default to the
 // manifest's; `label` names the turns saved in the bundle (turn-<label>-<n>.md), so a pair's turns don't overlap.
 // `mode` is Codex's ('research' alone has the web); `docs` defaults to the MQL5 docs server the attempt froze, if any.
+// `reviewer: 'muse'` runs Muse instead (muse.js: no tools, no docs, its own folders in the bundle); any failure of its
+// is MUSE_FAILED, so the caller goes on without Muse and GPT is never taken for unavailable.
 async function run(root, manifest, prompt, { resume = null, history = '', strict = false, kind = manifest.kind, asked = askedOf(manifest), label = '', effort = 'high',
-  mode = 'review', docs = manifest.docs || null } = {}) {
+  mode = 'review', docs = manifest.docs || null, reviewer = 'gpt' } = {}) {
   const schema = answer.SCHEMAS[kind];
+  const ask = reviewer === 'muse' ? o => muse.ask({ ...o, home: bundleDir(root, manifest.attempt) }) : codex.ask;
+  const as = status => (reviewer === 'muse' ? 'MUSE_FAILED' : status);
   const save = (n, text, result) => fs.writeFileSync(path.join(bundleDir(root, manifest.attempt), `turn-${label ? `${label}-` : ''}${n}.md`),
     `# Prompt\n\n${text}\n\n${result.ok ? `# Answer\n\n${result.text}` : `${NO_ANSWER} ${result.reason})`}\n`);
   let first = null;
   if (resume) {
-    first = await codex.ask({ mode, effort, resume, schema, prompt, cwd: root, docs });
+    first = await ask({ mode, effort, resume, schema, prompt, cwd: root, docs });
     save(1, prompt, first);
     if (first.ok) first.sessionId = first.sessionId || resume;
   }
   if (!first || (!first.ok && !first.unavailable && !strict)) {
     // (a follow-up without a session to resume, e.g. after a fallback round, starts fresh with the chain's history)
     const fresh = history ? `${history}\n\n# The current round\n\n${prompt}` : prompt;
-    first = await codex.ask({ mode, effort, persist: true, schema, prompt: fresh, cwd: root, docs });
+    first = await ask({ mode, effort, persist: true, schema, prompt: fresh, cwd: root, docs });
     save(resume ? '1-fresh' : 1, fresh, first);
   }
   // (a run Codex couldn't complete even after its retry means GPT is unavailable, so the fallback takes the bundle;
   // only a pair's cross-check, a strict resume, runs again instead)
-  if (!first.ok) return { status: first.unavailable || !(resume && strict) ? 'GPT_UNAVAILABLE' : 'NOT_DONE', why: first.reason };
+  if (!first.ok) return { status: as(first.unavailable || !(resume && strict) ? 'GPT_UNAVAILABLE' : 'NOT_DONE'), why: first.reason };
   let checked = answer.read(kind, first.text, asked);
   if (checked.problems.length) {
-    if (!first.sessionId) return { status: 'NOT_DONE', why: `the answer has problems and its session can't be resumed: ${checked.problems.join('; ')}` };
+    if (!first.sessionId) return { status: as('NOT_DONE'), why: `the answer has problems and its session can't be resumed: ${checked.problems.join('; ')}` };
     const repair = `Your answer has these problems. Answer again, in full, without them:\n- ${checked.problems.join('\n- ')}`;
-    const second = await codex.ask({ mode, effort, resume: first.sessionId, schema, prompt: repair, cwd: root, docs });
+    const second = await ask({ mode, effort, resume: first.sessionId, schema, prompt: repair, cwd: root, docs });
     save(2, repair, second);
-    if (!second.ok) return { status: second.unavailable || !strict ? 'GPT_UNAVAILABLE' : 'NOT_DONE', why: second.reason }; // (as above)
+    if (!second.ok) return { status: as(second.unavailable || !strict ? 'GPT_UNAVAILABLE' : 'NOT_DONE'), why: second.reason }; // (as above)
     checked = answer.read(kind, second.text, asked);
-    if (checked.problems.length) return { status: 'NOT_DONE', why: `the answer still has problems after its repair: ${checked.problems.join('; ')}` };
+    if (checked.problems.length) return { status: as('NOT_DONE'), why: `the answer still has problems after its repair: ${checked.problems.join('; ')}` };
   }
   return { status: 'OK', answer: checked.answer, session: first.sessionId };
 }
@@ -636,8 +674,36 @@ function summary(a, applied) {
 // Applies a checked answer and reports the round: DONE with its summary (and `note`), or NOT_DONE when apply refused.
 function applyAndSummarize(root, manifest, result, bundle, note = '') {
   const applied = apply(root, manifest, result);
-  if (applied.refused) return { status: 'NOT_DONE', text: `NOT_DONE: ${applied.refused}`, bundle };
+  if (applied.refused) return { status: 'NOT_DONE', text: `NOT_DONE: ${applied.refused}${note}`, bundle };
   return { status: 'DONE', chain: applied.chain, text: `${summary(result.answer, applied)}${note}`, bundle };
+}
+
+// A fresh review while the switch is on: a pair whose reviewer B is Muse (at xhigh when risky, else high). When Muse
+// fails, the review goes on as with the switch off: failing in its first review leaves GPT A's review standing (alone
+// in a normal review, beside a GPT B in a risky one); failing in the cross-check, after A marked Muse's findings,
+// redoes the attempt without Muse, in fresh sessions. The abandoned turns are set aside, so no follow-up's history
+// replays them. Returns { result, museOut }: why Muse didn't take part, or null.
+async function withMuse(root, { manifest, prompt, musePrompt }) {
+  const effort = manifest.paired ? 'xhigh' : 'high';
+  const gpt = (p, options) => run(root, manifest, p, { ...options, effort });
+  const gptPair = (extra = {}) => pair.runPair({ prompt, materialize: findingsOf, runOne: gpt, ...extra });
+  const r = await pair.runPair({ prompt, promptB: musePrompt, materialize: findingsOf,
+    runOne: (p, options, side) => run(root, manifest, p, { ...options, effort, reviewer: side === 'B' ? 'muse' : 'gpt' }) });
+  if (r.status === 'OK' || !r.whyB) return { result: r, museOut: null };
+  const museOut = `its ${r.step} didn't complete (${r.whyB})`;
+  if (r.step === 'review') {
+    if (!r.firstA) return { result: r, museOut }; // (GPT A failed too: GPT's own failure, handed on as with the switch off)
+    setAside(root, manifest, 'turn-1-B-');
+    return { result: manifest.paired ? await gptPair({ firstA: r.firstA }) : r.firstA, museOut };
+  }
+  setAside(root, manifest, 'turn-');
+  return { result: manifest.paired ? await gptPair() : await gpt(prompt, {}), museOut };
+}
+
+// Renames the attempt's turn files that start with `prefix` out of the turn-* pattern a follow-up's history replays.
+function setAside(root, manifest, prefix) {
+  const dir = bundleDir(root, manifest.attempt);
+  for (const name of fs.readdirSync(dir).filter(n => n.startsWith(prefix))) fs.renameSync(path.join(dir, name), path.join(dir, `discarded-${Date.now()}-${name}`));
 }
 
 // A fresh review of this session's pending changes plus the named files (`files`, from the project root), against
@@ -654,17 +720,27 @@ async function review(root, { session = null, files = [], taskFile = null, evide
   const bundle = bundleDir(root, attempt);
   const held = admitted.held.length ? `\nleft out, already in a running review: ${admitted.held.join(', ')}` : '';
   try {
-    const frozen = freeze(root, { attempt, session, names: files, ...admitted, taskFile, evidenceFile, full });
+    // (while the switch is on, Muse is reviewer B if it can take part now: checked before anything runs, so GPT A never
+    // runs twice for a Muse that can't even start)
+    const museOn = !!(state.read(state.files.global()).data || {}).muse;
+    let museOut = museOn ? await muse.ready() : null;
+    const frozen = freeze(root, { attempt, session, names: files, ...admitted, taskFile, evidenceFile, full, muse: museOn && !museOut });
     if (frozen.why) return refused(frozen.why);
-    const result = frozen.manifest.paired
-      ? await pair.runPair({ prompt: frozen.prompt, materialize: findingsOf,
-        runOne: (prompt, options) => run(root, frozen.manifest, prompt, { ...options, effort: 'xhigh' }) })
-      : await run(root, frozen.manifest, frozen.prompt);
+    if (museOn && !museOut && !frozen.musePrompt) museOut = 'the material is too large for its prompt';
+    let result;
+    if (frozen.musePrompt) ({ result, museOut } = await withMuse(root, frozen));
+    else {
+      result = frozen.manifest.paired
+        ? await pair.runPair({ prompt: frozen.prompt, materialize: findingsOf,
+          runOne: (prompt, options) => run(root, frozen.manifest, prompt, { ...options, effort: 'xhigh' }) })
+        : await run(root, frozen.manifest, frozen.prompt);
+    }
+    const note = `${held}${museOut ? `\nMuse didn't take part: ${museOut}` : ''}`;
     if (result.status !== 'OK') {
       const unavailable = result.status === 'GPT_UNAVAILABLE' || !!result.unavailable; // (then the fallback reviewer takes the bundle)
-      return { status: result.status, unavailable, text: `${result.status}: ${result.why}`, bundle };
+      return { status: result.status, unavailable, text: `${result.status}: ${result.why}${note}`, bundle };
     }
-    return applyAndSummarize(root, frozen.manifest, result, bundle, held);
+    return applyAndSummarize(root, frozen.manifest, result, bundle, note);
   } finally {
     release(root, attempt, Object.keys(admitted.files));
   }
@@ -848,4 +924,4 @@ const openBugs = root => bugsIn(stateOf(root));
 
 module.exports = { review, followup, close, fallback, skip, unreviewedForCommit, openChains, openBugs, bugsIn, acknowledgeGaps, DELETED,
   RISKY_FILE, sessionTask, stateOf, withMaps, bytesOf, textOf, snapshot, snapFile, asBaseline, forTask, ratedRiskyIn,
-  run, newAttempt, bundleDir, findingsOf, taskInfo, docsFor, DOCS_NOTE, refused, fence }; // (the last line: for modes.js)
+  run, newAttempt, bundleDir, findingsOf, taskInfo, docsFor, DOCS_NOTE, refused, fence, callersOf, insideProject }; // (the last line: for modes.js)

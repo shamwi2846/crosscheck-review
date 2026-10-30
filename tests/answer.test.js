@@ -51,3 +51,13 @@ test('answers with missing or duplicate requirement ids, an unknown follow-up id
   }
   assert.deepStrictEqual(answer.read('review', 'not json', asked).problems, ['the answer is not JSON']);
 });
+
+test('Muse\'s check of a test plan is refused when it loses a GPT case or drops more than its own cases need', () => {
+  const testCase = id => ({ id, severity: 'HIGH', covers: ['src/a.js'], reqs: ['R1'], input: 'i', expected: 'e', test_file: 'tests/a.test.js', test_name: id });
+  const plan = { targets: ['src/a.js'], linkIds: ['R1'], cases: ['T1', 'T2', 'T3', 'T4', 'T5'].map(testCase) };
+  const check = over => answer.read('testplan_check', JSON.stringify({ keep: [], dropped: [], added: [], no_case: [], not_worth_testing: '-', ...over }), plan).problems;
+  assert.deepStrictEqual(check({ keep: ['T1', 'T2', 'T3', 'T4'], dropped: [{ id: 'T5', why: 'weaker than M1' }], added: [testCase('M1')] }), [], 'one case swapped for a better one');
+  assert.match(check({ keep: ['T1', 'T2', 'T3', 'T4'] }).join(' '), /GPT case T5 appears 0 times/, 'a case lost without a word');
+  assert.match(check({ keep: ['T1', 'T2', 'T3'], dropped: [{ id: 'T4', why: 'x' }, { id: 'T5', why: 'y' }], added: [testCase('M1')] }).join(' '), /at most 1 may go, not 2/);
+  assert.match(check({ keep: ['T1', 'T2', 'T3', 'T4'], dropped: [{ id: 'T5', why: ' ' }], added: [testCase('M1')] }).join(' '), /dropping T5 needs a reason/);
+});
