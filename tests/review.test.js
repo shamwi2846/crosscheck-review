@@ -534,6 +534,121 @@ test('an automatic gap write cannot acknowledge a shell edit made during the rev
   assert.match(denied.hookSpecificOutput.permissionDecisionReason, /differ from their last reviewed version: KNOWN_GAPS\.md/);
 });
 
+// Muse switched on through its stub, answering its runs in order; returns a reader of its model runs ({ args, prompt }).
+function museWith(name, exec) {
+  const spec = path.join(HOME, `muse-spec-${name}.json`);
+  const log = path.join(HOME, `muse-calls-${name}.jsonl`);
+  Object.assign(process.env, { FAKE_MUSE_SPEC: spec, FAKE_MUSE_LOG: log });
+  const cfg = JSON.parse(fs.readFileSync(state.files.config(), 'utf8'));
+  fs.writeFileSync(state.files.config(), JSON.stringify({ ...cfg, museCommand: [process.execPath, path.join(__dirname, 'fake-muse.js')], museVerified: '9.9.9-test', museSkills: ['bundled:git'] }));
+  assert.ok(state.update(state.files.global(), g => { g.muse = true; }).ok);
+  fs.writeFileSync(spec, JSON.stringify({ exec }));
+  return () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').split('\n').filter(Boolean).map(JSON.parse) : [])
+    .filter(c => c.args && c.args[0] === 'exec' && c.args.includes('meta'));
+}
+const museOff = () => assert.ok(state.update(state.files.global(), g => { delete g.muse; }).ok);
+const filesUnder = dir => (fs.existsSync(dir) ? fs.readdirSync(dir, { recursive: true }).map(f => path.join(dir, f)).filter(f => fs.statSync(f).isFile()) : []);
+const put = (root, rel, text) => { fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true }); fs.writeFileSync(path.join(root, rel), text); };
+
+test('a file Muse asks for is sent only when it is a git-listed, regular, non-secret project file within the limits; every other gets why not', () => {
+  const { root, git } = project('t2s', { 'src/seed.js': 's\n' });
+  const files = { 'src/app.js': 'APP-PUBLIC\n', '.env.example': 'EXAMPLE-PUBLIC\n', '.gitignore': 'ignored.txt\n', 'config/.env.production': 'ENV-SECRET\n',
+    'keys/id_ed25519': 'KEY-SECRET\n', 'keys/client.p12': 'P12-SECRET\n', 'vendor/lib.js': 'VENDOR-COMMITTED\n',
+    'big/edge.js': 'e'.repeat(512 * 1024), 'big/over.js': 'o'.repeat(512 * 1024 + 1), 'big/a.js': 'a'.repeat(500 * 1024) };
+  for (const [rel, text] of Object.entries(files)) put(root, rel, text);
+  git(['add', '-A']);
+  git(['commit', '-qm', 'files']);
+  put(root, 'src/new.js', 'NEW-PUBLIC\n'); // (new and not ignored)
+  put(root, 'ignored.txt', 'IGNORED-SECRET\n');
+  const outside = path.join(HOME, 't2s-private');
+  put(outside, 'credentials.json', 'OUTSIDE-SECRET\n');
+  put(outside, 'lib.js', 'VENDOR-OUTSIDE-SECRET\n');
+  fs.rmSync(path.join(root, 'vendor'), { recursive: true }); // (a tracked path whose folder is now a link outside)
+  fs.symlinkSync(outside, path.join(root, 'vendor'), 'junction');
+  const snap = path.join(state.projectDir(root), 'snap', 'SNAP-NAME');
+  put(path.dirname(snap), 'SNAP-NAME', 'SNAP-SECRET\n');
+  const asked = ['src/app.js', 'src/new.js', '.env.example', 'big/edge.js', 'big/a.js', 'big/over.js', 'config/.env.production', 'keys/id_ed25519', 'keys/client.p12',
+    'ignored.txt', 'src', 'src/missing.js', '../t2s-private/credentials.json', snap, 'vendor/lib.js', 'src\\app.js'];
+  const text = review.museSupply(root, { files: {} })(asked);
+  for (const [rel, sentinel] of [['src/app.js', 'APP-PUBLIC'], ['src/new.js', 'NEW-PUBLIC'], ['.env.example', 'EXAMPLE-PUBLIC'], ['big/edge.js', 'eeee']]) {
+    assert.ok(text.includes(`### ${rel}\n`) && text.includes(sentinel), `${rel} is sent`);
+  }
+  const why = {
+    'big/a.js': 'past the 1000000-character limit of one request', 'big/over.js': 'larger than 512 KB', 'config/.env.production': 'a secrets file',
+    'keys/id_ed25519': 'a secrets file', 'keys/client.p12': 'a secrets file', 'ignored.txt': 'not a file git lists for the project', src: 'not a file',
+    'src/missing.js': 'no such file', '../t2s-private/credentials.json': 'outside the project', [snap]: 'outside the project',
+    'vendor/lib.js': 'a link to somewhere outside the project', 'src\\app.js': 'asked for twice',
+  };
+  for (const [rel, reason] of Object.entries(why)) assert.ok(text.includes(`- ${rel}: ${reason}\n`), `${rel}: ${reason}`);
+  for (const secret of ['ENV-SECRET', 'KEY-SECRET', 'P12-SECRET', 'IGNORED-SECRET', 'OUTSIDE-SECRET', 'SNAP-SECRET', 'VENDOR-OUTSIDE-SECRET', 'aaaa', 'oooo']) {
+    assert.ok(!text.includes(secret), `${secret} is never sent`);
+  }
+});
+
+test('Muse\'s files round never sends a reviewed file again, even through a link or changed meanwhile, and its turns keep exactly what was sent', async () => {
+  const { root, taskFile } = project('t3f', { 'src/q.js': 'q0\n', 'src/ctx.js': 'CTX-1\n' });
+  fs.writeFileSync(path.join(root, 'src/q.js'), 'FROZEN-A\n');
+  fs.symlinkSync(path.join(root, 'src'), path.join(root, 'alias'), 'junction');
+  const hold = fs.mkdtempSync(path.join(HOME, 't3f-hold-'));
+  const asking = JSON.stringify({ ...JSON.parse(answerOf()), more_files: ['src/q.js', 'alias/q.js', 'src/ctx.js'] });
+  const runs = museWith('t3f', [{ hold, text: asking }, { text: answerOf() }]);
+  setSpec({ byPrompt: [{ match: 'reviewer A. Check', answers: [{ text: answerOf() }] }] });
+  const running = review.review(root, { files: ['src/q.js'], taskFile });
+  await waitFor(path.join(hold, 'started'));
+  fs.writeFileSync(path.join(root, 'src/q.js'), 'LIVE-PRIVATE-B\n'); // (the reviewed file changes while Muse reviews it)
+  fs.writeFileSync(path.join(hold, 'go'), '');
+  const r = await running;
+  assert.strictEqual(r.status, 'DONE', r.text);
+  const [first, files] = runs();
+  assert.ok(first.prompt.includes('## The project\'s files') && first.prompt.includes('\nsrc/ctx.js\n'), 'Muse sees the names it may ask for');
+  const session = c => c.args[c.args.indexOf('--session-id') + 1];
+  assert.strictEqual(session(files), session(first), 'one files round, in the same session');
+  assert.ok(files.prompt.includes('- src/q.js: already in your prompt\n') && files.prompt.includes('- alias/q.js: already in your prompt\n'));
+  assert.ok(files.prompt.includes('### src/ctx.js\n') && files.prompt.includes('CTX-1') && !files.prompt.includes('LIVE-PRIVATE-B'));
+  const s = stateOf(root);
+  assert.ok(s.changes[key('src/q.js')] && s.acks[key('src/q.js')] !== sha('LIVE-PRIVATE-B\n'), 'the live version stays pending');
+  fs.writeFileSync(path.join(root, 'src/ctx.js'), 'CTX-2\n');
+  const turn = fs.readFileSync(path.join(r.bundle, 'turn-1-B-files-1.md'), 'utf8');
+  assert.ok(turn.includes('CTX-1') && !turn.includes('CTX-2') && !turn.includes('LIVE-PRIVATE-B'), 'the turn keeps what was sent');
+  assert.ok(fs.existsSync(path.join(r.bundle, 'turn-1-B-1.md')), 'and Muse\'s first answer, which asked');
+  museOff();
+});
+
+test('a reviewed file recorded under a link\'s name is never sent again by its real name, even changed meanwhile', async () => {
+  const { root, taskFile } = project('t3l', { 'src/q.js': 'q0\n' });
+  fs.symlinkSync(path.join(root, 'src'), path.join(root, 'alias'), 'junction');
+  fs.writeFileSync(path.join(root, 'alias/q.js'), 'FROZEN-A\n'); // (an edit made through the link records the link's name)
+  seed(root, s => { s.changes = { [key('alias/q.js')]: change('alias/q.js', 'A', 1, null) }; });
+  const hold = fs.mkdtempSync(path.join(HOME, 't3l-hold-'));
+  const runs = museWith('t3l', [{ hold, text: JSON.stringify({ ...JSON.parse(answerOf()), more_files: ['src/q.js'] }) }, { text: answerOf() }]);
+  setSpec({ byPrompt: [{ match: 'reviewer A. Check', answers: [{ text: answerOf() }] }] });
+  const running = review.review(root, { session: 'A', taskFile });
+  await waitFor(path.join(hold, 'started'));
+  fs.writeFileSync(path.join(root, 'src/q.js'), 'LIVE-PRIVATE-B\n');
+  fs.writeFileSync(path.join(hold, 'go'), '');
+  const r = await running;
+  assert.strictEqual(r.status, 'DONE', r.text);
+  const files = runs()[1];
+  assert.ok(files.prompt.includes('- src/q.js: already in your prompt\n') && !files.prompt.includes('LIVE-PRIVATE-B'), files.prompt.slice(0, 400));
+  assert.ok(!fs.readFileSync(path.join(r.bundle, 'turn-1-B-files-1.md'), 'utf8').includes('LIVE-PRIVATE-B'));
+  museOff();
+});
+
+test('a file named for a review that is a link to somewhere outside the project is refused before anything runs or is kept', async () => {
+  const { root, taskFile } = project('t4n', { 'src/a.js': 'a\n' });
+  const outside = path.join(HOME, 't4n-private');
+  put(outside, 'credentials.js', 'CRED-SECRET\n');
+  fs.symlinkSync(outside, path.join(root, 'src', 'linked'), 'junction');
+  const runs = museWith('t4n', [{ text: answerOf() }]);
+  setSpec({ exec: [{ text: answerOf() }] });
+  const before = JSON.stringify(stateOf(root) || null);
+  const r = await review.review(root, { files: ['src/linked/credentials.js'], taskFile });
+  assert.deepStrictEqual([r.status, /src\/linked\/credentials\.js is a link to somewhere outside the project/.test(r.text)], ['REFUSED', true], r.text);
+  assert.deepStrictEqual([execCalls().length, runs().length, JSON.stringify(stateOf(root) || null)], [0, 0, before], 'nothing ran and nothing was kept');
+  assert.ok(filesUnder(state.projectDir(root)).every(f => !fs.readFileSync(f, 'utf8').includes('CRED-SECRET')));
+  museOff();
+});
+
 test.after(() => fs.rmSync(HOME, { recursive: true, force: true }));
 
 test('Muse\'s inline material ignores a snapshot path written into the reviewed code: the task\'s private notes never reach it', async () => {

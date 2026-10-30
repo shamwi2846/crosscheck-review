@@ -193,6 +193,26 @@ function read(kind, answerText, asked) {
   return { answer, problems };
 }
 
+// Muse's first review may ask for project files it wasn't shown, by path, once (DESIGN.md section 7): its shape adds
+// `more_files`, which is taken out before the answer is read as a plain one of `kind`. Returns read's result and
+// `more`, the paths asked for ([] when the answer has problems: those get their repair first).
+const MORE_FILES = 20;
+const withMoreFiles = schema => ({ ...schema, required: [...schema.required, 'more_files'], properties: { ...schema.properties, more_files: list(text) } });
+function readAsking(kind, answerText, asked) {
+  let parsed;
+  try {
+    parsed = JSON.parse(answerText);
+  } catch {
+    return { ...read(kind, answerText, asked), more: [] };
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { ...read(kind, answerText, asked), more: [] };
+  const { more_files: more = [], ...rest } = parsed;
+  const r = read(kind, JSON.stringify(rest), asked);
+  if (!Array.isArray(more) || more.some(p => typeof p !== 'string')) r.problems.push('more_files must be a list of project-relative paths');
+  else if (more.length > MORE_FILES) r.problems.push(`more_files asks for ${more.length} files; ask for at most ${MORE_FILES}`);
+  return { ...r, more: r.problems.length ? [] : more };
+}
+
 // A short readable summary of a checked answer for Claude. Findings may carry their chain id (`id`).
 function render(answer) {
   const lines = [`VERDICT: ${answer.verdict} · class ${answer.class.level}${answer.class.files.length ? ` (${answer.class.files.join(', ')})` : ''}: ${answer.class.why}`];
@@ -211,4 +231,4 @@ function render(answer) {
   return lines.join('\n');
 }
 
-module.exports = { SCHEMAS, ROUND_LIMIT, read, render, locationKey };
+module.exports = { SCHEMAS, ROUND_LIMIT, read, readAsking, withMoreFiles, render, locationKey };

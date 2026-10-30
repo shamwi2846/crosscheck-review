@@ -568,3 +568,12 @@ Findings left unfixed on purpose. Entries are never deleted, only marked fixed.
 - Fix: Instrument reads in the process executing `modes.plan` and assert that the external fixture is never read, retaining the existing outgoing-material assertions.
 - Log: 20261030170845-23652d
 - Why skipped: pair: confirmed by B
+
+## G64 · fixed · 2026-10-30 · MEDIUM
+- Task: Muse asks for the files it needs; two isolation fixes
+- Where: src/review.js:597-598
+- Problem: F2: Cancelling the files round loses its bundle record
+- Trigger: The user cancels crosscheck while Muse is answering the files round.
+- Fix: Save the files-round prompt before calling muse.ask, then update that turn with the answer or failure when the call returns.
+- Log: 20261030185118-c80437
+- Why skipped: pair: confirmed by B

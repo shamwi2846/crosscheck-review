@@ -197,11 +197,12 @@ async function plan(root, { file, taskFile, risky, skipWhy }) {
   // part, a second GPT takes its seat)
   const museOn = risky && !!(state.read(state.files.global()).data || {}).muse;
   let museOut = museOn ? await muse.ready() : null;
-  const musePrompt = museOn && !museOut ? `${review.MUSE_NO_TOOLS}\n\n${prompt}\n\n## The files the plan names, inline\n${inlineFiles(root, projectFiles(root, namedFiles(root, text)))}\n` : null;
+  const musePrompt = museOn && !museOut ? `${review.MUSE_NO_TOOLS}\n\n${prompt}\n\n${review.projectList(root)}\n\n`
+    + `## The files the plan names, inline\n${inlineFiles(root, projectFiles(root, namedFiles(root, text)))}\n` : null;
   if (musePrompt && musePrompt.length > review.MUSE_PROMPT_MAX) museOut = 'the material is too large for its prompt';
   else if (musePrompt) fs.writeFileSync(path.join(manifest.dir, 'prompt-muse.md'), musePrompt);
   let r;
-  if (museOn && !museOut) ({ result: r, museOut } = await review.withMuse(root, { manifest: { ...manifest, paired: true }, prompt, musePrompt }));
+  if (museOn && !museOut) ({ result: r, museOut } = await review.withMuse(root, { manifest: { ...manifest, paired: true }, prompt, musePrompt, planPath: path.resolve(file) }));
   else r = risky ? await review.gptPair(root, manifest, prompt) : await review.run(root, manifest, prompt, { effort: 'high' });
   const note = museOut ? `\nMuse didn't take part: ${museOut}` : '';
   if (r.status !== 'OK') {

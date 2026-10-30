@@ -56,6 +56,34 @@ test('a session that would hold a tool, personal context or a foreign skill is r
   assert.deepStrictEqual(execs(), [], 'an unverified Muse never runs');
 });
 
+test('a failed run whose record holds a tool, personal context or a foreign skill takes the verification away before any retry', async () => {
+  const clean = { text: '{"verdict":"NO_ISSUES"}' };
+  const cases = [
+    { name: 'retryable', record: { tools: ['read_memory'] }, fail: 'connection reset', held: /held tools read_memory/, runs: ['echo', 'meta'] },
+    { name: 'limit', record: { context: ['personal_rules'] }, fail: 'usage limit reached', held: /held context personal_rules/, runs: ['echo', 'meta'] },
+    { name: 'resumed', record: { skills: ['bundled:git', 'user:mine'] }, fail: 'connection reset', held: /held skills user:mine/, runs: ['meta'], resume: '0123abcd-0000-4000-8000-0000000f11e5' },
+  ];
+  for (const c of cases) {
+    config();
+    setSpec({ exec: [{ fail: c.fail, record: c.record }, clean] }); // (a clean retry could hide the first run)
+    const r = await muse.ask({ prompt: 'review this', home: bundle(`failed-${c.name}`), resume: c.resume || null });
+    assert.ok(!r.ok && c.held.test(r.reason) && /no longer verified/.test(r.reason), `${c.name}: ${r.reason}`);
+    assert.deepStrictEqual(execs().map(provider), c.runs, `${c.name}: no retry after it`);
+    const now = JSON.parse(fs.readFileSync(state.files.config(), 'utf8'));
+    assert.deepStrictEqual([now.museVerified, now.museSkills], [undefined, undefined], `${c.name}: no longer verified`);
+    setSpec({ exec: [clean] });
+    assert.match((await muse.ask({ prompt: 'review this', home: bundle(`after-${c.name}`) })).reason, /isn't verified/);
+    assert.deepStrictEqual(execs(), [], `${c.name}: nothing runs until doctor --live passes again`);
+  }
+  // (a failed run that left no record keeps its own reason, and Muse stays verified)
+  config();
+  setSpec({ exec: [{ fail: 'usage limit reached', noRecord: true }] });
+  const r = await muse.ask({ prompt: 'review this', home: bundle('failed-no-record') });
+  assert.ok(!r.ok && /usage limit reached/.test(r.reason), r.reason);
+  assert.strictEqual(JSON.parse(fs.readFileSync(state.files.config(), 'utf8')).museVerified, '9.9.9-test');
+  assert.ok(state.update(state.files.global(), g => { delete g.museCooldownUntil; }).ok);
+});
+
 test('a run looping on blank output is stopped with its child, and not retried', { timeout: 60000 }, async () => {
   config();
   const child = path.join(HOME, 'child.pid');

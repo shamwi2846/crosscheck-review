@@ -559,3 +559,58 @@ test('a risky plan whose named files are too large for Muse goes to a GPT pair a
   assert.deepStrictEqual(['reviewer A. Check', 'reviewer B. Attack'].map(m => fresh.filter(c => c.prompt.includes(m)).length), [1, 1], 'one GPT A, and a GPT B from the start');
   assert.ok(state.update(state.files.global(), g => { delete g.muse; }).ok);
 });
+
+test('a risky code or plan review waits for Muse\'s files round: only its second answer, with the file it asked for, reaches the merge', async () => {
+  for (const kind of ['review', 'plan']) {
+    const root = project(`t1f-${kind}`, { 'src/archive.js': 'copy, then delete the source\n', 'src/helper.js': 'HELPER-CODE copies in chunks\n' });
+    const where = kind === 'review' ? 'src/archive.js:1' : '-';
+    const bug = { severity: 'HIGH', title: 'the source is deleted after a partial copy', location: where, trigger: 'the copy fails midway', harm: 'lost data',
+      failure: 'the rows not yet copied are gone', fix: 'delete only after the copy is verified', test: 'a copy that fails midway keeps the source', label: 'BUG', reqs: [] };
+    const hold = fs.mkdtempSync(path.join(HOME, `t1f-${kind}-hold-`));
+    // (Muse's first answer is clean and asks for the helper; its answer after the files round, held, finds the BUG)
+    const runs = museWith(`t1f-${kind}`, [{ text: JSON.stringify({ ...JSON.parse(reviewAnswer().text), more_files: ['src/helper.js'] }) }, { hold, ...reviewAnswer([bug]) }]);
+    const museRuns = () => fs.readFileSync(path.join(HOME, `muse-calls-t1f-${kind}.jsonl`), 'utf8').split('\n').filter(Boolean).map(JSON.parse)
+      .filter(c => c.args[0] === 'exec' && c.args.includes('meta'));
+    setSpec({ byPrompt: [{ match: 'Cross-check (you are reviewer A)', answers: [marks([['B1', 'CONFIRM']])] }, { match: 'reviewer A. Check', answers: [reviewAnswer()] }] });
+    let run;
+    let counted;
+    const P = '# Plan\n\nChange src/archive.js to delete the source after copying.\n';
+    if (kind === 'review') {
+      fs.writeFileSync(path.join(root, 'src/archive.js'), 'copy, then delete the source at once\n');
+      const t = review.sessionTask(root, 'A');
+      seed(root, s => { s.plans = { [key('src/archive.js')]: { task: t.id, reqHash: t.reqHash, at: 1, cases: [], tests: [], why: 'covered' } }; });
+      const child = spawn(process.execPath, [CLI, 'review', '--files', 'src/archive.js', '--risky'], { cwd: root, env: env('A'), stdio: ['ignore', 'pipe', 'ignore'] });
+      run = { out: '' };
+      child.stdout.on('data', d => { run.out += d; });
+      run.exited = new Promise(resolve => child.on('close', resolve));
+      counted = () => { const s = stateOf(root) || {}; return !!((s.acks || {})[key('src/archive.js')] || (s.riskyReviews || {})[key('src/archive.js')]); };
+    } else {
+      const file = path.join(HOME, 't1f-plan.md');
+      fs.writeFileSync(file, P);
+      run = planRun(root, file);
+      counted = () => !!planRecord(root, P) || !exitWith(root, P);
+    }
+    await waitFor(path.join(hold, 'started'));
+    assert.ok(!counted(), `${kind}: nothing counts while Muse answers with the files`);
+    fs.writeFileSync(path.join(hold, 'go'), '');
+    assert.strictEqual(await run.exited, 0, run.out);
+    const [first, files] = museRuns();
+    assert.strictEqual(runs().length, 2);
+    assert.ok(first.prompt.includes('## The project\'s files') && first.prompt.includes('\nsrc/helper.js\n'), `${kind}: the first prompt names the helper`);
+    const session = c => c.args[c.args.indexOf('--session-id') + 1];
+    assert.ok(session(files) === session(first) && files.prompt.includes('### src/helper.js\n') && files.prompt.includes('HELPER-CODE'), `${kind}: one files round, same session`);
+    if (kind === 'review') {
+      const s = stateOf(root);
+      const found = Object.values(s.chains[Object.keys(s.chains)[0]].findings).map(f => [f.title, f.label, f.status]);
+      assert.deepStrictEqual(found, [['the source is deleted after a partial copy', 'BUG', 'open']], 'Muse\'s second answer, confirmed by A, is what counts');
+    } else {
+      assert.strictEqual(planRecord(root, P).verdict, 'ISSUES_FOUND', 'the plan\'s verdict comes from Muse\'s second answer');
+    }
+    assert.match(run.out, /the source is deleted after a partial copy/);
+    const fresh = execCalls().filter(c => c.args[1] !== 'resume');
+    assert.strictEqual(fresh.filter(c => c.prompt.includes('reviewer A. Check')).length, 1, `${kind}: GPT A once`);
+    const turns = filesUnder(state.projectDir(root)).map(f => path.basename(f));
+    assert.ok(turns.includes('turn-1-B-1.md') && turns.includes('turn-1-B-files-1.md'), `${kind}: both Muse turns are kept`);
+    assert.ok(state.update(state.files.global(), g => { delete g.muse; }).ok);
+  }
+});
