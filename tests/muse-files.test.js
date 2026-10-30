@@ -139,4 +139,27 @@ test('a reviewed file answers from the review whatever happens to it live, and a
   await s.close();
 });
 
+test('read_file refuses every name the rule refuses, with its reason, and reads UTF-16 files in either byte order', async () => {
+  const secrets = ['.npmrc', 'deploy/.netrc', '.pgpass', 'web/.htpasswd', '.envrc', '.git-credentials', 'config/credentials.json', 'infra/prod.tfvars',
+    'infra/prod.tfvars.json', 'infra/terraform.tfstate', 'infra/terraform.tfstate.backup', 'vault.kdbx', 'config/.env.production', 'keys/id_ed25519', 'keys/client.p12'];
+  const le = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from('bool LotCapRemovedLE()\n', 'utf16le')]);
+  const be = Buffer.concat([Buffer.from([0xfe, 0xff]), Buffer.from('bool LotCapRemovedBE()\n', 'utf16le').swap16()]);
+  const root = project('t5', { '.gitignore': 'ignored.txt\n', '.env.example': 'EXAMPLE-PUBLIC\n', '..cache/x.js': 'DOTDOT-PUBLIC\n',
+    'src/RiskLe.mqh': le, 'src/RiskBe.mqh': be, ...Object.fromEntries(secrets.map(rel => [rel, `${path.basename(rel)}-SECRET\n`])) });
+  put(root, 'ignored.txt', 'IGNORED-SECRET\n');
+  const s = open(manifestFor(root));
+  for (const rel of secrets) assert.strictEqual(await s.call('read_file', { path: rel }), `${rel}: a secrets file`);
+  const why = { 'ignored.txt': 'not a file git lists for the project', src: 'not a file', 'src/missing.js': 'no such file', '../t5-other/x.js': 'outside the project' };
+  for (const [rel, reason] of Object.entries(why)) assert.strictEqual(await s.call('read_file', { path: rel }), `${rel}: ${reason}`);
+  assert.match(await s.call('read_file', { path: '.env.example' }), /EXAMPLE-PUBLIC/);
+  assert.match(await s.call('read_file', { path: '..cache/x.js' }), /DOTDOT-PUBLIC/, 'a folder whose name starts with two dots is in the project');
+  for (const [rel, line] of [['src/RiskLe.mqh', 'bool LotCapRemovedLE()'], ['src/RiskBe.mqh', 'bool LotCapRemovedBE()']]) {
+    const text = await s.call('read_file', { path: rel });
+    assert.ok(text.includes(line) && !text.includes('\u0000') && !text.includes('�'), text);
+  }
+  const all = await s.call('list_files', {});
+  assert.ok(secrets.every(rel => !all.includes(rel)) && !all.includes('ignored.txt') && all.includes('.env.example'), all);
+  await s.close();
+});
+
 test.after(() => fs.rmSync(HOME, { recursive: true, force: true }));

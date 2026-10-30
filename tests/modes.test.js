@@ -1,7 +1,7 @@
 // Tests for modes.js, step 5b (test plan P1): GPT's other jobs stay read-only (research alone has the web), a test
 // plan is checked and stored only for its task and only while the requirements hold, a skip is refused once GPT rated
 // a file risky, and the plan gate accepts only the reviewed text or a reasoned skip. They run the real CLI with the
-// recording Codex stub fake-codex.js.
+// recording Codex stub fake-codex.js, and the Muse stub fake-muse.js, which calls Muse's file tool as Muse would.
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert');
@@ -560,61 +560,6 @@ test('a risky plan whose named files are too large for Muse goes to a GPT pair a
   assert.ok(state.update(state.files.global(), g => { delete g.muse; }).ok);
 });
 
-test('a risky code or plan review waits for Muse\'s files round: only its second answer, with the file it asked for, reaches the merge', async () => {
-  for (const kind of ['review', 'plan']) {
-    const root = project(`t1f-${kind}`, { 'src/archive.js': 'copy, then delete the source\n', 'src/helper.js': 'HELPER-CODE copies in chunks\n' });
-    const where = kind === 'review' ? 'src/archive.js:1' : '-';
-    const bug = { severity: 'HIGH', title: 'the source is deleted after a partial copy', location: where, trigger: 'the copy fails midway', harm: 'lost data',
-      failure: 'the rows not yet copied are gone', fix: 'delete only after the copy is verified', test: 'a copy that fails midway keeps the source', label: 'BUG', reqs: [] };
-    const hold = fs.mkdtempSync(path.join(HOME, `t1f-${kind}-hold-`));
-    // (Muse's first answer is clean and asks for the helper; its answer after the files round, held, finds the BUG)
-    const runs = museWith(`t1f-${kind}`, [{ text: JSON.stringify({ ...JSON.parse(reviewAnswer().text), more_files: ['src/helper.js'] }) }, { hold, ...reviewAnswer([bug]) }]);
-    const museRuns = () => fs.readFileSync(path.join(HOME, `muse-calls-t1f-${kind}.jsonl`), 'utf8').split('\n').filter(Boolean).map(JSON.parse)
-      .filter(c => c.args[0] === 'exec' && c.args.includes('meta'));
-    setSpec({ byPrompt: [{ match: 'Cross-check (you are reviewer A)', answers: [marks([['B1', 'CONFIRM']])] }, { match: 'reviewer A. Check', answers: [reviewAnswer()] }] });
-    let run;
-    let counted;
-    const P = '# Plan\n\nChange src/archive.js to delete the source after copying.\n';
-    if (kind === 'review') {
-      fs.writeFileSync(path.join(root, 'src/archive.js'), 'copy, then delete the source at once\n');
-      const t = review.sessionTask(root, 'A');
-      seed(root, s => { s.plans = { [key('src/archive.js')]: { task: t.id, reqHash: t.reqHash, at: 1, cases: [], tests: [], why: 'covered' } }; });
-      const child = spawn(process.execPath, [CLI, 'review', '--files', 'src/archive.js', '--risky'], { cwd: root, env: env('A'), stdio: ['ignore', 'pipe', 'ignore'] });
-      run = { out: '' };
-      child.stdout.on('data', d => { run.out += d; });
-      run.exited = new Promise(resolve => child.on('close', resolve));
-      counted = () => { const s = stateOf(root) || {}; return !!((s.acks || {})[key('src/archive.js')] || (s.riskyReviews || {})[key('src/archive.js')]); };
-    } else {
-      const file = path.join(HOME, 't1f-plan.md');
-      fs.writeFileSync(file, P);
-      run = planRun(root, file);
-      counted = () => !!planRecord(root, P) || !exitWith(root, P);
-    }
-    await waitFor(path.join(hold, 'started'));
-    assert.ok(!counted(), `${kind}: nothing counts while Muse answers with the files`);
-    fs.writeFileSync(path.join(hold, 'go'), '');
-    assert.strictEqual(await run.exited, 0, run.out);
-    const [first, files] = museRuns();
-    assert.strictEqual(runs().length, 2);
-    assert.ok(first.prompt.includes('## The project\'s files') && first.prompt.includes('\nsrc/helper.js\n'), `${kind}: the first prompt names the helper`);
-    const session = c => c.args[c.args.indexOf('--session-id') + 1];
-    assert.ok(session(files) === session(first) && files.prompt.includes('### src/helper.js\n') && files.prompt.includes('HELPER-CODE'), `${kind}: one files round, same session`);
-    if (kind === 'review') {
-      const s = stateOf(root);
-      const found = Object.values(s.chains[Object.keys(s.chains)[0]].findings).map(f => [f.title, f.label, f.status]);
-      assert.deepStrictEqual(found, [['the source is deleted after a partial copy', 'BUG', 'open']], 'Muse\'s second answer, confirmed by A, is what counts');
-    } else {
-      assert.strictEqual(planRecord(root, P).verdict, 'ISSUES_FOUND', 'the plan\'s verdict comes from Muse\'s second answer');
-    }
-    assert.match(run.out, /the source is deleted after a partial copy/);
-    const fresh = execCalls().filter(c => c.args[1] !== 'resume');
-    assert.strictEqual(fresh.filter(c => c.prompt.includes('reviewer A. Check')).length, 1, `${kind}: GPT A once`);
-    const turns = filesUnder(state.projectDir(root)).map(f => path.basename(f));
-    assert.ok(turns.includes('turn-1-B-1.md') && turns.includes('turn-1-B-files-1.md'), `${kind}: both Muse turns are kept`);
-    assert.ok(state.update(state.files.global(), g => { delete g.muse; }).ok);
-  }
-});
-
 test('a file too large for Muse by its size alone is never read, and a plan or test plan naming it goes on without Muse', () => {
   const modes = require('../src/modes');
   const root = project('t6big', { 'src/archive.js': 'a\n', 'data/dump.csv': 'small for now\n' });
@@ -663,67 +608,6 @@ test('a risky plan naming a tracked path swapped for an in-project link to ignor
   assert.ok(sent.includes('### db/migrate.js\n```\nMIGRATE-CODE'), 'the migration is inline');
   const saved = filesUnder(state.projectDir(root)).map(f => fs.readFileSync(f, 'utf8'));
   for (const text of [...musePrompts(), ...execCalls().map(c => c.prompt), ...saved]) assert.ok(!text.includes('ALIAS-SECRET'), 'never sent or saved');
-  assert.ok(state.update(state.files.global(), g => { delete g.muse; }).ok);
-});
-
-test('a risky plan\'s files round never resends the live plan file it is already reviewing', async () => {
-  const P = '# Plan\n\nMove the stop loss into the order code.\n';
-  const root = project('t7b', { 'notes/plan.md': P, 'src/order.js': 'order\n' });
-  const file = path.join(root, 'notes', 'plan.md');
-  const hold = fs.mkdtempSync(path.join(HOME, 't7b-hold-'));
-  const asking = JSON.stringify({ ...JSON.parse(reviewAnswer().text), more_files: ['notes/plan.md'] });
-  const musePrompts = museWith('t7b', [{ hold, text: asking }, reviewAnswer()]);
-  setSpec({ byPrompt: [{ match: 'reviewer A. Check', answers: [reviewAnswer()] }] });
-  const run = planRun(root, file);
-  await waitFor(path.join(hold, 'started'));
-  const Q = `${P}Then drop the stop loss. LIVE-DROP-STEP\n`;
-  fs.writeFileSync(file, Q); // (the plan file changes while its review runs)
-  fs.writeFileSync(path.join(hold, 'go'), '');
-  assert.strictEqual(await run.exited, 0, run.out);
-  const files = musePrompts()[1];
-  assert.ok(files.includes('- notes/plan.md: already in your prompt\n') && !files.includes('LIVE-DROP-STEP'), files.slice(0, 300));
-  const turns = filesUnder(state.projectDir(root)).filter(f => /turn-1-B-files-1\.md$/.test(f));
-  assert.ok(turns.length === 1 && !fs.readFileSync(turns[0], 'utf8').includes('LIVE-DROP-STEP'), 'nor its saved turn');
-  assert.deepStrictEqual([planRecord(root, P).verdict, exitWith(root, P), !!exitWith(root, Q)], ['NO_ISSUES', null, true], 'only the reviewed text may leave plan mode');
-  assert.ok(state.update(state.files.global(), g => { delete g.muse; }).ok);
-});
-
-test('a risky plan is not cleared by Muse\'s clean first answer when its files round fails: the GPT B in its seat must finish', async () => {
-  const root = project('t7c', { 'src/helper.js': 'helper\n' });
-  const file = path.join(HOME, 't7c-plan.md');
-  const P = '# Plan\n\nKeep the stop loss when orders are retried.\n';
-  fs.writeFileSync(file, P);
-  const asking = JSON.stringify({ ...JSON.parse(reviewAnswer().text), more_files: ['src/helper.js'] });
-  const musePrompts = museWith('t7c', [{ text: asking }, { text: 'not JSON' }, { text: 'still not JSON' }]);
-  const hold = fs.mkdtempSync(path.join(HOME, 't7c-hold-'));
-  // (GPT B, in Muse's seat, is held, then never gives a usable answer, its one new try included)
-  setSpec({ byPrompt: [{ match: 'reviewer A. Check', answers: [{ session: 'sess-A', ...reviewAnswer() }] },
-    { match: 'reviewer B. Attack', answers: [{ session: 'sess-B', hold, text: 'not JSON' }, { session: 'sess-B', text: 'still not JSON' }] }] });
-  const run = planRun(root, file);
-  await waitFor(path.join(hold, 'started'));
-  assert.deepStrictEqual([planRecord(root, P), !!exitWith(root, P)], [undefined, true], 'nothing counts while GPT B runs');
-  fs.writeFileSync(path.join(hold, 'go'), '');
-  assert.notStrictEqual(await run.exited, 0, run.out);
-  assert.match(run.out, /Muse didn't take part: its review didn't complete/);
-  assert.deepStrictEqual([planRecord(root, P), !!exitWith(root, P)], [undefined, true], 'Muse\'s clean first answer never clears it');
-  assert.strictEqual(musePrompts().length, 3, 'Muse\'s first answer, its files round and that round\'s repair');
-  const fresh = execCalls().filter(c => c.args[1] !== 'resume');
-  assert.strictEqual(fresh.filter(c => c.prompt.includes('reviewer A. Check')).length, 1, 'GPT A once');
-  assert.ok(fresh.some(c => c.prompt.includes('reviewer B. Attack')), 'a GPT B took Muse\'s seat');
-  assert.ok(state.update(state.files.global(), g => { delete g.muse; }).ok);
-});
-
-test('Muse\'s test-plan check gets no files round: a request for an unrelated file is repaired away and never answered', () => {
-  const root = project('t7d', { 'src/archive.js': 'a\n', 'src/customer.js': 'CUSTOMER-SENTINEL\n' });
-  const keep = { keep: ['T1'], dropped: [], added: [], no_case: [], not_worth_testing: '-' };
-  const musePrompts = museWith('t7d', [{ text: JSON.stringify({ ...keep, more_files: ['src/customer.js'] }) }, { text: JSON.stringify(keep) }]);
-  setSpec({ byPrompt: [{ match: 'You design the test cases', answers: [json({ cases: [testCase('T1', ['src/archive.js'])], no_case: [], not_worth_testing: '-' })] }] });
-  const r = cli(root, ['testplan', '--files', 'src/archive.js']);
-  assert.strictEqual(r.status, 0, r.stdout);
-  assert.deepStrictEqual(stateOf(root).plans[key('src/archive.js')].cases.map(c => c.id), ['T1'], 'GPT\'s plan, as checked');
-  const saved = filesUnder(state.projectDir(root));
-  for (const text of [...musePrompts(), ...saved.map(f => fs.readFileSync(f, 'utf8'))]) assert.ok(!text.includes('CUSTOMER-SENTINEL'), 'never sent or saved');
-  assert.ok(!saved.some(f => /-files-/.test(path.basename(f))), 'no files round');
   assert.ok(state.update(state.files.global(), g => { delete g.muse; }).ok);
 });
 

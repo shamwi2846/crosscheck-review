@@ -649,3 +649,12 @@ Findings left unfixed on purpose. Entries are never deleted, only marked fixed.
 - Fix: -
 - Log: 20261030231119-1b43d2
 - Why skipped: pair: disputed by A: The task explicitly assigns removal of the files round to step 2, and the supplied evidence identifies this change as step 1. src/review.js:462-481 updates tool guidance while retaining that deferred machinery. Its presence at this intermediate step is planned scope, not an unmet-requirement BUG.
+
+## G73 · fixed · 2026-10-30 · LOW
+- Task: Muse reads the project itself: a read-only file tool, the MQL5 docs, training on
+- Where: DESIGN.md:55
+- Problem: F1: DESIGN.md's answer.js size record still counts the removed files-round extension
+- Trigger: An operator or reviewer consults DESIGN.md section 3's recorded overruns after this change lands.
+- Fix: Update the answer.js bullet to about 215 lines and note that the files-round extension (readAsking/withMoreFiles) was removed with the round, as the review.js bullet does.
+- Log: 20261030234430-f760d9
+- Why skipped: pair: confirmed by A

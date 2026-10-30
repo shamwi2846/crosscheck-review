@@ -106,7 +106,7 @@ function namedFiles(root, text) {
 }
 
 // Of `paths`, the files Muse may get, once each, under the name asked for, with forward slashes: the same rule as its
-// files round (review.located and unsendable), so an ignored or secrets file, or a link to somewhere outside the
+// file tool (review.located and unsendable), so an ignored or secrets file, or a link to somewhere outside the
 // project, never reaches Muse, through either of its names.
 function projectFiles(root, paths) {
   const listed = new Set(review.listedFiles(root).map(state.pathKey));
@@ -219,12 +219,11 @@ async function plan(root, { file, taskFile, risky, skipWhy }) {
   const planReal = fs.realpathSync.native(path.resolve(file));
   const inline = museOn && !museOut
     ? inlineFiles(root, projectFiles(root, namedFiles(root, text)).filter(p => fs.realpathSync.native(path.resolve(root, p)) !== planReal)) : null;
-  const musePrompt = inline === null ? null : `${review.museIntro(null)}\n\n${prompt}\n\n${review.projectList(root)}\n\n`
-    + `## The files the plan names, inline\n${inline}\n`;
+  const musePrompt = inline === null ? null : `${review.museIntro(null)}\n\n${prompt}\n\n## The files the plan names, inline\n${inline}\n`;
   if (museOn && !museOut && (musePrompt === null || musePrompt.length > review.MUSE_PROMPT_MAX)) museOut = 'the material is too large for its prompt';
   else if (musePrompt) fs.writeFileSync(path.join(manifest.dir, 'prompt-muse.md'), musePrompt);
   let r;
-  if (museOn && !museOut) ({ result: r, museOut } = await review.withMuse(root, { manifest: { ...manifest, paired: true }, prompt, musePrompt, planPath: path.resolve(file), tools }));
+  if (museOn && !museOut) ({ result: r, museOut } = await review.withMuse(root, { manifest: { ...manifest, paired: true }, prompt, musePrompt, tools }));
   else r = risky ? await review.gptPair(root, manifest, prompt) : await review.run(root, manifest, prompt, { effort: 'high' });
   const note = museOut ? `\nMuse didn't take part: ${museOut}` : '';
   if (r.status !== 'OK') {
