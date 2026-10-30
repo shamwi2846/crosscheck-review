@@ -175,3 +175,97 @@ test('an unavailable reviewer leaves the pair incomplete, saying GPT was unavail
 });
 
 test.after(() => fs.rmSync(HOME, { recursive: true, force: true }));
+
+test('Muse failing in its cross-check is replaced by a complete GPT pair before a risky file counts as reviewed, and follow-ups stay GPT\'s', async () => {
+  const { state, waitFor } = require('./pair-fixture');
+  const museSpec = path.join(HOME, 'muse-spec.json');
+  const museLog = path.join(HOME, 'muse-calls.jsonl');
+  Object.assign(process.env, { FAKE_MUSE_SPEC: museSpec, FAKE_MUSE_LOG: museLog });
+  const config = JSON.parse(fs.readFileSync(state.files.config(), 'utf8'));
+  fs.writeFileSync(state.files.config(), JSON.stringify({ ...config, museCommand: [process.execPath, path.join(__dirname, 'fake-muse.js')], museVerified: '9.9.9-test', museSkills: ['bundled:git'] }));
+  assert.ok(state.update(state.files.global(), g => { g.muse = true; }).ok);
+  const museRuns = () => fs.readFileSync(museLog, 'utf8').split('\n').filter(Boolean).map(JSON.parse).filter(c => c.args && c.args[0] === 'exec' && c.args.includes('meta')).length;
+  const p = project('t9m', { 'src/payments.js': 'p0\n' });
+  write(p.root, 'src/payments.js', 'p1\n');
+  const k = key('src/payments.js');
+  seed(p.root, s => {
+    s.changes = { [k]: pending('src/payments.js') };
+    s.acks = { [k]: 'the last reviewed version' };
+    s.plans = { [k]: plan(p) };
+    s.escalations = { [k]: { chain: null, at: 1 } }; // (risky: its review is a pair)
+  });
+  const bug = reviewAnswer([finding('a refund can be paid twice', 'src/payments.js:1', { severity: 'HIGH', test: 'pay once' })]);
+  const hold = fs.mkdtempSync(path.join(HOME, 't9m-hold-'));
+  setPair({ A: [bug, bug], B: [{ text: reviewAnswer(), hold }], xA: [marks([['B1', 'CONFIRM']]), marks([])], xB: [marks([['A1', 'CONFIRM']])] });
+  // (Muse's first answer needs its repair, so its turns outnumber the redo's and one would stay unless set aside)
+  fs.writeFileSync(museSpec, JSON.stringify({ exec: [{ text: 'not JSON' }, { text: reviewAnswer([finding('MUSE-ONLY refund race', 'src/payments.js:1')]) },
+    { fail: 'usage limit reached for this subscription' }] }));
+  fs.rmSync(museLog, { force: true });
+  const running = review.review(p.root, { session: 'A', taskFile: p.taskFile });
+  await waitFor(path.join(hold, 'started')); // (the replacement GPT B is reviewing)
+  const meanwhile = stateOf(p.root);
+  assert.deepStrictEqual([meanwhile.acks[k], !!meanwhile.changes[k], !!meanwhile.escalations[k], (meanwhile.riskyReviews || {})[k]],
+    ['the last reviewed version', true, true, undefined], 'nothing counts while the replacement pair runs');
+  const shared = state.read(state.files.global()).data;
+  assert.ok(shared.museCooldownUntil > Date.now() && !(shared.cooldownUntil > Date.now()), 'Muse cools down; GPT stays available');
+  fs.writeFileSync(path.join(hold, 'go'), '');
+  const r = await running;
+  assert.strictEqual(r.status, 'DONE', r.text);
+  assert.match(r.text, /Muse didn't take part: its cross-check didn't complete \(usage limit reached/);
+  const s = stateOf(p.root);
+  assert.ok(s.riskyReviews[k] && !s.escalations[k], 'the completed GPT pair counts');
+  const findings = Object.values(s.chains[r.chain].findings);
+  assert.deepStrictEqual(findings.map(f => [f.title, f.label]), [['a refund can be paid twice', 'BUG']], 'the BUG stands; Muse\'s finding went with its run');
+  const turns = fs.readdirSync(r.bundle).filter(f => f.startsWith('turn-'));
+  assert.ok(turns.length && turns.every(f => !fs.readFileSync(path.join(r.bundle, f), 'utf8').includes('MUSE-ONLY')), 'no replayed turn holds the abandoned run');
+  const before = museRuns();
+  setPair({ follow: [followAnswer([{ id: 'F1', status: 'MAINTAIN', reason: 'not fixed yet' }])] });
+  const f = await review.followup(p.root, { chain: r.chain, responseFile: response('nothing yet') });
+  assert.strictEqual(f.status, 'DONE', f.text);
+  assert.strictEqual(museRuns(), before, 'a follow-up never runs Muse');
+  const followups = execCalls().filter(c => c.prompt.includes('This is a follow-up round'));
+  assert.ok(followups.length === 1 && followups[0].args[1] === 'resume' && followups[0].args.includes('sess-A'), 'one GPT, resuming reviewer A');
+  assert.ok(state.update(state.files.global(), g => { delete g.muse; delete g.museCooldownUntil; }).ok);
+});
+
+test('when GPT A\'s and Muse\'s cross-checks both fail, a normal review is still redone without Muse, and says why', async () => {
+  const { state, waitFor } = require('./pair-fixture'); // eslint-disable-line no-unused-vars
+  const museSpec = path.join(HOME, 'muse-spec-2.json');
+  const museLog = path.join(HOME, 'muse-calls-2.jsonl');
+  Object.assign(process.env, { FAKE_MUSE_SPEC: museSpec, FAKE_MUSE_LOG: museLog });
+  const config = JSON.parse(fs.readFileSync(state.files.config(), 'utf8'));
+  fs.writeFileSync(state.files.config(), JSON.stringify({ ...config, museCommand: [process.execPath, path.join(__dirname, 'fake-muse.js')], museVerified: '9.9.9-test', museSkills: ['bundled:git'] }));
+  assert.ok(state.update(state.files.global(), g => { g.muse = true; delete g.museCooldownUntil; }).ok);
+  const p = project('t9n', { 'src/notes.js': 'n0\n' });
+  write(p.root, 'src/notes.js', 'n1\n');
+  seed(p.root, s => { s.changes = { [key('src/notes.js')]: pending('src/notes.js') }; });
+  const found = reviewAnswer([finding('a note can be lost', 'src/notes.js:1')]);
+  setPair({ A: [found], xA: [{ fail: 'error: no such session', code: 1 }], single: [reviewAnswer()] });
+  fs.writeFileSync(museSpec, JSON.stringify({ exec: [{ text: found }, { fail: 'usage limit reached for this subscription' }] }));
+  fs.rmSync(museLog, { force: true });
+  const r = await review.review(p.root, { session: 'A', taskFile: p.taskFile });
+  assert.strictEqual(r.status, 'DONE', r.text);
+  assert.match(r.text, /Muse didn't take part: its cross-check didn't complete \(usage limit reached/);
+  assert.strictEqual(execCalls().filter(c => c.prompt.includes('You review a code change') && !/reviewer [AB]\./.test(c.prompt)).length, 1, 'redone as one GPT review');
+  assert.ok(state.update(state.files.global(), g => { delete g.muse; delete g.museCooldownUntil; }).ok);
+});
+
+test('when GPT A and Muse both fail their first review, a normal review hands its bundle on as GPT unavailable, and says why Muse is missing', async () => {
+  const { state } = require('./pair-fixture');
+  const museSpec = path.join(HOME, 'muse-spec-3.json');
+  const museLog = path.join(HOME, 'muse-calls-3.jsonl');
+  Object.assign(process.env, { FAKE_MUSE_SPEC: museSpec, FAKE_MUSE_LOG: museLog });
+  const config = JSON.parse(fs.readFileSync(state.files.config(), 'utf8'));
+  fs.writeFileSync(state.files.config(), JSON.stringify({ ...config, museCommand: [process.execPath, path.join(__dirname, 'fake-muse.js')], museVerified: '9.9.9-test', museSkills: ['bundled:git'] }));
+  assert.ok(state.update(state.files.global(), g => { g.muse = true; delete g.museCooldownUntil; }).ok);
+  const p = project('t9o', { 'src/notes.js': 'n0\n' });
+  write(p.root, 'src/notes.js', 'n1\n');
+  seed(p.root, s => { s.changes = { [key('src/notes.js')]: pending('src/notes.js') }; });
+  setPair({ A: [{ fail: 'error: the service is down', code: 1 }] });
+  fs.writeFileSync(museSpec, JSON.stringify({ exec: [{ fail: 'the model is overloaded' }, { fail: 'the model is overloaded' }] }));
+  fs.rmSync(museLog, { force: true });
+  const r = await review.review(p.root, { session: 'A', taskFile: p.taskFile });
+  assert.ok(r.unavailable && r.bundle && fs.existsSync(path.join(r.bundle, 'manifest.json')), `the fallback reviewer gets the bundle: ${r.status} ${r.text}`);
+  assert.match(r.text, /Muse didn't take part: its review didn't complete \(the model is overloaded\)/);
+  assert.ok(state.update(state.files.global(), g => { delete g.muse; delete g.museCooldownUntil; }).ok);
+});

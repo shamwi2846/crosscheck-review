@@ -400,3 +400,32 @@ function snapshotOf(root, text) {
 }
 
 test.after(() => fs.rmSync(HOME, { recursive: true, force: true }));
+
+test('a normal review\'s pair with Muse can\'t certify a file Muse newly rates risky: it is escalated and waits for its plan and its own paired review', async () => {
+  const museSpec = path.join(HOME, 'muse-spec.json');
+  const museLog = path.join(HOME, 'muse-calls.jsonl');
+  Object.assign(process.env, { FAKE_MUSE_SPEC: museSpec, FAKE_MUSE_LOG: museLog });
+  const config = JSON.parse(fs.readFileSync(state.files.config(), 'utf8'));
+  fs.writeFileSync(state.files.config(), JSON.stringify({ ...config, museCommand: [process.execPath, path.join(__dirname, 'fake-muse.js')], museVerified: '9.9.9-test', museSkills: ['bundled:git'] }));
+  assert.ok(state.update(state.files.global(), g => { g.muse = true; }).ok);
+  const p = project('t-muse-risky', { 'src/other.js': 'o\n' });
+  write(p.root, 'src/refund.js', 'refund once\n');
+  const k = key('src/refund.js');
+  seed(p.root, s => { s.changes = { [k]: pending('src/refund.js') }; });
+  setPair({ A: [reviewAnswer()], xA: [marks([['B1', 'CONFIRM']])] });
+  const risky = { level: 'risky', files: ['src/refund.js'], why: 'it moves money' };
+  fs.writeFileSync(museSpec, JSON.stringify({ exec: [{ text: reviewAnswer([finding('a refund can be paid twice', 'src/refund.js:1', { severity: 'HIGH', test: 'pay once' })], { cls: risky }) },
+    { text: marks([]) }] }));
+  fs.rmSync(museLog, { force: true });
+  const r = await review.review(p.root, { session: 'A', taskFile: p.taskFile });
+  assert.strictEqual(r.status, 'DONE', r.text);
+  const s = stateOf(p.root);
+  const chain = s.chains[r.chain];
+  assert.deepStrictEqual(Object.values(chain.findings).map(f => [f.title, f.label, f.status]), [['a refund can be paid twice', 'BUG', 'open']]);
+  assert.ok(s.escalations[k] && s.changes[k] && !s.acks[k], 'escalated, pending, not acknowledged');
+  assert.ok(!(s.riskyReviews || {})[k] && !chain.paired, 'no receipt, and not a paired chain');
+  const f = await review.followup(p.root, { chain: r.chain, responseFile: response('fixed') });
+  assert.strictEqual(f.status, 'REFUSED', f.text);
+  assert.match(f.text, /escalated: each needs its own paired review first/, 'a follow-up can\'t stand in for its plan and paired review');
+  assert.ok(state.update(state.files.global(), g => { delete g.muse; }).ok);
+});

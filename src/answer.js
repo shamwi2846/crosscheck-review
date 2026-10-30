@@ -28,6 +28,9 @@ const SHARED = {
   class: object({ level: oneOf('none', 'normal', 'risky'), files: list(text), why: text }),
   coverage: text,
 };
+const CASE = object({ id: text, severity: oneOf('CRITICAL', 'HIGH', 'MEDIUM'), covers: list(text), reqs: list(text), input: text, expected: text,
+  test_file: text, test_name: text });
+const NO_CASE = object({ target: text, why: text });
 const SCHEMAS = {
   review: object({ verdict: oneOf('NO_ISSUES', 'ISSUES_FOUND'), ...SHARED }),
   followup: object({
@@ -40,12 +43,9 @@ const SCHEMAS = {
     marks: list(object({ id: text, mark: oneOf('CONFIRM', 'DISPUTE', 'SAME_AS'), evidence: text, same_as: { type: ['string', 'null'] } })),
   }),
   // GPT's other jobs (modes.js)
-  testplan: object({
-    cases: list(object({ id: text, severity: oneOf('CRITICAL', 'HIGH', 'MEDIUM'), covers: list(text), reqs: list(text), input: text, expected: text,
-      test_file: text, test_name: text })),
-    no_case: list(object({ target: text, why: text })),
-    not_worth_testing: text,
-  }),
+  testplan: object({ cases: list(CASE), no_case: list(NO_CASE), not_worth_testing: text }),
+  // Muse's check of GPT's test plan: each of GPT's cases kept, or dropped with why, and Muse's own added ones
+  testplan_check: object({ keep: list(text), dropped: list(object({ id: text, why: text })), added: list(CASE), no_case: list(NO_CASE), not_worth_testing: text }),
   idea: object({ verdict: oneOf('SOUND', 'CHANGES_RECOMMENDED', 'AGAINST'), recommendation: text,
     points: list(object({ severity: oneOf('HIGH', 'MEDIUM', 'LOW'), point: text, why: text })) }),
   digest: object({ answer: text, evidence: list(object({ place: text, quote: text })),
@@ -121,22 +121,22 @@ function read(kind, answerText, asked) {
     }
     return { answer, problems };
   }
-  if (kind === 'testplan') {
-    // (`asked.targets`: the target paths exactly as the prompt listed them; a test file must be inside the project)
-    if (answer.cases.length > 5) problems.push(`a plan has at most 5 cases, not ${answer.cases.length}`);
-    exactlyOnce(answer.cases.map(c => c.id), answer.cases.map((c, i) => `T${i + 1}`), 'case');
-    // (every target has a case, or GPT's reason it needs none: a plan never counts for a file nobody judged)
-    const covered = asked.targets.filter(t => answer.cases.some(c => c.covers.includes(t)));
-    for (const n of answer.no_case) {
+  // A plan's cases and reasons for none. `asked.targets`: the target paths exactly as the prompt listed them; a test
+  // file must be inside the project.
+  const checkPlan = (cases, noCase) => {
+    if (cases.length > 5) problems.push(`a plan has at most 5 cases, not ${cases.length}`);
+    // (every target has a case, or one reason it needs none: a plan never counts for a file nobody judged)
+    const covered = asked.targets.filter(t => cases.some(c => c.covers.includes(t)));
+    for (const n of noCase) {
       if (!asked.targets.includes(n.target)) problems.push(`no_case names ${n.target}: name targets exactly as listed`);
       else if (covered.includes(n.target)) problems.push(`${n.target} has a case, so it takes no no_case reason`);
       if (!n.why.trim()) problems.push(`no_case for ${n.target} gives no reason`);
     }
     for (const t of asked.targets) {
-      const reasons = answer.no_case.filter(n => n.target === t).length;
+      const reasons = noCase.filter(n => n.target === t).length;
       if (!covered.includes(t) && reasons !== 1) problems.push(`${t} needs a case, or one no_case reason, not ${reasons}`);
     }
-    for (const c of answer.cases) {
+    for (const c of cases) {
       if (!c.covers.length) problems.push(`${c.id} covers no target`);
       for (const p of c.covers) if (!asked.targets.includes(p)) problems.push(`${c.id} covers ${p}: covers must name targets exactly as listed`);
       if (!c.reqs.length) problems.push(`${c.id} serves no requirement`);
@@ -145,6 +145,21 @@ function read(kind, answerText, asked) {
       if (!file || !c.test_name.trim()) problems.push(`${c.id} names no test`);
       else if (/^([a-z]:|\/)/i.test(file) || file.split('/').includes('..')) problems.push(`${c.id}'s test file ${c.test_file} must be a path inside the project`);
     }
+  };
+  if (kind === 'testplan') {
+    exactlyOnce(answer.cases.map(c => c.id), answer.cases.map((c, i) => `T${i + 1}`), 'case');
+    checkPlan(answer.cases, answer.no_case);
+    return { answer, problems };
+  }
+  if (kind === 'testplan_check') {
+    // (`asked.cases`: GPT's cases. Each is kept or dropped, never lost, and dropped only to make room for an added one)
+    const gptIds = asked.cases.map(c => c.id);
+    exactlyOnce([...answer.keep, ...answer.dropped.map(d => d.id)], gptIds, 'GPT case');
+    exactlyOnce(answer.added.map(c => c.id), answer.added.map((c, i) => `M${i + 1}`), 'added case');
+    for (const d of answer.dropped) if (!d.why.trim()) problems.push(`dropping ${d.id} needs a reason`);
+    const room = Math.max(0, gptIds.length + answer.added.length - 5);
+    if (answer.dropped.length > room) problems.push(`drop a GPT case only to make room for an added one: at most ${room} may go, not ${answer.dropped.length}`);
+    checkPlan([...asked.cases.filter(c => answer.keep.includes(c.id)), ...answer.added], answer.no_case);
     return { answer, problems };
   }
   if (kind !== 'review' && kind !== 'followup') return { answer, problems }; // (the other jobs: their schema is the check)

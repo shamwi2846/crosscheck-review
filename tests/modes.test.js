@@ -380,3 +380,79 @@ test('the plan gate accepts only the text reviewed, or a plan skipped with its r
   assert.match(said, /requirements changed meanwhile/);
   assert.deepStrictEqual(plansNow()[hook.planKey(Q, taskA)], before, 'the stale review was not recorded');
 });
+
+test('a loss case Muse adds to GPT\'s plan is stored, marked as Muse\'s, and reaches the reviewers with its test frozen', () => {
+  const root = project('t4m', { 'src/archive.js': 'a\n', 'src/pay.js': 'p\n', 'tests/archive.test.js': 'a successful copy\n', 'tests/M1.test.js': 'disk full\n' });
+  const museSpec = path.join(HOME, 'muse-spec.json');
+  const museLog = path.join(HOME, 'muse-calls.jsonl');
+  Object.assign(process.env, { FAKE_MUSE_SPEC: museSpec, FAKE_MUSE_LOG: museLog });
+  const config = JSON.parse(fs.readFileSync(state.files.config(), 'utf8'));
+  fs.writeFileSync(state.files.config(), JSON.stringify({ ...config, museCommand: [process.execPath, path.join(__dirname, 'fake-muse.js')], museVerified: '9.9.9-test', museSkills: ['bundled:git'] }));
+  assert.ok(state.update(state.files.global(), g => { g.muse = true; }).ok);
+  const why = 'tests/archive.test.js already checks a successful copy';
+  setSpec({ byPrompt: [{ match: 'You design the test cases', answers: [json({ cases: ['T1', 'T2', 'T3', 'T4'].map(id => testCase(id, ['src/pay.js'])),
+    no_case: [{ target: 'src/archive.js', why }], not_worth_testing: '-' })] }, { match: 'You review a code change', answers: [reviewAnswer()] }] });
+  const added = { ...testCase('M1', ['src/archive.js'], 'tests/M1.test.js'), input: 'the disk fills while archiving', expected: 'the source stays until the archive is committed' };
+  fs.writeFileSync(museSpec, JSON.stringify({ exec: [{ text: JSON.stringify({ keep: ['T1', 'T2', 'T3', 'T4'], dropped: [], added: [added], no_case: [], not_worth_testing: '-' }) }] }));
+  fs.rmSync(museLog, { force: true });
+  const r = cli(root, ['testplan', '--files', 'src/archive.js,src/pay.js']);
+  assert.strictEqual(r.status, 0, r.stdout);
+  assert.match(r.stdout, /M1 \(Muse\) \[HIGH\] covers src\/archive\.js/);
+  const plans = stateOf(root).plans;
+  const archive = plans[key('src/archive.js')];
+  assert.deepStrictEqual([archive.cases.map(c => [c.id, c.by]), archive.tests, archive.why], [[['M1', 'muse']], ['tests/M1.test.js'], undefined], 'Muse\'s case replaces the reason for none');
+  assert.deepStrictEqual(plans[key('src/pay.js')].cases.map(c => c.id), ['T1', 'T2', 'T3', 'T4'], 'none of GPT\'s cases is lost');
+  const museCall = fs.readFileSync(museLog, 'utf8').split('\n').filter(Boolean).map(JSON.parse).find(c => c.args[0] === 'exec' && c.args.includes('meta'));
+  assert.ok(museCall.prompt.includes('### tests/archive.test.js'), 'Muse read the existing test of the archive');
+  assert.ok(state.update(state.files.global(), g => { delete g.muse; }).ok);
+  fs.writeFileSync(path.join(root, 'src/archive.js'), 'a2\n');
+  const reviewed = cli(root, ['review', '--files', 'src/archive.js']);
+  assert.strictEqual(reviewed.status, 0, reviewed.stdout);
+  const prompt = execCalls().filter(c => c.prompt.includes('You review a code change')).pop().prompt;
+  assert.ok(prompt.includes('### Test plan of src/archive.js\n- M1: [HIGH] the disk fills while archiving'), 'the reviewers see Muse\'s case');
+  assert.match(prompt, /- frozen test tests\/M1\.test\.js: .+[\\/]snap[\\/][0-9a-f]{64}/, 'and its test, frozen');
+});
+
+test('Muse\'s plan material leaves out a cited file that is a link to somewhere outside the project', () => {
+  const root = project('t4l', { 'src/archive.js': 'a\n', 'tests/archive.test.js': 'LOCAL-TEST\n' });
+  const outside = fs.mkdtempSync(path.join(HOME, 'outside-'));
+  fs.writeFileSync(path.join(outside, 'archive.test.js'), 'PRIVATE-SENTINEL\n');
+  fs.symlinkSync(outside, path.join(root, 'tests', 'linked'), 'junction');
+  const museLog = path.join(HOME, 'muse-calls-l.jsonl');
+  const museSpec = path.join(HOME, 'muse-spec-l.json');
+  Object.assign(process.env, { FAKE_MUSE_SPEC: museSpec, FAKE_MUSE_LOG: museLog });
+  const config = JSON.parse(fs.readFileSync(state.files.config(), 'utf8'));
+  fs.writeFileSync(state.files.config(), JSON.stringify({ ...config, museCommand: [process.execPath, path.join(__dirname, 'fake-muse.js')], museVerified: '9.9.9-test', museSkills: ['bundled:git'] }));
+  assert.ok(state.update(state.files.global(), g => { g.muse = true; }).ok);
+  setSpec({ byPrompt: [{ match: 'You design the test cases', answers: [json({ cases: [testCase('T1', ['src/archive.js'], 'tests/archive.test.js')], no_case: [],
+    not_worth_testing: 'tests/linked/archive.test.js already covers the copy' })] }] });
+  fs.writeFileSync(museSpec, JSON.stringify({ exec: [{ text: JSON.stringify({ keep: ['T1'], dropped: [], added: [], no_case: [], not_worth_testing: '-' }) }] }));
+  fs.rmSync(museLog, { force: true });
+  const r = cli(root, ['testplan', '--files', 'src/archive.js']);
+  assert.strictEqual(r.status, 0, r.stdout);
+  const sent = fs.readFileSync(museLog, 'utf8').split('\n').filter(Boolean).map(JSON.parse).find(c => c.args[0] === 'exec' && c.args.includes('meta')).prompt;
+  assert.ok(sent.includes('LOCAL-TEST') && !sent.includes('PRIVATE-SENTINEL'), 'the project\'s own test, never the linked file');
+  assert.deepStrictEqual(stateOf(root).plans[key('src/archive.js')].cases.map(c => c.id), ['T1'], 'GPT\'s case stands');
+  assert.ok(state.update(state.files.global(), g => { delete g.muse; }).ok);
+});
+
+test('a test plan whose material is too large for Muse keeps GPT\'s plan at once, with a note, and starts no Muse run', () => {
+  const big = `${'// archive copies data\n'.repeat(55000)}`; // (about 1.2 MB each, so the two together pass Muse's 2,000,000-character limit)
+  const root = project('t4big', { 'src/archive.js': 'a\n', 'tests/archive-a.test.js': big, 'tests/archive-b.test.js': big });
+  const museLog = path.join(HOME, 'muse-calls-big.jsonl');
+  const museSpec = path.join(HOME, 'muse-spec-big.json');
+  Object.assign(process.env, { FAKE_MUSE_SPEC: museSpec, FAKE_MUSE_LOG: museLog });
+  const config = JSON.parse(fs.readFileSync(state.files.config(), 'utf8'));
+  fs.writeFileSync(state.files.config(), JSON.stringify({ ...config, museCommand: [process.execPath, path.join(__dirname, 'fake-muse.js')], museVerified: '9.9.9-test', museSkills: ['bundled:git'] }));
+  assert.ok(state.update(state.files.global(), g => { g.muse = true; }).ok);
+  setSpec({ byPrompt: [{ match: 'You design the test cases', answers: [json({ cases: [testCase('T1', ['src/archive.js'])], no_case: [], not_worth_testing: '-' })] }] });
+  fs.writeFileSync(museSpec, JSON.stringify({ exec: [{ text: JSON.stringify({ keep: [], dropped: [{ id: 'T1', why: 'never asked' }], added: [], no_case: [], not_worth_testing: '-' }) }] }));
+  fs.rmSync(museLog, { force: true });
+  const r = cli(root, ['testplan', '--files', 'src/archive.js']);
+  assert.strictEqual(r.status, 0, r.stdout);
+  assert.match(r.stdout, /Muse didn't check the plan: the material is too large for its prompt/);
+  const runs = fs.existsSync(museLog) ? fs.readFileSync(museLog, 'utf8').split('\n').filter(Boolean).map(JSON.parse).filter(c => c.args[0] === 'exec' && c.args.includes('meta')) : [];
+  assert.strictEqual(runs.length, 0, 'no Muse run started');
+  assert.deepStrictEqual(stateOf(root).plans[key('src/archive.js')].cases.map(c => c.id), ['T1'], 'GPT\'s plan stands');
+  assert.ok(state.update(state.files.global(), g => { delete g.muse; }).ok);
+});
