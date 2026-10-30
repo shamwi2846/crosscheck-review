@@ -435,3 +435,24 @@ test('Muse\'s plan material leaves out a cited file that is a link to somewhere 
   assert.deepStrictEqual(stateOf(root).plans[key('src/archive.js')].cases.map(c => c.id), ['T1'], 'GPT\'s case stands');
   assert.ok(state.update(state.files.global(), g => { delete g.muse; }).ok);
 });
+
+test('a test plan whose material is too large for Muse keeps GPT\'s plan at once, with a note, and starts no Muse run', () => {
+  const big = `${'// archive copies data\n'.repeat(55000)}`; // (about 1.2 MB each, so the two together pass Muse's 2,000,000-character limit)
+  const root = project('t4big', { 'src/archive.js': 'a\n', 'tests/archive-a.test.js': big, 'tests/archive-b.test.js': big });
+  const museLog = path.join(HOME, 'muse-calls-big.jsonl');
+  const museSpec = path.join(HOME, 'muse-spec-big.json');
+  Object.assign(process.env, { FAKE_MUSE_SPEC: museSpec, FAKE_MUSE_LOG: museLog });
+  const config = JSON.parse(fs.readFileSync(state.files.config(), 'utf8'));
+  fs.writeFileSync(state.files.config(), JSON.stringify({ ...config, museCommand: [process.execPath, path.join(__dirname, 'fake-muse.js')], museVerified: '9.9.9-test', museSkills: ['bundled:git'] }));
+  assert.ok(state.update(state.files.global(), g => { g.muse = true; }).ok);
+  setSpec({ byPrompt: [{ match: 'You design the test cases', answers: [json({ cases: [testCase('T1', ['src/archive.js'])], no_case: [], not_worth_testing: '-' })] }] });
+  fs.writeFileSync(museSpec, JSON.stringify({ exec: [{ text: JSON.stringify({ keep: [], dropped: [{ id: 'T1', why: 'never asked' }], added: [], no_case: [], not_worth_testing: '-' }) }] }));
+  fs.rmSync(museLog, { force: true });
+  const r = cli(root, ['testplan', '--files', 'src/archive.js']);
+  assert.strictEqual(r.status, 0, r.stdout);
+  assert.match(r.stdout, /Muse didn't check the plan: the material is too large for its prompt/);
+  const runs = fs.existsSync(museLog) ? fs.readFileSync(museLog, 'utf8').split('\n').filter(Boolean).map(JSON.parse).filter(c => c.args[0] === 'exec' && c.args.includes('meta')) : [];
+  assert.strictEqual(runs.length, 0, 'no Muse run started');
+  assert.deepStrictEqual(stateOf(root).plans[key('src/archive.js')].cases.map(c => c.id), ['T1'], 'GPT\'s plan stands');
+  assert.ok(state.update(state.files.global(), g => { delete g.muse; }).ok);
+});

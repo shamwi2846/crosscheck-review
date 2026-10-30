@@ -526,13 +526,15 @@ test('Muse\'s inline material ignores a snapshot path written into the reviewed 
   // (the task file's snapshot, which every review freezes, holds the Notes: Claude's reasoning, never a reviewer's)
   const taskSnapshot = path.join(state.projectDir(root), 'snap', sha(fs.readFileSync(taskFile)));
   fs.writeFileSync(path.join(root, 'src/a.js'), `// see\n// ${taskSnapshot}\nmodule.exports = 'REVIEWED-CODE';\n`);
+  fs.copyFileSync(path.join(root, 'src/a.js'), path.join(root, 'src/b.js')); // (the same bytes under a second name)
   setSpec({ exec: [{ text: answerOf() }] }); // (GPT A, clean: no cross-check)
   fs.writeFileSync(museSpec, JSON.stringify({ exec: [{ text: answerOf() }] }));
   fs.rmSync(museLog, { force: true });
-  const r = await review.review(root, { session: 'A', files: ['src/a.js'], taskFile });
+  const r = await review.review(root, { session: 'A', files: ['src/a.js', 'src/b.js'], taskFile });
   assert.strictEqual(r.status, 'DONE', r.text);
   const sent = fs.readFileSync(museLog, 'utf8').split('\n').filter(Boolean).map(JSON.parse).find(c => c.args[0] === 'exec' && c.args.includes('meta')).prompt;
   assert.ok(sent.includes("module.exports = 'REVIEWED-CODE'"), 'Muse got the reviewed file inline');
+  assert.ok(sent.includes('### src/a.js, src/b.js\n'), 'under both of its names');
   assert.ok(!sent.includes('NOTES-SENTINEL'), 'but never the task snapshot the code named');
   assert.ok(state.update(state.files.global(), g => { delete g.muse; }).ok);
 });

@@ -108,6 +108,8 @@ async function museCheck(root, { task, rels, context, plan }) {
     .filter(p => { const abs = path.resolve(root, p); return fs.existsSync(abs) && fs.statSync(abs).isFile() && review.insideProject(root, abs); });
   const prompt = `${TESTPLAN_CHECK_RULES}\n\n## Task requirements\n${task.requirements}\n\n## Target files\n${rels.map(r => `- ${r}`).join('\n')}\n\n`
     + `## The plan\n${fence(JSON.stringify(plan, null, 2))}\n\n## The files, inline\n${files.map(p => `### ${p}\n${fence(review.textOf(fs.readFileSync(path.resolve(root, p))))}`).join('\n\n') || 'None.'}\n`;
+  // (as for a review: material past the limit is GPT's alone, so GPT's plan never waits on a Muse run bound to fail)
+  if (prompt.length > review.MUSE_PROMPT_MAX) return { plan, notes: ['Muse didn\'t check the plan: the material is too large for its prompt'] };
   const manifest = bundleFor(root, 'testplan_check', prompt);
   const r = await review.run(root, manifest, prompt, { kind: 'testplan_check', asked: { targets: rels, linkIds: task.ids, cases: plan.cases }, effort: 'xhigh', reviewer: 'muse' });
   if (r.status !== 'OK') return { plan, notes: [`Muse didn't check the plan: ${r.why}`] };

@@ -418,7 +418,9 @@ const MUSE_PROMPT_MAX = 2000000; // characters, about half of Muse's context: ma
 // lists (`copies`, as freeze collected them: never a path read out of the prompt, where reviewed code could name any
 // snapshot, the task's own included) inline. null when it grows past MUSE_PROMPT_MAX.
 function inlined(root, prompt, copies) {
-  const shown = [...new Map(copies.map(([label, hash]) => [hash, label]))].map(([hash, label]) => `### ${label}\n${fence(snapText(root, hash))}`);
+  const labels = new Map(); // (one copy per snapshot, under every name it has: two identical files are both readable)
+  for (const [label, hash] of copies) labels.set(hash, [...new Set([...(labels.get(hash) || []), label])]);
+  const shown = [...labels].map(([hash, names]) => `### ${names.join(', ')}\n${fence(snapText(root, hash))}`);
   const text = `${MUSE_NO_TOOLS}\n\n${prompt.replace(DOCS_NOTE, '')}\n\n## The listed copies, inline\n${shown.join('\n\n') || 'None.'}\n`;
   return text.length > MUSE_PROMPT_MAX ? null : text;
 }
@@ -924,4 +926,4 @@ const openBugs = root => bugsIn(stateOf(root));
 
 module.exports = { review, followup, close, fallback, skip, unreviewedForCommit, openChains, openBugs, bugsIn, acknowledgeGaps, DELETED,
   RISKY_FILE, sessionTask, stateOf, withMaps, bytesOf, textOf, snapshot, snapFile, asBaseline, forTask, ratedRiskyIn,
-  run, newAttempt, bundleDir, findingsOf, taskInfo, docsFor, DOCS_NOTE, refused, fence, callersOf, insideProject }; // (the last line: for modes.js)
+  run, newAttempt, bundleDir, findingsOf, taskInfo, docsFor, DOCS_NOTE, refused, fence, callersOf, insideProject, MUSE_PROMPT_MAX }; // (the last line: for modes.js)
