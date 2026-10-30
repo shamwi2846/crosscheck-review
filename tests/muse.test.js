@@ -20,7 +20,7 @@ const muse = require('../src/muse');
 const VERIFIED = { museCommand: [process.execPath, path.join(__dirname, 'fake-muse.js')], museVerified: '9.9.9-test', museSkills: ['bundled:git'] };
 const config = (over = {}) => fs.writeFileSync(state.files.config(), JSON.stringify({ model: 'gpt-test', ...VERIFIED, ...over }));
 const setSpec = spec => { fs.writeFileSync(SPEC, JSON.stringify(spec)); fs.rmSync(LOG, { force: true }); fs.rmSync(`${LOG}.sessions`, { recursive: true, force: true }); };
-const execs = () => fs.readFileSync(LOG, 'utf8').split('\n').filter(Boolean).map(JSON.parse).filter(c => c.args && c.args[0] === 'exec').map(c => c.args);
+const execs = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').split('\n').filter(Boolean).map(JSON.parse) : []).filter(c => c.args && c.args[0] === 'exec').map(c => c.args);
 const provider = args => args[args.indexOf('--provider') + 1];
 const bundle = name => { const dir = path.join(HOME, name); fs.mkdirSync(dir, { recursive: true }); return dir; };
 // (written out, not taken from muse.js, so dropping one there fails here: no tools, no writes or shell, no web, no
@@ -56,6 +56,38 @@ test('a session that would hold a tool, personal context or a foreign skill is r
   assert.deepStrictEqual(execs(), [], 'an unverified Muse never runs');
 });
 
+test('a failed run whose record holds a tool, personal context or a foreign skill takes the verification away before any retry', async () => {
+  const clean = { text: '{"verdict":"NO_ISSUES"}' };
+  const cases = [
+    { name: 'retryable', record: { tools: ['read_memory'] }, fail: 'connection reset', held: /held tools read_memory/, runs: ['echo', 'meta'] },
+    { name: 'limit', record: { context: ['personal_rules'] }, fail: 'usage limit reached', held: /held context personal_rules/, runs: ['echo', 'meta'] },
+    { name: 'resumed', record: { skills: ['bundled:git', 'user:mine'] }, fail: 'connection reset', held: /held skills user:mine/, runs: ['meta'], resume: '0123abcd-0000-4000-8000-0000000f11e5' },
+  ];
+  for (const c of cases) {
+    config();
+    setSpec({ exec: [{ fail: c.fail, record: c.record }, clean] }); // (a clean retry could hide the first run)
+    const r = await muse.ask({ prompt: 'review this', home: bundle(`failed-${c.name}`), resume: c.resume || null });
+    assert.ok(!r.ok && c.held.test(r.reason) && /no longer verified/.test(r.reason), `${c.name}: ${r.reason}`);
+    assert.deepStrictEqual(execs().map(provider), c.runs, `${c.name}: no retry after it`);
+    const now = JSON.parse(fs.readFileSync(state.files.config(), 'utf8'));
+    assert.deepStrictEqual([now.museVerified, now.museSkills], [undefined, undefined], `${c.name}: no longer verified`);
+    // (a usage limit still says so and starts the cooldown, so doctor --live can't make a model call meanwhile)
+    const cooling = state.read(state.files.global()).data.museCooldownUntil > Date.now();
+    assert.deepStrictEqual([cooling, /usage limit reached/.test(r.reason)], [c.name === 'limit', c.name === 'limit'], `${c.name}: the cooldown`);
+    setSpec({ exec: [clean] });
+    assert.match((await muse.ask({ prompt: 'review this', home: bundle(`after-${c.name}`) })).reason, cooling ? /cooling down/ : /isn't verified/);
+    assert.deepStrictEqual(execs(), [], `${c.name}: nothing runs until doctor --live passes again`);
+    assert.ok(state.update(state.files.global(), g => { delete g.museCooldownUntil; }).ok);
+  }
+  // (a failed run that left no record keeps its own reason, and Muse stays verified)
+  config();
+  setSpec({ exec: [{ fail: 'usage limit reached', noRecord: true }] });
+  const r = await muse.ask({ prompt: 'review this', home: bundle('failed-no-record') });
+  assert.ok(!r.ok && /usage limit reached/.test(r.reason), r.reason);
+  assert.strictEqual(JSON.parse(fs.readFileSync(state.files.config(), 'utf8')).museVerified, '9.9.9-test');
+  assert.ok(state.update(state.files.global(), g => { delete g.museCooldownUntil; }).ok);
+});
+
 test('a run looping on blank output is stopped with its child, and not retried', { timeout: 60000 }, async () => {
   config();
   const child = path.join(HOME, 'child.pid');
@@ -66,4 +98,44 @@ test('a run looping on blank output is stopped with its child, and not retried',
   const pid = Number(fs.readFileSync(child, 'utf8'));
   for (let i = 0; i < 100 && state.mayRun(pid); i++) await new Promise(res => setTimeout(res, 50));
   assert.ok(!state.mayRun(pid), 'the looping run\'s child was stopped with it');
+});
+
+// (after a run took the verification away: the next ask is refused and runs nothing)
+async function refusedAfter(name) {
+  setSpec({ exec: [{ text: '{"verdict":"NO_ISSUES"}' }] });
+  assert.match((await muse.ask({ prompt: 'review this', home: bundle(`after-${name}`) })).reason, /isn't verified/);
+  assert.deepStrictEqual(execs(), [], `${name}: nothing runs until doctor --live passes again`);
+}
+const unverified = () => { const c = JSON.parse(fs.readFileSync(state.files.config(), 'utf8')); return c.museVerified === undefined && c.museSkills === undefined; };
+const RESUMED = '0123abcd-0000-4000-8000-0000000f11e5';
+
+test('a resumed run that answers with no readable session record counts nothing and takes the verification away', async () => {
+  config();
+  setSpec({ exec: [{ text: '{"verdict":"NO_ISSUES"}', noRecord: true }] });
+  const r = await muse.ask({ prompt: 'review this', home: bundle('no-record'), resume: RESUMED });
+  assert.ok(!r.ok && !r.text && /no readable session record/.test(r.reason) && /no longer verified/.test(r.reason), r.reason);
+  assert.deepStrictEqual(execs().map(provider), ['meta']);
+  assert.ok(unverified());
+  await refusedAfter('no-record');
+});
+
+test('a looped run whose record holds a tool takes the verification away', { timeout: 60000 }, async () => {
+  config();
+  setSpec({ exec: [{ blank: true, record: { tools: ['read_memory'] } }, { text: '{"verdict":"NO_ISSUES"}' }] });
+  const r = await muse.ask({ prompt: 'review this', home: bundle('loop-tool') });
+  assert.ok(!r.ok && /failed run held tools read_memory/.test(r.reason) && /no longer verified/.test(r.reason), r.reason);
+  assert.deepStrictEqual(execs().map(provider), ['echo', 'meta'], 'no retry');
+  assert.ok(unverified());
+  await refusedAfter('loop-tool');
+});
+
+test('a resumed run whose last retry fails with a foreign skill takes the verification away', async () => {
+  config();
+  setSpec({ exec: [{ fail: 'connection reset' }, { fail: 'connection reset', record: { skills: ['bundled:git', 'user:mine'] } }] });
+  const r = await muse.ask({ prompt: 'review this', home: bundle('retry-skill'), resume: RESUMED });
+  assert.ok(!r.ok && /failed run held skills user:mine/.test(r.reason) && /no longer verified/.test(r.reason), r.reason);
+  const runs = execs();
+  assert.deepStrictEqual([runs.map(provider), runs.map(a => a[a.indexOf('--session-id') + 1])], [['meta', 'meta'], [RESUMED, RESUMED]], 'retried once, in the same session');
+  assert.ok(unverified());
+  await refusedAfter('retry-skill');
 });

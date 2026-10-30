@@ -568,3 +568,48 @@ Findings left unfixed on purpose. Entries are never deleted, only marked fixed.
 - Fix: Instrument reads in the process executing `modes.plan` and assert that the external fixture is never read, retaining the existing outgoing-material assertions.
 - Log: 20261030170845-23652d
 - Why skipped: pair: confirmed by B
+
+## G64 · fixed · 2026-10-30 · MEDIUM
+- Task: Muse asks for the files it needs; two isolation fixes
+- Where: src/review.js:597-598
+- Problem: F2: Cancelling the files round loses its bundle record
+- Trigger: The user cancels crosscheck while Muse is answering the files round.
+- Fix: Save the files-round prompt before calling muse.ask, then update that turn with the answer or failure when the call returns.
+- Log: 20261030185118-c80437
+- Why skipped: pair: confirmed by B
+
+## G65 · fixed · 2026-10-30 · MEDIUM
+- Task: Muse asks for the files it needs; two isolation fixes
+- Where: -
+- Problem: F3: R7 is PARTIAL
+- Trigger: the task as asked
+- Fix: -
+- Log: 20261030203424-0e2402
+- Why skipped: no code is left unmet: R7's remaining part is the PR work itself (the reply on PR 31's CodeRabbit thread once this is pushed, and PR 32's own CodeRabbit round, which was rate-limited and is asked for again next)
+
+## G66 · fixed · 2026-10-30 · MEDIUM
+- Task: Muse asks for the files it needs; two isolation fixes
+- Where: src/modes.js:208
+- Problem: F1: UNCLEAR: risky-plan Muse prompt drops the project file list
+- Trigger: A risky plan is reviewed with Muse enabled, and Muse needs a project file that the plan does not name.
+- Fix: Restore the project list in the risky-plan musePrompt unless withMuse is shown to add it exactly once and prompt-muse.md records what was actually sent. — test: Existing or new risky-plan integration test: with Muse enabled, assert the actual Muse prompt or prompt-muse.md contains the capped project-file list and that requesting an admitted listed file produces the second answer.
+- Log: 20261030192654-c32ed8
+- Why skipped: can't happen where the fix landed: on branch muse-files (PR 32) src/modes.js builds Muse's plan prompt with review.projectList(root) and passes planPath to withMuse, confirmed by the completed pair of chain C20261030201646-5128c6; this review had compared PR 31's branch, which never had them, against PR 32's version
+
+## G67 · fixed · 2026-10-30 · MEDIUM
+- Task: Muse asks for the files it needs; two isolation fixes
+- Where: -
+- Problem: F2: R7 is PARTIAL
+- Trigger: the task as asked
+- Fix: -
+- Log: 20261030192654-c32ed8
+- Why skipped: no code is left unmet: R7's remaining part is the PR work itself (the PR 31 reply and PR 32's CodeRabbit round), as closed in chain C20261030201646-5128c6
+
+## G68 · open · 2026-10-30 · LOW
+- Task: Muse asks for the files it needs; two isolation fixes
+- Where: -
+- Problem: F2: The ..cache outside-path fix is not applied to testplan and skip target validation
+- Trigger: Run testplan or skip with --files ..cache/pay.js for an existing, git-listed file in a project directory named ..cache.
+- Fix: Give modes.targetsOf the same segment-based outside check as src/review.js (export and reuse outsidePath, or repeat the .. / ../ test there), with no other change.
+- Log: 20261030205514-f75593
+- Why skipped: pair: confirmed by A

@@ -105,16 +105,27 @@ function namedFiles(root, text) {
     && new RegExp(`(?<![\\w./-])(?:\\./)?${review.escapeRe(k)}(?![\\w/-]|\\.\\w)`).test(plain)).map(([rel]) => rel);
 }
 
-// Of `paths`, the project files git lists, once each, with forward slashes: an ignored file (a .env with its keys)
-// or a link to a file elsewhere never counts, so its content never reaches Muse.
+// Of `paths`, the files Muse may get, once each, under the name asked for, with forward slashes: the same rule as its
+// files round (review.located and unsendable), so an ignored or secrets file, or a link to somewhere outside the
+// project, never reaches Muse, through either of its names.
 function projectFiles(root, paths) {
   const listed = new Set(review.listedFiles(root).map(state.pathKey));
-  return [...new Set(paths.map(p => path.relative(root, path.resolve(root, p)).replace(/\\/g, '/')))]
-    .filter(p => listed.has(state.pathKey(p)) && review.insideProject(root, path.resolve(root, p)));
+  const shown = new Map(); // (real file -> the name it is shown under)
+  for (const p of paths) {
+    const at = review.located(root, p);
+    if (!at.why && !review.unsendable(listed, at.rel, at.realRel) && !shown.has(state.pathKey(at.realRel))) shown.set(state.pathKey(at.realRel), at.rel);
+  }
+  return [...shown.values()];
 }
 
-// Files inline for Muse, which has no tools: each under its path, fenced.
-const inlineFiles = (root, files) => files.map(p => `### ${p}\n${fence(review.textOf(fs.readFileSync(path.resolve(root, p))))}`).join('\n\n') || 'None.';
+// Files inline for Muse, which has no tools: each under its path, fenced. null, before anything is read, when their
+// size alone shows their text can't fit Muse's prompt (a character takes at most 3 bytes), so a huge file named in a
+// plan never has to be read whole just to learn that.
+function inlineFiles(root, files) {
+  const bytes = files.reduce((n, p) => n + fs.statSync(path.resolve(root, p)).size, 0);
+  if (bytes > 3 * review.MUSE_PROMPT_MAX) return null;
+  return files.map(p => `### ${p}\n${fence(review.textOf(fs.readFileSync(path.resolve(root, p))))}`).join('\n\n') || 'None.';
+}
 
 // Muse's check of GPT's test plan: the same task, targets and context, GPT's plan, and inline the files it may read
 // (the targets and context files, the test files GPT's cases name, any project file GPT's reasons cite, and every test
@@ -126,10 +137,11 @@ async function museCheck(root, { task, rels, context, plan }) {
   const cited = namedFiles(root, `${plan.no_case.map(n => n.why).join(' ')} ${plan.not_worth_testing}`);
   const tests = review.callersOf(root, rels, new Set()).filter(p => /(^|\/)(tests?|spec|__tests__)\/|\.(test|spec)\.[^/]+$/i.test(p));
   const files = projectFiles(root, [...rels, ...context, ...plan.cases.map(c => c.test_file.trim()), ...cited, ...tests]);
-  const prompt = `${TESTPLAN_CHECK_RULES}\n\n## Task requirements\n${task.requirements}\n\n## Target files\n${rels.map(r => `- ${r}`).join('\n')}\n\n`
-    + `## The plan\n${fence(JSON.stringify(plan, null, 2))}\n\n## The files, inline\n${inlineFiles(root, files)}\n`;
+  const inline = inlineFiles(root, files);
+  const prompt = inline === null ? null : `${TESTPLAN_CHECK_RULES}\n\n## Task requirements\n${task.requirements}\n\n## Target files\n${rels.map(r => `- ${r}`).join('\n')}\n\n`
+    + `## The plan\n${fence(JSON.stringify(plan, null, 2))}\n\n## The files, inline\n${inline}\n`;
   // (as for a review: material past the limit is GPT's alone, so GPT's plan never waits on a Muse run bound to fail)
-  if (prompt.length > review.MUSE_PROMPT_MAX) return { plan, notes: ['Muse didn\'t check the plan: the material is too large for its prompt'] };
+  if (prompt === null || prompt.length > review.MUSE_PROMPT_MAX) return { plan, notes: ['Muse didn\'t check the plan: the material is too large for its prompt'] };
   const manifest = bundleFor(root, 'testplan_check', prompt);
   const r = await review.run(root, manifest, prompt, { kind: 'testplan_check', asked: { targets: rels, linkIds: task.ids, cases: plan.cases }, effort: 'xhigh', reviewer: 'muse' });
   if (r.status !== 'OK') return { plan, notes: [`Muse didn't check the plan: ${r.why}`] };
@@ -197,11 +209,17 @@ async function plan(root, { file, taskFile, risky, skipWhy }) {
   // part, a second GPT takes its seat)
   const museOn = risky && !!(state.read(state.files.global()).data || {}).muse;
   let museOut = museOn ? await muse.ready() : null;
-  const musePrompt = museOn && !museOut ? `${review.MUSE_NO_TOOLS}\n\n${prompt}\n\n## The files the plan names, inline\n${inlineFiles(root, projectFiles(root, namedFiles(root, text)))}\n` : null;
-  if (musePrompt && musePrompt.length > review.MUSE_PROMPT_MAX) museOut = 'the material is too large for its prompt';
+  // (the plan file itself, under any name, is never pasted again: its text as read above is in the prompt, and a live
+  // copy could hold a later revision)
+  const planReal = fs.realpathSync.native(path.resolve(file));
+  const inline = museOn && !museOut
+    ? inlineFiles(root, projectFiles(root, namedFiles(root, text)).filter(p => fs.realpathSync.native(path.resolve(root, p)) !== planReal)) : null;
+  const musePrompt = inline === null ? null : `${review.MUSE_NO_TOOLS}\n\n${prompt}\n\n${review.projectList(root)}\n\n`
+    + `## The files the plan names, inline\n${inline}\n`;
+  if (museOn && !museOut && (musePrompt === null || musePrompt.length > review.MUSE_PROMPT_MAX)) museOut = 'the material is too large for its prompt';
   else if (musePrompt) fs.writeFileSync(path.join(manifest.dir, 'prompt-muse.md'), musePrompt);
   let r;
-  if (museOn && !museOut) ({ result: r, museOut } = await review.withMuse(root, { manifest: { ...manifest, paired: true }, prompt, musePrompt }));
+  if (museOn && !museOut) ({ result: r, museOut } = await review.withMuse(root, { manifest: { ...manifest, paired: true }, prompt, musePrompt, planPath: path.resolve(file) }));
   else r = risky ? await review.gptPair(root, manifest, prompt) : await review.run(root, manifest, prompt, { effort: 'high' });
   const note = museOut ? `\nMuse didn't take part: ${museOut}` : '';
   if (r.status !== 'OK') {
@@ -348,4 +366,4 @@ function allowScreen({ session, why }) {
   return { status: 'DONE', text: 'your own screen tools are allowed for this session for 30 minutes' };
 }
 
-module.exports = { testplan, skip, plan, simple, computer, allowScreen, recordWorkers };
+module.exports = { testplan, skip, plan, simple, computer, allowScreen, recordWorkers, inlineFiles };

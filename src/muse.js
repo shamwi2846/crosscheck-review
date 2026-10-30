@@ -56,7 +56,7 @@ function verifiedProgram() {
 
 // What Muse's own record of a session shows that a review must not have: any tool, a context message a clean run
 // doesn't have, a skill catalog it can't read, or a skill not in `allowed` (null: doctor judges the skills itself).
-// Returns { problems, skills: [{ id, scope }] }.
+// Returns { problems, skills: [{ id, scope }], unreadable: true when there was no record to read }.
 function inspect(command, session, allowed) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'crosscheck-muse-'));
   try {
@@ -66,7 +66,7 @@ function inspect(command, session, allowed) {
     try {
       record = JSON.parse(fs.readFileSync(file, 'utf8'));
     } catch (e) {
-      return { problems: [`no readable session record (${e.message})`], skills: [] };
+      return { problems: [`no readable session record (${e.message})`], skills: [], unreadable: true };
     }
     const toolsets = [];
     const context = [];
@@ -218,6 +218,14 @@ async function ask({ effort = 'high', resume = null, schema = null, prompt, home
   for (let i = 0; i < 2; i++) {
     session = resume || crypto.randomUUID(); // (a fresh request retries in a fresh session)
     result = await runOnce(p.command, { effort, session, workspace: workspaceOf(session), schema, prompt });
+    if (!result.ok) {
+      // (a failed run is checked too, before any retry, when it left a record: what its session held counts even
+      // though its answer doesn't)
+      const seen = inspect(p.command, session, p.skills);
+      // (a usage or login failure still starts the cooldown, and still says so)
+      const limit = result.limit ? `; ${result.reason}${cooldown()}` : '';
+      if (!seen.unreadable && seen.problems.length) return { ok: false, reason: `Muse's failed run held ${seen.problems.join('; ')}; ${unverify()}${limit}` };
+    }
     if (result.ok || result.limit || result.timedOut || result.looped) break;
   }
   if (result.limit) result.reason += cooldown();

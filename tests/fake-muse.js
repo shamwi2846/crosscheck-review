@@ -35,7 +35,7 @@ if (args[0] === '--version') {
   const calls = fs.readFileSync(log, 'utf8').split('\n').filter(Boolean).map(JSON.parse)
     .filter(c => c.args[0] === 'exec' && c.args[c.args.indexOf('--provider') + 1] !== 'echo').length;
   const answer = echo ? (spec.echo || {}) : (spec.exec || [])[calls - 1] || { fail: 'no answer in the spec' };
-  fs.writeFileSync(path.join(sessions, `${opt('--session-id')}.json`), JSON.stringify(record(answer.record)));
+  if (!answer.noRecord) fs.writeFileSync(path.join(sessions, `${opt('--session-id')}.json`), JSON.stringify(record(answer.record))); // (`noRecord`: a run that left none)
   if (answer.write) { // (a Muse that really writes the file its prompt names, whatever it then says)
     const target = fs.readFileSync(opt('--prompt-file'), 'utf8').match(/Create the file (.+?) containing/)[1];
     fs.writeFileSync(target, 'probe');
@@ -49,7 +49,14 @@ if (args[0] === '--version') {
     event('run.terminal.failed', { terminal: 'failed', text: '', reason: answer.fail });
     process.exitCode = 1;
   } else {
-    if (answer.text) event('run.output.delta', { text: answer.text });
-    event('run.terminal.completed', { terminal: 'completed', text: answer.text || 'echo', reason: null });
+    const reply = () => {
+      if (answer.text) event('run.output.delta', { text: answer.text });
+      event('run.terminal.completed', { terminal: 'completed', text: answer.text || 'echo', reason: null });
+    };
+    if (!answer.hold) reply();
+    else { // (`hold`: a folder where it marks `started` and waits for `go` before answering, so a test can act meanwhile)
+      fs.writeFileSync(path.join(answer.hold, 'started'), '');
+      const wait = setInterval(() => { if (fs.existsSync(path.join(answer.hold, 'go'))) { clearInterval(wait); reply(); } }, 20);
+    }
   }
 }

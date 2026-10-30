@@ -508,6 +508,37 @@ test('a receipt spares a later round only for the very version its pair certifie
   assert.ok(stateOf(q.root).escalations[lk], 'a receipt without a version never spares a pair');
 });
 
+test('a tracked secrets file that only mentions a risky file\'s name is never inlined to Muse as a candidate caller', async () => {
+  const museSpec = path.join(HOME, 'muse-spec-callers.json');
+  const museLog = path.join(HOME, 'muse-calls-callers.jsonl');
+  Object.assign(process.env, { FAKE_MUSE_SPEC: museSpec, FAKE_MUSE_LOG: museLog });
+  const config = JSON.parse(fs.readFileSync(state.files.config(), 'utf8'));
+  fs.writeFileSync(state.files.config(), JSON.stringify({ ...config, museCommand: [process.execPath, path.join(__dirname, 'fake-muse.js')], museVerified: '9.9.9-test', museSkills: ['bundled:git'] }));
+  assert.ok(state.update(state.files.global(), g => { g.muse = true; delete g.museCooldownUntil; }).ok);
+  const p = project('t-callers', { 'src/payments.js': 'p0\n', 'src/caller.js': 'const payments = require("./payments"); // CALLER-TEXT\n',
+    'config/.env.production': 'payments_api_key=SECRET-KEY-SENTINEL\n', '.gitignore': 'private/\n', 'vendor/credentials.json': '{ "uses": "payments" }\n' });
+  write(p.root, 'src/payments.js', 'p1\n');
+  // (a tracked name whose folder is now a link to an ignored folder in the project, holding another key)
+  write(p.root, 'private/credentials.json', 'payments_api_key=ALIAS-KEY-SENTINEL\n');
+  fs.rmSync(path.join(p.root, 'vendor'), { recursive: true });
+  fs.symlinkSync(path.join(p.root, 'private'), path.join(p.root, 'vendor'), 'junction');
+  const k = key('src/payments.js');
+  seed(p.root, s => { s.changes = { [k]: pending('src/payments.js') }; s.plans = { [k]: plan(p) }; });
+  setPair({ A: [reviewAnswer()] });
+  fs.writeFileSync(museSpec, JSON.stringify({ exec: [{ text: reviewAnswer() }] }));
+  fs.rmSync(museLog, { force: true });
+  const r = await review.review(p.root, { session: 'A', files: ['src/payments.js'], taskFile: p.taskFile, risky: true });
+  assert.strictEqual(r.status, 'DONE', r.text);
+  const sent = fs.readFileSync(museLog, 'utf8').split('\n').filter(Boolean).map(JSON.parse).filter(c => c.args[0] === 'exec' && c.args.includes('meta')).map(c => c.prompt);
+  const saved = fs.readFileSync(path.join(r.bundle, 'prompt-muse.md'), 'utf8');
+  for (const text of [...sent, saved]) {
+    assert.ok(text.includes('CALLER-TEXT') && !text.includes('SECRET-KEY-SENTINEL') && !text.includes('ALIAS-KEY-SENTINEL'), 'the real caller, never a secrets or ignored file');
+  }
+  assert.ok(execCalls().every(c => !c.prompt.includes('config/.env.production') && !c.prompt.includes('vendor/credentials.json')), 'nor is either listed to GPT as a caller');
+  assert.ok(stateOf(p.root).riskyReviews[k], 'the pair still completes');
+  assert.ok(state.update(state.files.global(), g => { delete g.muse; }).ok);
+});
+
 test('Muse can use a risky file shown whole without it being pasted twice, while a diff-only file\'s copy stays inline, and its BUG is recorded', async () => {
   const museSpec = path.join(HOME, 'muse-spec-whole.json');
   const museLog = path.join(HOME, 'muse-calls-whole.jsonl');
