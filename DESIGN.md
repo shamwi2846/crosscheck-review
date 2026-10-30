@@ -361,7 +361,7 @@ The rules say *what* to do; the driver handles *how*, so no command flags or hoo
   - BUG means it can really happen and cause real harm. In risky code (money, data, security, trading), an unlikely trigger with a big possible loss is a BUG too, such as duplicate orders, an order without a stop loss, a migration that loses rows, or a leaked key.
   - GAP means everything else, recorded with its severity.
   - Claude makes the final call. In risky code, a BUG becomes a GAP only with a one-line proof that it can't happen. Closing a review chain or hitting the round limit never turns an unfixed BUG into a gap by itself.
-  - Paired reviews: a finding both reviewers found on their own needs no cross-check (BUG, unless both labelled it harmless). For the rest, each reviewer checks the other's findings: it can happen means BUG; shown impossible means GAP; still unclear means BUG in risky code.
+  - Paired reviews: each reviewer marks the other's findings (when the other found any); two findings are one only when both say so. A finding both found, or confirmed, is a BUG unless everyone who judged its harm called it harmless; shown impossible means GAP; unclear keeps the author's label (an unclear BUG stays a BUG).
   - Claude fixes an existing gap only when the current change makes it realistic.
   - A missing or weak test is rated by its real harm, not by the test case's rating.
   - When Claude is unsure whether a finding is real, it fixes the finding in trading or money code and records a gap elsewhere.
