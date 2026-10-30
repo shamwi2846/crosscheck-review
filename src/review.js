@@ -268,7 +268,7 @@ const escapeRe = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const listedFiles = root => [...new Set(String(git(root, ['ls-files', '-co', '--exclude-standard', '-z'], 'utf8').stdout || '').split('\0').filter(Boolean))].sort();
 
 // The project files that mention a risky file's name: candidate callers from a plain search of their decoded text
-// (UTF-16 included), leaving out the reviewed files and anything over 2 MB. The likeliest come first, those naming it
+// (UTF-16 included), leaving out the reviewed files, secrets files and anything over 2 MB. The likeliest come first, those naming it
 // most often as a whole word (as a call or an import does: "pay" inside "payment" doesn't count), then by path, so the
 // 20 a review shows aren't spent on files that merely contain the letters.
 function callersOf(root, riskyPaths, reviewedKeys) {
@@ -276,12 +276,15 @@ function callersOf(root, riskyPaths, reviewedKeys) {
   if (!names.length) return [];
   const words = names.map(n => new RegExp(`(?<![\\w$])${escapeRe(n)}(?![\\w$])`, 'g'));
   const found = [];
-  for (const rel of listedFiles(root)) {
+  const listed = listedFiles(root);
+  const listedKeys = new Set(listed.map(state.pathKey));
+  for (const rel of listed) {
     if (reviewedKeys.has(state.pathKey(rel))) continue;
-    const abs = path.join(root, rel);
-    const stat = fs.existsSync(abs) && fs.statSync(abs);
-    if (!stat || !stat.isFile() || stat.size > 2 << 20 || !insideProject(root, abs)) continue;
-    const text = textOf(fs.readFileSync(abs));
+    // (the rule of Muse's files: a secrets file that names it, say a payments_api_key line, or one reached through a
+    // link to an ignored or outside file, is never a caller, since its copy would go to Muse)
+    const at = located(root, rel);
+    if (at.why || unsendable(listedKeys, at.rel, at.realRel) || fs.statSync(at.real).size > 2 << 20) continue;
+    const text = textOf(fs.readFileSync(at.real));
     if (names.some(n => text.includes(n))) found.push([rel, words.reduce((count, w) => count + (text.match(w) || []).length, 0)]);
   }
   return found.sort((x, y) => y[1] - x[1] || (x[0] < y[0] ? -1 : 1)).map(([rel]) => rel);
@@ -480,6 +483,27 @@ function secretName(rel) {
     || /\.(pem|key|p8|pkcs8|p12|pfx|ppk|jks|keystore)$/.test(b) || /^id_(rsa|dsa|ecdsa|ed25519)(_sk)?$/.test(b);
 }
 
+// Where a project path Muse may get really is: { rel, real, realRel }, or { why } when it lies outside the project once
+// links are followed, is missing, or isn't a file.
+function located(root, asked) {
+  const rel = path.relative(root, path.resolve(root, asked)).replace(/\\/g, '/');
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return { why: 'outside the project' };
+  let real;
+  try {
+    real = fs.realpathSync.native(path.resolve(root, asked));
+  } catch {
+    return { why: 'no such file' };
+  }
+  const realRel = path.relative(fs.realpathSync.native(root), real).replace(/\\/g, '/');
+  if (realRel.startsWith('..') || path.isAbsolute(realRel)) return { why: 'a link to somewhere outside the project' };
+  return fs.statSync(real).isFile() ? { rel, real, realRel } : { why: 'not a file' };
+}
+
+// Why a located file may never go to Muse, or null: a secrets file by either of its names, or one git doesn't list
+// under both (`listed`: the keys of listedFiles), so an ignored file is never reached through a tracked name.
+const unsendable = (listed, rel, realRel) => (secretName(rel) || secretName(realRel) ? 'a secrets file'
+  : !listed.has(state.pathKey(rel)) || !listed.has(state.pathKey(realRel)) ? 'not a file git lists for the project' : null);
+
 // What answers Muse's request for project files (DESIGN.md section 7): a function from the paths it asked for to the
 // text of its files round. A file is sent, as it is now, only when it is a regular file inside the project once links
 // are followed, git lists both the name asked for and the real file, neither of those names is a secrets file's, and
@@ -502,20 +526,11 @@ function museSupply(root, manifest, planPath = null) {
     const seen = new Set();
     let total = 0;
     for (const asked of paths) {
-      const abs = path.resolve(root, asked);
-      const rel = path.relative(root, abs).replace(/\\/g, '/');
-      let real = null;
-      try { real = fs.realpathSync.native(abs); } catch {}
-      const realRel = real && relOf(real);
-      const why = !rel || rel.startsWith('..') || path.isAbsolute(rel) ? 'outside the project'
-        : !real ? 'no such file'
-        : realRel.startsWith('..') || path.isAbsolute(realRel) ? 'a link to somewhere outside the project'
-        : !fs.statSync(real).isFile() ? 'not a file'
-        : seen.has(state.pathKey(realRel)) ? 'asked for twice'
-        : reviewed.has(state.pathKey(rel)) || reviewed.has(state.pathKey(realRel)) || real === plan ? 'already in your prompt'
-        : secretName(rel) || secretName(realRel) ? 'a secrets file'
-        : !listed.has(state.pathKey(rel)) || !listed.has(state.pathKey(realRel)) ? 'not a file git lists for the project'
-        : fs.statSync(real).size > MORE_FILE_MAX ? `larger than ${MORE_FILE_MAX / 1024} KB` : null;
+      const { rel, real, realRel, why: where } = located(root, asked);
+      const why = where
+        || (seen.has(state.pathKey(realRel)) ? 'asked for twice'
+          : reviewed.has(state.pathKey(rel)) || reviewed.has(state.pathKey(realRel)) || real === plan ? 'already in your prompt'
+          : unsendable(listed, rel, realRel) || (fs.statSync(real).size > MORE_FILE_MAX ? `larger than ${MORE_FILE_MAX / 1024} KB` : null));
       if (why) {
         refused.push(`- ${asked}: ${why}`);
         continue;
@@ -1065,5 +1080,5 @@ const openBugs = root => bugsIn(stateOf(root));
 
 module.exports = { review, followup, close, fallback, skip, unreviewedForCommit, openChains, openBugs, bugsIn, acknowledgeGaps, DELETED,
   RISKY_FILE, sessionTask, stateOf, withMaps, bytesOf, textOf, snapshot, snapFile, asBaseline, forTask, ratedRiskyIn,
-  run, newAttempt, bundleDir, findingsOf, taskInfo, docsFor, DOCS_NOTE, refused, fence, escapeRe, callersOf, listedFiles, insideProject, withMuse, gptPair,
-  MUSE_NO_TOOLS, MUSE_PROMPT_MAX, projectList, museSupply }; // (the last two lines: for modes.js and the tests)
+  run, newAttempt, bundleDir, findingsOf, taskInfo, docsFor, DOCS_NOTE, refused, fence, escapeRe, callersOf, listedFiles, withMuse, gptPair,
+  MUSE_NO_TOOLS, MUSE_PROMPT_MAX, projectList, museSupply, located, unsendable }; // (the last two lines: for modes.js and the tests)

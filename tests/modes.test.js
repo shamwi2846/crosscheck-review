@@ -614,3 +614,127 @@ test('a risky code or plan review waits for Muse\'s files round: only its second
     assert.ok(state.update(state.files.global(), g => { delete g.muse; }).ok);
   }
 });
+
+test('a file too large for Muse by its size alone is never read, and a plan or test plan naming it goes on without Muse', () => {
+  const modes = require('../src/modes');
+  const root = project('t6big', { 'src/archive.js': 'a\n', 'data/dump.csv': 'small for now\n' });
+  const huge = path.join(root, 'data', 'dump.csv');
+  fs.writeFileSync(huge, Buffer.alloc(3 * review.MUSE_PROMPT_MAX + 1, 0x61)); // (just past what could still fit as text)
+  const read = fs.readFileSync;
+  const seen = [];
+  fs.readFileSync = (file, ...rest) => { seen.push(path.resolve(String(file))); return read(file, ...rest); };
+  let inline;
+  try {
+    inline = modes.inlineFiles(root, ['src/archive.js', 'data/dump.csv']);
+  } finally {
+    fs.readFileSync = read;
+  }
+  assert.strictEqual(inline, null);
+  assert.ok(!seen.includes(huge), 'the huge file was never read');
+  assert.ok(modes.inlineFiles(root, ['src/archive.js']).includes('### src/archive.js\n'), 'files that fit are still inlined');
+  const musePrompts = museWith('t6big', [reviewAnswer()]);
+  const file = path.join(HOME, 't6big-plan.md');
+  fs.writeFileSync(file, '# Plan\n\nLoad data/dump.csv into src/archive.js.\n');
+  setSpec({ byPrompt: [{ match: 'reviewer A. Check', answers: [reviewAnswer()] }, { match: 'reviewer B. Attack', answers: [reviewAnswer()] },
+    { match: 'You design the test cases', answers: [json({ cases: [testCase('T1', ['src/archive.js'])], no_case: [], not_worth_testing: '-' })] }] });
+  const planned = cli(root, ['plan', '--file', file, '--risky']);
+  assert.strictEqual(planned.status, 0, planned.stdout);
+  assert.match(planned.stdout, /Muse didn't take part: the material is too large for its prompt/);
+  const tested = cli(root, ['testplan', '--files', 'src/archive.js', '--context', 'data/dump.csv']);
+  assert.strictEqual(tested.status, 0, tested.stdout);
+  assert.match(tested.stdout, /Muse didn't check the plan: the material is too large for its prompt/);
+  assert.strictEqual(musePrompts().length, 0, 'no Muse run started');
+  assert.ok(state.update(state.files.global(), g => { delete g.muse; }).ok);
+});
+
+test('a risky plan naming a tracked path swapped for an in-project link to ignored secrets never sends or saves them for Muse', () => {
+  const root = project('t7a', { '.gitignore': 'private/\n', 'db/migrate.js': 'MIGRATE-CODE\n', 'vendor/credentials.json': '{ "dummy": true }\n' });
+  fs.mkdirSync(path.join(root, 'private'));
+  fs.writeFileSync(path.join(root, 'private', 'credentials.json'), 'ALIAS-SECRET\n');
+  fs.rmSync(path.join(root, 'vendor'), { recursive: true });
+  fs.symlinkSync(path.join(root, 'private'), path.join(root, 'vendor'), 'junction'); // (git still lists vendor/credentials.json)
+  const file = path.join(HOME, 't7a-plan.md');
+  fs.writeFileSync(file, '# Plan\n\n1. Run db/migrate.js.\n2. Read the keys from vendor/credentials.json.\n');
+  const musePrompts = museWith('t7a', [reviewAnswer()]);
+  setSpec({ byPrompt: [{ match: 'reviewer A. Check', answers: [reviewAnswer()] }, { match: 'reviewer B. Attack', answers: [reviewAnswer()] }] });
+  const r = cli(root, ['plan', '--file', file, '--risky']);
+  assert.strictEqual(r.status, 0, r.stdout);
+  const [sent] = musePrompts();
+  assert.ok(sent.includes('### db/migrate.js\n```\nMIGRATE-CODE'), 'the migration is inline');
+  const saved = filesUnder(state.projectDir(root)).map(f => fs.readFileSync(f, 'utf8'));
+  for (const text of [...musePrompts(), ...execCalls().map(c => c.prompt), ...saved]) assert.ok(!text.includes('ALIAS-SECRET'), 'never sent or saved');
+  assert.ok(state.update(state.files.global(), g => { delete g.muse; }).ok);
+});
+
+test('a risky plan\'s files round never resends the live plan file it is already reviewing', async () => {
+  const P = '# Plan\n\nMove the stop loss into the order code.\n';
+  const root = project('t7b', { 'notes/plan.md': P, 'src/order.js': 'order\n' });
+  const file = path.join(root, 'notes', 'plan.md');
+  const hold = fs.mkdtempSync(path.join(HOME, 't7b-hold-'));
+  const asking = JSON.stringify({ ...JSON.parse(reviewAnswer().text), more_files: ['notes/plan.md'] });
+  const musePrompts = museWith('t7b', [{ hold, text: asking }, reviewAnswer()]);
+  setSpec({ byPrompt: [{ match: 'reviewer A. Check', answers: [reviewAnswer()] }] });
+  const run = planRun(root, file);
+  await waitFor(path.join(hold, 'started'));
+  const Q = `${P}Then drop the stop loss. LIVE-DROP-STEP\n`;
+  fs.writeFileSync(file, Q); // (the plan file changes while its review runs)
+  fs.writeFileSync(path.join(hold, 'go'), '');
+  assert.strictEqual(await run.exited, 0, run.out);
+  const files = musePrompts()[1];
+  assert.ok(files.includes('- notes/plan.md: already in your prompt\n') && !files.includes('LIVE-DROP-STEP'), files.slice(0, 300));
+  const turns = filesUnder(state.projectDir(root)).filter(f => /turn-1-B-files-1\.md$/.test(f));
+  assert.ok(turns.length === 1 && !fs.readFileSync(turns[0], 'utf8').includes('LIVE-DROP-STEP'), 'nor its saved turn');
+  assert.deepStrictEqual([planRecord(root, P).verdict, exitWith(root, P), !!exitWith(root, Q)], ['NO_ISSUES', null, true], 'only the reviewed text may leave plan mode');
+  assert.ok(state.update(state.files.global(), g => { delete g.muse; }).ok);
+});
+
+test('a risky plan is not cleared by Muse\'s clean first answer when its files round fails: the GPT B in its seat must finish', async () => {
+  const root = project('t7c', { 'src/helper.js': 'helper\n' });
+  const file = path.join(HOME, 't7c-plan.md');
+  const P = '# Plan\n\nKeep the stop loss when orders are retried.\n';
+  fs.writeFileSync(file, P);
+  const asking = JSON.stringify({ ...JSON.parse(reviewAnswer().text), more_files: ['src/helper.js'] });
+  const musePrompts = museWith('t7c', [{ text: asking }, { text: 'not JSON' }, { text: 'still not JSON' }]);
+  const hold = fs.mkdtempSync(path.join(HOME, 't7c-hold-'));
+  // (GPT B, in Muse's seat, is held, then never gives a usable answer, its one new try included)
+  setSpec({ byPrompt: [{ match: 'reviewer A. Check', answers: [{ session: 'sess-A', ...reviewAnswer() }] },
+    { match: 'reviewer B. Attack', answers: [{ session: 'sess-B', hold, text: 'not JSON' }, { session: 'sess-B', text: 'still not JSON' }] }] });
+  const run = planRun(root, file);
+  await waitFor(path.join(hold, 'started'));
+  assert.deepStrictEqual([planRecord(root, P), !!exitWith(root, P)], [undefined, true], 'nothing counts while GPT B runs');
+  fs.writeFileSync(path.join(hold, 'go'), '');
+  assert.notStrictEqual(await run.exited, 0, run.out);
+  assert.match(run.out, /Muse didn't take part: its review didn't complete/);
+  assert.deepStrictEqual([planRecord(root, P), !!exitWith(root, P)], [undefined, true], 'Muse\'s clean first answer never clears it');
+  assert.strictEqual(musePrompts().length, 3, 'Muse\'s first answer, its files round and that round\'s repair');
+  const fresh = execCalls().filter(c => c.args[1] !== 'resume');
+  assert.strictEqual(fresh.filter(c => c.prompt.includes('reviewer A. Check')).length, 1, 'GPT A once');
+  assert.ok(fresh.some(c => c.prompt.includes('reviewer B. Attack')), 'a GPT B took Muse\'s seat');
+  assert.ok(state.update(state.files.global(), g => { delete g.muse; }).ok);
+});
+
+test('Muse\'s test-plan check gets no files round: a request for an unrelated file is repaired away and never answered', () => {
+  const root = project('t7d', { 'src/archive.js': 'a\n', 'src/customer.js': 'CUSTOMER-SENTINEL\n' });
+  const keep = { keep: ['T1'], dropped: [], added: [], no_case: [], not_worth_testing: '-' };
+  const musePrompts = museWith('t7d', [{ text: JSON.stringify({ ...keep, more_files: ['src/customer.js'] }) }, { text: JSON.stringify(keep) }]);
+  setSpec({ byPrompt: [{ match: 'You design the test cases', answers: [json({ cases: [testCase('T1', ['src/archive.js'])], no_case: [], not_worth_testing: '-' })] }] });
+  const r = cli(root, ['testplan', '--files', 'src/archive.js']);
+  assert.strictEqual(r.status, 0, r.stdout);
+  assert.deepStrictEqual(stateOf(root).plans[key('src/archive.js')].cases.map(c => c.id), ['T1'], 'GPT\'s plan, as checked');
+  const saved = filesUnder(state.projectDir(root));
+  for (const text of [...musePrompts(), ...saved.map(f => fs.readFileSync(f, 'utf8'))]) assert.ok(!text.includes('CUSTOMER-SENTINEL'), 'never sent or saved');
+  assert.ok(!saved.some(f => /-files-/.test(path.basename(f))), 'no files round');
+  assert.ok(state.update(state.files.global(), g => { delete g.muse; }).ok);
+});
+
+test('a tracked risky plan that names its own path is never pasted again for Muse, only its text as reviewed', () => {
+  const P = '# Plan\n\nKeep this plan in notes/plan.md and move the stop loss into src/order.js.\n';
+  const root = project('t7e', { 'notes/plan.md': P, 'src/order.js': 'ORDER-CODE\n' });
+  const musePrompts = museWith('t7e', [reviewAnswer()]);
+  setSpec({ byPrompt: [{ match: 'reviewer A. Check', answers: [reviewAnswer()] }] });
+  const r = cli(root, ['plan', '--file', path.join(root, 'notes', 'plan.md'), '--risky']);
+  assert.strictEqual(r.status, 0, r.stdout);
+  const inline = musePrompts()[0].split('## The files the plan names, inline')[1];
+  assert.ok(inline.includes('### src/order.js\n') && !inline.includes('### notes/plan.md'), inline.slice(0, 300));
+  assert.ok(state.update(state.files.global(), g => { delete g.muse; }).ok);
+});

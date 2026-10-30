@@ -649,6 +649,71 @@ test('a file named for a review that is a link to somewhere outside the project 
   museOff();
 });
 
+test('Muse rejects an innocent git-listed name for a tracked secrets file, by the real name behind it', () => {
+  const listed = new Set(['docs/context.txt', 'config/.env.production', '.env.example', 'src/a.js'].map(key));
+  assert.strictEqual(review.unsendable(listed, 'docs/context.txt', 'config/.env.production'), 'a secrets file', 'a link named innocently to a secrets file');
+  assert.deepStrictEqual([review.unsendable(listed, '.env.example', '.env.example'), review.unsendable(listed, 'src/a.js', 'src/a.js')], [null, null], 'an example and a plain file go');
+});
+
+test('UTF-16 trading helpers Muse asks for are sent decoded, in both byte orders', () => {
+  const le = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from('bool LotCapRemovedLE()\n', 'utf16le')]);
+  const be = Buffer.concat([Buffer.from([0xfe, 0xff]), Buffer.from('bool LotCapRemovedBE()\n', 'utf16le').swap16()]);
+  const { root } = project('m4u', { 'src/RiskLe.mqh': le, 'src/RiskBe.mqh': be });
+  const text = review.museSupply(root, { files: {} })(['src/RiskLe.mqh', 'src/RiskBe.mqh']);
+  assert.ok(text.includes('### src/RiskLe.mqh\n') && text.includes('bool LotCapRemovedLE()') && text.includes('### src/RiskBe.mqh\n') && text.includes('bool LotCapRemovedBE()'), text);
+  assert.ok(!text.includes('\u0000') && !text.includes('�'), 'no mojibake');
+});
+
+// (a risky review's answers: a BUG at src/payments.js, and a cross-check confirming one finding)
+const refundBug = () => answerOf({ verdict: 'ISSUES_FOUND', findings: [{ severity: 'HIGH', title: 'a refund can be paid twice', location: 'src/payments.js:1', trigger: 't', harm: 'h',
+  failure: 'f', fix: 'x', test: 'pay once', label: 'BUG', reqs: [] }] });
+const confirming = id => JSON.stringify({ marks: [{ id, mark: 'CONFIRM', label: 'BUG', evidence: '', same_as: null }] });
+
+test('a files round whose session record held a tool counts neither Muse answer and takes its verification away', async () => {
+  const { root, taskFile } = project('m1t', { 'src/payments.js': 'p0\n', 'src/helper.js': 'HELPER-CODE\n' });
+  fs.writeFileSync(path.join(root, 'src/payments.js'), 'p1\n');
+  seed(root, s => { s.plans = { [key('src/payments.js')]: planFor(taskFile) }; });
+  const asking = JSON.stringify({ ...JSON.parse(answerOf({ coverage: 'MUSE-FIRST' })), more_files: ['src/helper.js'] });
+  museWith('m1t', [{ text: asking }, { text: answerOf({ coverage: 'MUSE-SECOND' }), record: { tools: ['read_memory'] } }]);
+  const hold = fs.mkdtempSync(path.join(HOME, 'm1t-hold-'));
+  setSpec({ byPrompt: [{ match: 'Cross-check (you are reviewer A)', answers: [{ text: confirming('B1') }] }, { match: 'reviewer A. Check', answers: [{ text: answerOf() }] },
+    { match: 'reviewer B. Attack', answers: [{ hold, text: refundBug() }] }] });
+  const running = review.review(root, { files: ['src/payments.js'], taskFile, risky: true });
+  await waitFor(path.join(hold, 'started')); // (the GPT B that took Muse's seat)
+  const meanwhile = stateOf(root);
+  assert.deepStrictEqual([meanwhile.acks[key('src/payments.js')], (meanwhile.riskyReviews || {})[key('src/payments.js')]], [undefined, undefined], 'Muse\'s clean answers never count');
+  fs.writeFileSync(path.join(hold, 'go'), '');
+  const r = await running;
+  assert.strictEqual(r.status, 'DONE', r.text);
+  assert.match(r.text, /Muse didn't take part: its review didn't complete \(Muse's session held tools read_memory/);
+  const cfg = JSON.parse(fs.readFileSync(state.files.config(), 'utf8'));
+  assert.deepStrictEqual([cfg.museVerified, cfg.museSkills], [undefined, undefined], 'no longer verified');
+  const s = stateOf(root);
+  assert.deepStrictEqual(Object.values(s.chains[r.chain].findings).map(f => [f.title, f.label, f.status]), [['a refund can be paid twice', 'BUG', 'open']]);
+  assert.ok(s.riskyReviews[key('src/payments.js')], 'the GPT pair counts');
+  const names = fs.readdirSync(r.bundle);
+  assert.ok(names.some(n => n.startsWith('discarded-') && n.endsWith('turn-1-B-files-1.md') && fs.readFileSync(path.join(r.bundle, n), 'utf8').includes('HELPER-CODE')), 'what was sent is still on record');
+  assert.ok(names.filter(n => n.startsWith('turn-')).every(n => !/MUSE-FIRST|MUSE-SECOND/.test(fs.readFileSync(path.join(r.bundle, n), 'utf8'))), 'no replayed turn holds Muse\'s answers');
+  museOff();
+});
+
+test('Muse\'s cross-check gets no files round even when its answer asks for a live project file', async () => {
+  const { root, taskFile } = project('m2c', { 'src/payments.js': 'p0\n', 'src/live-notes.js': 'LIVE-GUARD-SENTINEL\n' });
+  fs.writeFileSync(path.join(root, 'src/payments.js'), 'p1\n');
+  seed(root, s => { s.plans = { [key('src/payments.js')]: planFor(taskFile) }; });
+  const asking = JSON.stringify({ ...JSON.parse(confirming('A1')), more_files: ['src/live-notes.js'] });
+  const runs = museWith('m2c', [{ text: answerOf() }, { text: asking }, { text: confirming('A1') }]);
+  setSpec({ byPrompt: [{ match: 'reviewer A. Check', answers: [{ text: refundBug() }] }] });
+  const r = await review.review(root, { files: ['src/payments.js'], taskFile, risky: true });
+  assert.strictEqual(r.status, 'DONE', r.text);
+  assert.strictEqual(runs().length, 3, 'Muse\'s review, its cross-check and that cross-check\'s repair');
+  assert.ok(runs().every(c => !c.prompt.includes('LIVE-GUARD-SENTINEL')), 'the live file is never sent');
+  assert.ok(!fs.readdirSync(r.bundle).some(n => /-files-/.test(n)), 'no files round');
+  const found = Object.values(stateOf(root).chains[r.chain].findings).map(f => [f.title, f.label, f.status]);
+  assert.deepStrictEqual(found, [['a refund can be paid twice', 'BUG', 'open']], 'A\'s BUG, confirmed by the repaired mark');
+  museOff();
+});
+
 test.after(() => fs.rmSync(HOME, { recursive: true, force: true }));
 
 test('Muse\'s inline material ignores a snapshot path written into the reviewed code: the task\'s private notes never reach it', async () => {
