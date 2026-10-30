@@ -1,6 +1,7 @@
-// pair.js: a risky review by two GPTs (DESIGN.md section 7, Pairs). Reviewer A checks the task, reviewer B attacks
-// the risky parts. Each then marks the other's findings in its own session (the cross-check), and a deterministic
-// merge decides what stands. Any failed run records nothing: the pair is incomplete and runs again.
+// pair.js: a paired review (DESIGN.md section 7, Pairs): GPT as reviewer A, and as reviewer B a second GPT, or Muse
+// while `crosscheck muse on`. Reviewer A checks the task, reviewer B attacks the risky parts. Each then marks the
+// other's findings in its own session (the cross-check), and a deterministic merge decides what stands. Any failed run
+// records nothing: the pair is incomplete and runs again.
 'use strict';
 
 const ROLES = {
@@ -12,7 +13,8 @@ const ROLES = {
 - general: errors and timeouts, concurrency and stale state, the interfaces between parts.`,
 };
 const SEVERITY = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'];
-const RATING = ['MET', 'NOT_IN_THIS_CHANGE', 'PARTIAL', 'NOT_MET']; // (from best to worst)
+// (the rating a requirement shows when the two differ: an unmet one over a met one, a met one over "not in this change")
+const RATING = ['NOT_IN_THIS_CHANGE', 'MET', 'PARTIAL', 'NOT_MET'];
 const FIELDS = ['severity', 'title', 'location', 'trigger', 'harm', 'failure', 'fix', 'test'];
 const other = side => (side === 'A' ? 'B' : 'A');
 
@@ -21,10 +23,11 @@ const listOf = found => Object.entries(found)
   .join('\n') || 'None.';
 
 const crosscheckPrompt = (side, found) => `Cross-check (you are reviewer ${side}). The other reviewer, ${other(side)}, reported the findings below. Mark every one of them once, by id:
-- CONFIRM: it can really happen as described;
+- CONFIRM: it can really happen as described; in label, your own judgement of it: BUG if it can cause real harm, else GAP;
 - DISPUTE: it can't happen; give concrete evidence (path:line and why);
-- SAME_AS: it is one of your own findings; give that finding's id in same_as.
-Nothing else: no new findings in this step.
+- SAME_AS: it is one of your own findings; give that finding's id in same_as;
+- UNCLEAR: you can't tell from what you have; say in evidence what you couldn't check.
+label is null except for CONFIRM. Nothing else: no new findings in this step.
 
 ## Your findings
 ${listOf(found[side])}
@@ -32,47 +35,63 @@ ${listOf(found[side])}
 ## Reviewer ${other(side)}'s findings
 ${listOf(found[other(side)])}`;
 
+// The member whose text a merged finding keeps: one that called it what it ended up as, then the more severe, then
+// one with a real place over a requirement's "-" (ties: the first, A before B).
+function leadOf(members, label) {
+  const rank = m => [m.f.label === label ? 1 : 0, SEVERITY.indexOf(m.f.severity), m.f.location === '-' ? 0 : 1];
+  const better = (x, y) => { const i = x.findIndex((v, k) => v !== y[k]); return i >= 0 && x[i] > y[i]; };
+  return members.reduce((best, m) => (better(rank(m), rank(best)) ? m : best));
+}
+
 // Merges the two reviews. `found` holds each side's findings by id (A1…, B1…, unmet rows already among them), and
-// `marks` each side's marks on the other's findings. Agreement and harm are kept apart: a finding both found, or
-// one confirmed, is a BUG unless every author labelled it a GAP; a disputed one is a GAP, with the evidence; one
-// neither confirmed nor disputed is a BUG, since the code is risky.
+// `marks` each side's marks on the other's findings. Two findings are one only when each reviewer marked the other's
+// as the same as its own: a one-sided SAME_AS can't fold another's finding away, it confirms it, judged with the
+// label of the marker's own. Agreement and harm are kept apart: a finding both found, or confirmed, is a BUG unless
+// everyone who judged its harm called it a GAP; a disputed one is a GAP, with the evidence; one its checker couldn't
+// tell keeps its author's label.
 function merge(a, b, found, marks) {
+  const own = id => found[id[0]][id];
   const markOn = id => marks[other(id[0])].find(m => m.id === id);
-  const ids = [...Object.keys(found.A), ...Object.keys(found.B)];
-  const parent = Object.fromEntries(ids.map(id => [id, id]));
-  const top = id => (parent[id] === id ? id : top(parent[id]));
-  for (const side of ['A', 'B']) {
-    for (const m of marks[side]) {
-      if (m.mark !== 'SAME_AS') continue;
-      const [x, y] = [top(m.id), top(m.same_as)];
-      const [keep, joined] = ids.indexOf(x) < ids.indexOf(y) ? [x, y] : [y, x]; // (a group is led by its first id, A before B)
-      if (keep !== joined) parent[joined] = keep;
-    }
-  }
+  const twinOf = id => {
+    const m = markOn(id);
+    const back = m && m.mark === 'SAME_AS' ? markOn(m.same_as) : null;
+    return back && back.mark === 'SAME_AS' && back.same_as === id ? m.same_as : null;
+  };
   const findings = [];
-  for (const root of ids.filter(id => top(id) === id)) {
-    const members = ids.filter(id => top(id) === root).map(id => ({ id, f: found[id[0]][id], mark: markOn(id) }));
-    const sides = [...new Set(members.map(m => m.id[0]))];
-    const confirmed = members.some(m => m.mark && m.mark.mark === 'CONFIRM');
-    const disputed = sides.length === 1 && !confirmed && members.every(m => m.mark && m.mark.mark === 'DISPUTE');
-    const lead = members.reduce((best, m) => (SEVERITY.indexOf(m.f.severity) > SEVERITY.indexOf(best.f.severity) ? m : best));
-    // (found by both or confirmed: a BUG unless every member called it a GAP; disputed: a GAP; unsettled: a BUG)
+  for (const id of [...Object.keys(found.A), ...Object.keys(found.B)]) {
+    const twin = twinOf(id);
+    if (twin && id[0] === 'B') continue; // (a pair both named is taken once, from A's side)
+    const members = [id, ...(twin ? [twin] : [])].map(x => ({ id: x, f: own(x) }));
+    const mark = markOn(id);
     let label = 'BUG';
-    let agreement = 'unsettled';
-    if (sides.length === 2 || confirmed) {
-      agreement = sides.length === 2 ? 'both' : `confirmed by ${other(sides[0])}`;
+    let agreement;
+    if (twin) {
+      agreement = 'both';
       if (members.every(m => m.f.label === 'GAP')) label = 'GAP';
-    } else if (disputed) {
-      agreement = `disputed by ${other(sides[0])}: ${members.map(m => m.mark.evidence).join(' / ')}`;
+    } else if (mark.mark === 'DISPUTE') {
+      agreement = `disputed by ${other(id[0])}: ${mark.evidence}`;
       label = 'GAP';
+    } else if (mark.mark === 'UNCLEAR') {
+      agreement = `unsettled: ${other(id[0])} couldn't tell (${mark.evidence})`;
+      label = own(id).label;
+    } else { // (CONFIRM, or a one-sided SAME_AS: the checker judged the harm as its label, or as its own finding's)
+      agreement = `confirmed by ${other(id[0])}`;
+      const judged = mark.mark === 'CONFIRM' ? mark.label : own(mark.same_as).label;
+      if (own(id).label === 'GAP' && judged === 'GAP') label = 'GAP';
     }
-    const picked = Object.fromEntries(FIELDS.map(k => [k, lead.f[k]]));
-    findings.push({ ...picked, label, reqs: [...new Set(members.flatMap(m => m.f.reqs))], agreement, by: sides.sort().join('+') });
+    const picked = Object.fromEntries(FIELDS.map(k => [k, leadOf(members, label).f[k]]));
+    findings.push({ ...picked, label, reqs: [...new Set(members.flatMap(m => m.f.reqs))], agreement, by: twin ? 'A+B' : id[0] });
   }
+  const unmetRating = status => status === 'PARTIAL' || status === 'NOT_MET';
   const requirements = a.requirements.map(r => {
     const o = b.requirements.find(x => x.id === r.id) || r;
-    const worse = RATING.indexOf(o.status) > RATING.indexOf(r.status) ? o : r;
-    return { ...worse, evidence: `A: ${r.evidence} / B: ${o.evidence}` };
+    let shown = RATING.indexOf(o.status) > RATING.indexOf(r.status) ? o : r;
+    // (rated unmet by one side only, and every one of that side's own findings naming it disputed: the other side's
+    // rating stands; its own findings, since a merged one can name it through the other side's member)
+    const lone = unmetRating(r.status) === unmetRating(o.status) ? null : unmetRating(r.status) ? 'A' : 'B';
+    const linked = lone ? Object.keys(found[lone]).filter(id => own(id).reqs.includes(r.id)) : [];
+    if (linked.length && linked.every(id => markOn(id).mark === 'DISPUTE')) shown = lone === 'A' ? o : r;
+    return { ...shown, evidence: `A: ${r.evidence} / B: ${o.evidence}` };
   });
   const riskySides = [a, b].filter(x => x.class.level === 'risky');
   const level = riskySides.length ? 'risky' : [a, b].some(x => x.class.level === 'normal') ? 'normal' : 'none';
@@ -107,19 +126,20 @@ async function runPair({ prompt, promptB = prompt, runOne, materialize, firstA =
   const reviews = {};
   for (const [i, side] of ['A', 'B'].entries()) {
     if (first[i].status !== 'OK') return failed(side, 'review', first[i], first);
-    if (!first[i].session) return failed(side, 'review', { why: 'no session to resume for the cross-check' }, first);
     reviews[side] = first[i];
   }
   const found = {};
   for (const side of ['A', 'B']) found[side] = Object.fromEntries(materialize(reviews[side].answer).map((f, i) => [`${side}${i + 1}`, f]));
-  // (with nothing to mark on either side the cross-check could change nothing: two runs saved, two failures avoided)
-  if (!Object.keys(found.A).length && !Object.keys(found.B).length) {
-    return { status: 'OK', answer: merge(reviews.A.answer, reviews.B.answer, found, { A: [], B: [] }), session: reviews.A.session, pairComplete: true };
+  // (a side marks only when the other found something: an empty cross-check could change nothing, and its failure
+  // would cost the whole pair)
+  const marking = side => Object.keys(found[other(side)]).length > 0;
+  for (const [i, side] of ['A', 'B'].entries()) {
+    if (marking(side) && !first[i].session) return failed(side, 'review', { why: 'no session to resume for the cross-check' }, first);
   }
-  const checks = await Promise.all(['A', 'B'].map(side => runOne(crosscheckPrompt(side, found), {
+  const checks = await Promise.all(['A', 'B'].map(side => (!marking(side) ? { status: 'OK', answer: { marks: [] } } : runOne(crosscheckPrompt(side, found), {
     label: `2-${side}`, resume: reviews[side].session, strict: true, kind: 'crosscheck',
     asked: { otherIds: Object.keys(found[other(side)]), ownIds: Object.keys(found[side]) },
-  }, side)));
+  }, side))));
   for (const [i, side] of ['A', 'B'].entries()) if (checks[i].status !== 'OK') return failed(side, 'cross-check', checks[i], checks);
   const answer = merge(reviews.A.answer, reviews.B.answer, found, { A: checks[0].answer.marks, B: checks[1].answer.marks });
   return { status: 'OK', answer, session: reviews.A.session, pairComplete: true };

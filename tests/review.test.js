@@ -383,7 +383,7 @@ test('an answer still wrong after its one repair applies nothing and keeps its b
   assert.strictEqual(calls.length, 2);
   assert.deepStrictEqual(calls[1].args.slice(0, 2), ['exec', 'resume']);
   assert.ok(calls[1].args.includes('0123abcd-0000-4000-8000-00000000c0de'));
-  assert.deepStrictEqual(stateOf(root), { ...before, running: {}, applied: {}, plans: {}, skips: {}, needsPlan: {}, riskyReviews: {} });
+  assert.deepStrictEqual(stateOf(root), { ...before, running: {}, applied: {}, plans: {}, skips: {}, needsPlan: {}, riskyReviews: {}, riskyVersions: {} });
   assert.strictEqual(fs.readFileSync(path.join(root, gaps.NAME), 'utf8'), '# Known gaps\n');
   const manifest = JSON.parse(fs.readFileSync(path.join(r.bundle, 'manifest.json'), 'utf8'));
   assert.deepStrictEqual(manifest.files[key('src/a.js')], { path: 'src/a.js', at: 7, session: 'A', baseline: null, frozen: sha('a1\n') });
@@ -516,7 +516,7 @@ test('an automatic gap write cannot acknowledge a shell edit made during the rev
 test.after(() => fs.rmSync(HOME, { recursive: true, force: true }));
 
 test('Muse\'s inline material ignores a snapshot path written into the reviewed code: the task\'s private notes never reach it', async () => {
-  const { root, taskFile } = project('t-muse', { 'src/a.js': 'a0\n' });
+  const { root, taskFile } = project('t-muse', { 'src/a.js': 'a0\n', 'src/b.js': 'b0\n' }); // (both changed, so both shown as diffs)
   const museSpec = path.join(HOME, 'muse-spec.json');
   const museLog = path.join(HOME, 'muse-calls.jsonl');
   Object.assign(process.env, { FAKE_MUSE_SPEC: museSpec, FAKE_MUSE_LOG: museLog });

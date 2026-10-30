@@ -50,7 +50,9 @@ const normal = { level: 'normal', files: [], why: '-' };
 const reviewAnswer = (findings = [], { cls = normal, reqs = rows() } = {}) => JSON.stringify({
   verdict: findings.length || reqs.some(r => r.status === 'NOT_MET' || r.status === 'PARTIAL') ? 'ISSUES_FOUND' : 'NO_ISSUES',
   findings, requirements: reqs, possibly_missing: [], class: cls, coverage: 'c' });
-const marks = list => JSON.stringify({ marks: list.map(([id, mark, sameAs = null, evidence = mark === 'DISPUTE' ? 'src/x.js:1 guards it' : '']) => ({ id, mark, evidence, same_as: sameAs })) });
+// (a CONFIRM judges the harm a BUG unless `label` says otherwise; an UNCLEAR names what it couldn't check)
+const marks = list => JSON.stringify({ marks: list.map(([id, mark, sameAs = null, evidence = mark === 'DISPUTE' ? 'src/x.js:1 guards it' : mark === 'UNCLEAR' ? 'the caller isn\'t in my material' : '',
+  label = mark === 'CONFIRM' ? 'BUG' : null]) => ({ id, mark, label, evidence, same_as: sameAs })) });
 const followAnswer = (followups = [], cls = normal) => JSON.stringify({ verdict: followups.some(f => f.status === 'MAINTAIN') ? 'ISSUES_REMAIN' : 'RESOLVED',
   followups, findings: [], requirements: [], possibly_missing: [], class: cls, coverage: 'c' });
 // The stub's answers by prompt: each reviewer's review and cross-check, and follow-ups (which resume reviewer A);

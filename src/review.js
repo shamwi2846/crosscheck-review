@@ -17,7 +17,7 @@ const muse = require('./muse');
 const CLI = `node "${path.join(__dirname, 'crosscheck.js')}"`;
 const DELETED = 'deleted'; // the frozen version of a file that doesn't exist
 const RISKY_FILE = /\.(mq5|mqh|set)$/i; // trading files: always reviewed in pairs (step 3)
-const MAPS = ['changes', 'acks', 'running', 'applied', 'chains', 'escalations', 'plans', 'skips', 'needsPlan', 'riskyReviews'];
+const MAPS = ['changes', 'acks', 'running', 'applied', 'chains', 'escalations', 'plans', 'skips', 'needsPlan', 'riskyReviews', 'riskyVersions'];
 
 const sha = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const newAttempt = () => `${new Date().toISOString().replace(/\D/g, '').slice(0, 14)}-${crypto.randomBytes(3).toString('hex')}`;
@@ -347,6 +347,10 @@ function freeze(root, { attempt, session, names = [], files, admittedAt, rev, ta
   const narrow = !!chain && chain.rounds.length >= 3;
   const code = [];
   const wholeKeys = []; // (in a paired attempt, the files the reviewers read in full: these get its receipt)
+  // (the frozen copies the prompt lists but doesn't show whole, as [label, snapshot]: the material Muse, which has no
+  // tools, gets inline, besides what the prompt shows; and the snapshots it does show whole)
+  const copies = [];
+  const wholeShown = new Set();
   for (const [key, f] of Object.entries(files)) {
     f.frozen = snapshot(root, bytesOf(path.join(root, f.path)));
     if (f.baseline === undefined) { // (no change record: the version git has, if any)
@@ -359,12 +363,12 @@ function freeze(root, { attempt, session, names = [], files, admittedAt, rev, ta
     const addWhole = paired && riskyKeys.includes(key) && f.frozen !== DELETED && !shown.whole;
     if (addWhole) code.push(`### ${f.path} (whole file, read in full)\n${fence(snapText(root, f.frozen))}`);
     if (paired && (riskyKeys.includes(key) || shown.whole)) wholeKeys.push(key);
+    if (f.frozen !== DELETED && (shown.whole || addWhole)) wholeShown.add(f.frozen);
+    else if (f.frozen !== DELETED) copies.push([f.path, f.frozen]);
   }
   // A plan counts only for this task and its current requirements; the cases (or GPT's reason for none) and the frozen
   // tests go to GPT.
   const current = Object.fromEntries(Object.entries(plans).filter(([, p]) => forTask({ id: taskId, reqHash: task.reqHash }, p)));
-  // (the frozen copies the prompt lists, as [label, snapshot]: the only material Muse, which has no tools, gets inline)
-  const copies = Object.values(files).filter(f => f.frozen !== DELETED).map(f => [f.path, f.frozen]);
   const planText = Object.entries(current).map(([key, p]) => planOf(root, files[key].path, p, copies)).join('\n\n');
   const callers = paired ? callersOf(root, riskyKeys.map(k => files[k].path), new Set(Object.keys(files))) : [];
   const callerCopies = callers.slice(0, 20).map(p => [p, snapshot(root, fs.readFileSync(path.join(root, p)))]);
@@ -406,12 +410,13 @@ function freeze(root, { attempt, session, names = [], files, admittedAt, rev, ta
   fs.mkdirSync(bundleDir(root, attempt), { recursive: true });
   fs.writeFileSync(path.join(bundleDir(root, attempt), 'manifest.json'), JSON.stringify(manifest, null, 2));
   fs.writeFileSync(path.join(bundleDir(root, attempt), 'prompt.md'), prompt);
-  const musePrompt = withMuse ? inlined(root, prompt, copies) : null;
+  // (a copy the prompt already shows whole, such as a whole-shown test a plan names too, isn't pasted again)
+  const musePrompt = withMuse ? inlined(root, prompt, copies.filter(([, hash]) => !wholeShown.has(hash))) : null;
   if (musePrompt) fs.writeFileSync(path.join(bundleDir(root, attempt), 'prompt-muse.md'), musePrompt);
   return { manifest, prompt, musePrompt };
 }
 
-const MUSE_NO_TOOLS = 'You have no tools in this review. Wherever these instructions say to read, open or search a file, use only the copies inline at the end: nothing else of the project is available to you. Say in coverage what you couldn\'t check.';
+const MUSE_NO_TOOLS = 'You have no tools in this review. Wherever these instructions say to read, open or search a file, use only what this prompt holds: the files it shows whole, and the copies inline at the end. Nothing else of the project is available to you. Say in coverage what you couldn\'t check, and mark a finding UNCLEAR in a cross-check when what you have can\'t settle it.';
 const MUSE_PROMPT_MAX = 2000000; // characters, about half of Muse's context: material past it is GPT's alone
 
 // Muse's version of a prompt (it has no tools): without the MQL5 docs note, and with the frozen copies the prompt
@@ -585,6 +590,7 @@ function apply(root, manifest, result) {
       // escalated, so its next review is paired again)
       if (pairComplete && manifest.wholeKeys.includes(key) && unchanged && !taskChanged) {
         s.riskyReviews[key] = manifest.admittedAt;
+        s.riskyVersions[key] = f.frozen; // (the version that receipt is for)
         delete s.escalations[key];
         chain.wholeKeys = [...new Set([...(chain.wholeKeys || []), key])];
       }
@@ -592,9 +598,11 @@ function apply(root, manifest, result) {
         // (from now on only a real test plan counts for it in this task, never a skip; each task keeps its own record)
         const records = [].concat(s.needsPlan[key] || []).filter(r => !forTask(task, r));
         s.needsPlan[key] = [...records, { task: task.id, reqHash: task.reqHash }];
-        // (a file this chain's pair read in full needs a plan, not another pair; any other file that turns risky gets
-        // its own paired review, as in a chain that isn't paired)
-        if (!(chain.wholeKeys || []).includes(key)) {
+        // (a file this chain's pair read in full needs a plan, not another pair; so does one a later completed pair
+        // certified at this very version; any other file that turns risky gets its own paired review, as in a chain
+        // that isn't paired)
+        const certified = s.riskyVersions[key] === f.frozen && s.riskyReviews[key] > ((chain.risky || {})[key] || 0);
+        if (!(chain.wholeKeys || []).includes(key) && !certified) {
           s.escalations[key] = { chain: id, at: Date.now() };
           chain.risky = { ...chain.risky, [key]: Date.now() }; // (this chain's own record: closing it needs a paired review)
           escalated.push(f.path);

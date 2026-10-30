@@ -532,3 +532,12 @@ Findings left unfixed on purpose. Entries are never deleted, only marked fixed.
 - Fix: Append note to applyAndSummarize's refusal text.
 - Log: 20261030125102-78deb1
 - Why skipped: pair: both
+
+## G60 · fixed · 2026-10-30 · LOW
+- Task: A sounder cross-check merge
+- Where: src/review.js:365-370
+- Problem: F2: Whole-shown tests can still be duplicated through test plans
+- Trigger: A reviewed test file is shown whole, such as a new test or a review using --full, and a current plan names that test.
+- Fix: After collecting all copies, exclude snapshots whose hashes were already shown whole in the reviewed-file material.
+- Log: 20261030152729-5108f4
+- Why skipped: pair: both

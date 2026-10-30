@@ -42,7 +42,7 @@ When an external tool's behavior matters and is uncertain, check its docs and ru
 ## Findings
 - BUG: it can really happen and cause real harm. In risky code an unlikely trigger with a big possible loss is a BUG too (a duplicate order, an order without a stop loss, a migration that loses rows, a leaked key). GAP: everything else, recorded with its severity.
 - You make the final call. In risky code a BUG becomes a GAP only with a one-line proof that it can't happen.
-- Paired reviews: a finding both found is a BUG unless both called it harmless; for the rest, each checks the other's: it can happen means BUG, shown impossible means GAP, unclear means BUG in risky code.
+- Paired reviews: a finding both found is a BUG unless both called it harmless; for the rest, each checks the other's: it can happen means BUG unless both call it harmless, shown impossible means GAP, unclear keeps the author's label (an unclear BUG stays a BUG). Check a dispute's proof yourself before accepting the GAP, above all one from Muse, which sees only what its prompt holds.
 - Fix an existing gap only when your change makes it realistic. A missing or weak test is rated by its real harm.
 - CodeRabbit gets the same rules: fix its real bugs, record nitpicks as gaps with a reply.
 - Recurring confirmed mistakes go into the project's lessons.

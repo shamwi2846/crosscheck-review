@@ -30,7 +30,7 @@ test('a failed cross-check applies nothing, and a fallback answer cannot certify
   const xB = calls.filter(c => c.prompt.includes('Cross-check (you are reviewer B)'));
   assert.ok(xB.length >= 1 && xB.every(c => c.args[1] === 'resume' && c.args.includes('sess-B')));
   assert.ok(!calls.some(c => c.args[1] !== 'resume' && c.prompt.includes('Cross-check')), 'a cross-check never starts a fresh session');
-  const empty = { acks: {}, running: {}, applied: {}, skips: {}, needsPlan: {}, riskyReviews: {} }; // (the maps admission adds)
+  const empty = { acks: {}, running: {}, applied: {}, skips: {}, needsPlan: {}, riskyReviews: {}, riskyVersions: {} }; // (the maps admission adds)
   assert.deepStrictEqual({ ...stateOf(p.root), running: {} }, { ...empty, ...JSON.parse(before) });
   assert.ok(fs.existsSync(path.join(r.bundle, 'manifest.json')));
   const answerFile = path.join(HOME, 't1-answer.json');
