@@ -552,9 +552,13 @@ const put = (root, rel, text) => { fs.mkdirSync(path.dirname(path.join(root, rel
 
 test('a file Muse asks for is sent only when it is a git-listed, regular, non-secret project file within the limits; every other gets why not', () => {
   const { root, git } = project('t2s', { 'src/seed.js': 's\n' });
+  // (credential files of common tools, each holding NAME-SECRET)
+  const secrets = ['.npmrc', 'deploy/.netrc', '.pgpass', 'web/.htpasswd', '.envrc', '.git-credentials', 'config/credentials.json', 'infra/prod.tfvars',
+    'infra/prod.tfvars.json', 'infra/terraform.tfstate', 'infra/terraform.tfstate.backup', 'vault.kdbx'];
   const files = { 'src/app.js': 'APP-PUBLIC\n', '.env.example': 'EXAMPLE-PUBLIC\n', '.gitignore': 'ignored.txt\n', 'config/.env.production': 'ENV-SECRET\n',
-    'keys/id_ed25519': 'KEY-SECRET\n', 'keys/client.p12': 'P12-SECRET\n', 'vendor/lib.js': 'VENDOR-COMMITTED\n',
-    'big/edge.js': 'e'.repeat(512 * 1024), 'big/over.js': 'o'.repeat(512 * 1024 + 1), 'big/a.js': 'a'.repeat(500 * 1024) };
+    'keys/id_ed25519': 'KEY-SECRET\n', 'keys/client.p12': 'P12-SECRET\n', 'vendor/lib.js': 'VENDOR-COMMITTED\n', '..cache/x.js': 'DOTDOT-PUBLIC\n',
+    'big/edge.js': 'e'.repeat(512 * 1024), 'big/over.js': 'o'.repeat(512 * 1024 + 1), 'big/a.js': 'a'.repeat(500 * 1024),
+    ...Object.fromEntries(secrets.map(rel => [rel, `${path.basename(rel)}-SECRET\n`])) };
   for (const [rel, text] of Object.entries(files)) put(root, rel, text);
   git(['add', '-A']);
   git(['commit', '-qm', 'files']);
@@ -567,20 +571,24 @@ test('a file Muse asks for is sent only when it is a git-listed, regular, non-se
   fs.symlinkSync(outside, path.join(root, 'vendor'), 'junction');
   const snap = path.join(state.projectDir(root), 'snap', 'SNAP-NAME');
   put(path.dirname(snap), 'SNAP-NAME', 'SNAP-SECRET\n');
-  const asked = ['src/app.js', 'src/new.js', '.env.example', 'big/edge.js', 'big/a.js', 'big/over.js', 'config/.env.production', 'keys/id_ed25519', 'keys/client.p12',
-    'ignored.txt', 'src', 'src/missing.js', '../t2s-private/credentials.json', snap, 'vendor/lib.js', 'src\\app.js'];
+  // (a backslash names the same file only on Windows; elsewhere it is part of a file name)
+  const twice = process.platform === 'win32' ? ['src\\app.js'] : [];
+  const asked = ['src/app.js', 'src/new.js', '.env.example', '..cache/x.js', 'big/edge.js', 'big/a.js', 'big/over.js', 'config/.env.production', 'keys/id_ed25519',
+    'keys/client.p12', ...secrets, 'ignored.txt', 'src', 'src/missing.js', '../t2s-private/credentials.json', snap, 'vendor/lib.js', ...twice];
   const text = review.museSupply(root, { files: {} })(asked);
-  for (const [rel, sentinel] of [['src/app.js', 'APP-PUBLIC'], ['src/new.js', 'NEW-PUBLIC'], ['.env.example', 'EXAMPLE-PUBLIC'], ['big/edge.js', 'eeee']]) {
+  for (const [rel, sentinel] of [['src/app.js', 'APP-PUBLIC'], ['src/new.js', 'NEW-PUBLIC'], ['.env.example', 'EXAMPLE-PUBLIC'], ['..cache/x.js', 'DOTDOT-PUBLIC'], ['big/edge.js', 'eeee']]) {
     assert.ok(text.includes(`### ${rel}\n`) && text.includes(sentinel), `${rel} is sent`);
   }
   const why = {
     'big/a.js': 'past the 1000000-character limit of one request', 'big/over.js': 'larger than 512 KB', 'config/.env.production': 'a secrets file',
     'keys/id_ed25519': 'a secrets file', 'keys/client.p12': 'a secrets file', 'ignored.txt': 'not a file git lists for the project', src: 'not a file',
     'src/missing.js': 'no such file', '../t2s-private/credentials.json': 'outside the project', [snap]: 'outside the project',
-    'vendor/lib.js': 'a link to somewhere outside the project', 'src\\app.js': 'asked for twice',
+    'vendor/lib.js': 'a link to somewhere outside the project', ...Object.fromEntries(secrets.map(rel => [rel, 'a secrets file'])),
+    ...Object.fromEntries(twice.map(rel => [rel, 'asked for twice'])),
   };
   for (const [rel, reason] of Object.entries(why)) assert.ok(text.includes(`- ${rel}: ${reason}\n`), `${rel}: ${reason}`);
-  for (const secret of ['ENV-SECRET', 'KEY-SECRET', 'P12-SECRET', 'IGNORED-SECRET', 'OUTSIDE-SECRET', 'SNAP-SECRET', 'VENDOR-OUTSIDE-SECRET', 'aaaa', 'oooo']) {
+  for (const secret of ['ENV-SECRET', 'KEY-SECRET', 'P12-SECRET', 'IGNORED-SECRET', 'OUTSIDE-SECRET', 'SNAP-SECRET', 'VENDOR-OUTSIDE-SECRET', 'aaaa', 'oooo',
+    ...secrets.map(rel => `${path.basename(rel)}-SECRET`)]) {
     assert.ok(!text.includes(secret), `${secret} is never sent`);
   }
 });

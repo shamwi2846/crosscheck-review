@@ -604,3 +604,12 @@ Findings left unfixed on purpose. Entries are never deleted, only marked fixed.
 - Fix: -
 - Log: 20261030192654-c32ed8
 - Why skipped: no code is left unmet: R7's remaining part is the PR work itself (the PR 31 reply and PR 32's CodeRabbit round), as closed in chain C20261030201646-5128c6
+
+## G68 · open · 2026-10-30 · LOW
+- Task: Muse asks for the files it needs; two isolation fixes
+- Where: -
+- Problem: F2: The ..cache outside-path fix is not applied to testplan and skip target validation
+- Trigger: Run testplan or skip with --files ..cache/pay.js for an existing, git-listed file in a project directory named ..cache.
+- Fix: Give modes.targetsOf the same segment-based outside check as src/review.js (export and reuse outsidePath, or repeat the .. / ../ test there), with no other change.
+- Log: 20261030205514-f75593
+- Why skipped: pair: confirmed by A

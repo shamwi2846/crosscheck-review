@@ -69,6 +69,10 @@ const versionOf = (root, rel) => { const bytes = bytesOf(path.join(root, rel)); 
 // (a fence longer than any run of backticks in the text, so the text can't end it)
 const fence = text => { const ticks = '`'.repeat(Math.max(3, ...[...text.matchAll(/`+/g)].map(m => m[0].length + 1))); return `${ticks}\n${text}\n${ticks}`; };
 
+// Whether a project-relative path (with forward slashes) leaves the project: a parent folder ("..", "../x") or another
+// drive, but not a name that merely starts with two dots ("..cache/x.js").
+const outsidePath = rel => rel === '..' || rel.startsWith('../') || path.isAbsolute(rel);
+
 // The named paths, resolved from the project root to their real spelling: each must be a file, or a deletion git
 // knows about (found in HEAD by its key, since Windows may spell it differently).
 function resolveNamed(root, names) {
@@ -77,10 +81,10 @@ function resolveNamed(root, names) {
   for (const name of names) {
     const abs = path.resolve(root, name);
     let rel = path.relative(root, abs).replace(/\\/g, '/');
-    if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return { why: `${name} is outside the project` };
+    if (!rel || outsidePath(rel)) return { why: `${name} is outside the project` };
     if (fs.existsSync(abs) && fs.statSync(abs).isFile()) {
       rel = path.relative(fs.realpathSync.native(root), fs.realpathSync.native(abs)).replace(/\\/g, '/');
-      if (rel.startsWith('..') || path.isAbsolute(rel)) return { why: `${name} is a link to somewhere outside the project` };
+      if (outsidePath(rel)) return { why: `${name} is a link to somewhere outside the project` };
     } else {
       // (-z: names come unquoted, as they are, non-ASCII letters included)
       tracked = tracked || String(git(root, ['ls-tree', '-r', '-z', '--name-only', 'HEAD'], 'utf8').stdout || '').split('\0').filter(Boolean);
@@ -476,18 +480,21 @@ function inlined(root, prompt, copies) {
 const MORE_FILE_MAX = 512 * 1024; // bytes of one file Muse asks for
 const MORE_TOTAL_MAX = 1000000; // characters of all the files one request gets
 
-// A secrets file by its name: .env and its variants other than examples, private keys and key stores.
+// A secrets file by its name: .env and its variants other than examples, private keys, key stores and password
+// vaults, credential files of common tools (npm, netrc, PostgreSQL, Apache, direnv, git), credentials.*, and
+// Terraform's variables and state.
 function secretName(rel) {
   const b = path.basename(rel).toLowerCase();
   return (/^\.env(\..+)?$/.test(b) && !/^\.env\.(example|sample|template)$/.test(b))
-    || /\.(pem|key|p8|pkcs8|p12|pfx|ppk|jks|keystore)$/.test(b) || /^id_(rsa|dsa|ecdsa|ed25519)(_sk)?$/.test(b);
+    || /\.(pem|key|p8|pkcs8|p12|pfx|ppk|jks|keystore|kdbx|tfvars|tfvars\.json|tfstate|tfstate\.backup)$/.test(b) || /^id_(rsa|dsa|ecdsa|ed25519)(_sk)?$/.test(b)
+    || /^\.(envrc|npmrc|netrc|pgpass|htpasswd|git-credentials)$/.test(b) || /^credentials(\..+)?$/.test(b);
 }
 
 // Where a project path Muse may get really is: { rel, real, realRel }, or { why } when it lies outside the project once
 // links are followed, is missing, or isn't a file.
 function located(root, asked) {
   const rel = path.relative(root, path.resolve(root, asked)).replace(/\\/g, '/');
-  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return { why: 'outside the project' };
+  if (!rel || outsidePath(rel)) return { why: 'outside the project' };
   let real;
   try {
     real = fs.realpathSync.native(path.resolve(root, asked));
@@ -495,7 +502,7 @@ function located(root, asked) {
     return { why: 'no such file' };
   }
   const realRel = path.relative(fs.realpathSync.native(root), real).replace(/\\/g, '/');
-  if (realRel.startsWith('..') || path.isAbsolute(realRel)) return { why: 'a link to somewhere outside the project' };
+  if (outsidePath(realRel)) return { why: 'a link to somewhere outside the project' };
   return fs.statSync(real).isFile() ? { rel, real, realRel } : { why: 'not a file' };
 }
 

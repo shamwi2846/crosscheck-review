@@ -222,7 +222,9 @@ async function ask({ effort = 'high', resume = null, schema = null, prompt, home
       // (a failed run is checked too, before any retry, when it left a record: what its session held counts even
       // though its answer doesn't)
       const seen = inspect(p.command, session, p.skills);
-      if (!seen.unreadable && seen.problems.length) return { ok: false, reason: `Muse's failed run held ${seen.problems.join('; ')}; ${unverify()}` };
+      // (a usage or login failure still starts the cooldown, and still says so)
+      const limit = result.limit ? `; ${result.reason}${cooldown()}` : '';
+      if (!seen.unreadable && seen.problems.length) return { ok: false, reason: `Muse's failed run held ${seen.problems.join('; ')}; ${unverify()}${limit}` };
     }
     if (result.ok || result.limit || result.timedOut || result.looped) break;
   }
