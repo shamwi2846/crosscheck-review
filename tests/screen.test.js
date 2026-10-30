@@ -83,10 +83,13 @@ test('a GPT worker that outlives its killed driver keeps the desktop until it en
   setSpec({ ...listings(), exec: [{ orphan: pidFile, text: answer }] });
   const run = started(a, ['computer', '--task', 'Inspect the application'], 'A');
   await until(() => ((shared().desktop || {}).workers || []).length >= 3, 'the noted processes');
-  const { pid, workers } = shared().desktop;
+  const { pid } = shared().desktop;
   assert.strictEqual(pid, run.child.pid);
   spawnSync('taskkill', ['/PID', String(pid), '/F'], { windowsHide: true }); // (forced: the driver's own cleanup never runs)
   await run.closed;
+  // (read once the driver is gone: it may have noted another worker after the count above, and one left running
+  // would keep the desktop)
+  const workers = (shared().desktop || {}).workers || [];
   const living = () => workers.filter(state.mayRun);
   assert.ok(living().length, 'a worker survives its driver');
   const busy = cli(b, ['computer', '--task', 'Inspect the application'], 'B');

@@ -163,6 +163,32 @@ test('a risky review whose pair didn\'t complete is paired again on a plain retr
   assert.deepStrictEqual([s.acks[key('src/payments.js')], s.escalations[key('src/payments.js')]], [sha('p1\n'), undefined], 'only the completed pair acknowledges it');
 });
 
+test('when only GPT B\'s first review fails, B alone runs again beside A\'s: A\'s BUG stays open, nothing counts before B is done, and B\'s failed turns are set aside', async () => {
+  const { waitFor } = require('./pair-fixture');
+  const p = project('t9r', { 'src/payments.js': 'p0\n' });
+  write(p.root, 'src/payments.js', 'p1\n');
+  const k = key('src/payments.js');
+  seed(p.root, s => { s.changes = { [k]: pending('src/payments.js') }; s.acks = { [k]: 'the last reviewed version' }; s.plans = { [k]: plan(p) }; });
+  const bug = reviewAnswer([finding('a refund can be paid twice', 'src/payments.js:1', { severity: 'HIGH', test: 'pay once' })]);
+  const hold = fs.mkdtempSync(path.join(HOME, 't9r-hold-'));
+  // (B's first answer and its repair are both unusable; its new try is held, finds nothing and confirms A's BUG)
+  setPair({ A: [bug], B: ['B-FAILED not JSON', 'B-FAILED still not JSON', { text: reviewAnswer(), hold }], xB: [marks([['A1', 'CONFIRM']])] });
+  const running = review.review(p.root, { session: 'A', taskFile: p.taskFile, risky: true });
+  await waitFor(path.join(hold, 'started'));
+  const meanwhile = stateOf(p.root);
+  assert.deepStrictEqual([meanwhile.acks[k], !!meanwhile.changes[k], (meanwhile.riskyReviews || {})[k]], ['the last reviewed version', true, undefined], 'nothing counts while B runs again');
+  fs.writeFileSync(path.join(hold, 'go'), '');
+  const r = await running;
+  assert.strictEqual(r.status, 'DONE', r.text);
+  const fresh = execCalls().filter(c => c.args[1] !== 'resume');
+  assert.deepStrictEqual(['reviewer A. Check', 'reviewer B. Attack'].map(m => fresh.filter(c => c.prompt.includes(m)).length), [1, 2], 'A once; B\'s failed review and its one new try');
+  assert.ok(stateOf(p.root).riskyReviews[k], 'the completed pair counts');
+  assert.deepStrictEqual(review.openBugs(p.root).map(f => [f.title, f.label]), [['a refund can be paid twice', 'BUG']], 'A\'s BUG stays open, so a commit is refused');
+  const names = fs.readdirSync(r.bundle);
+  assert.ok(names.some(f => f.startsWith('discarded-')), 'B\'s failed turns were set aside');
+  assert.ok(names.filter(f => f.startsWith('turn-')).every(f => !fs.readFileSync(path.join(r.bundle, f), 'utf8').includes('B-FAILED')), 'no replayed turn holds them');
+});
+
 test('an unavailable reviewer leaves the pair incomplete, saying GPT was unavailable', async () => {
   const ok = { status: 'OK', answer: JSON.parse(reviewAnswer()), session: 's' };
   const r = await pair.runPair({ prompt: 'p', materialize: () => [],
