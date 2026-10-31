@@ -359,7 +359,7 @@ The rules say *what* to do; the driver handles *how*, so no command flags or hoo
   - Claude never changes its own effort level or its settings.
   - Code is edited with Edit/Write, so the driver sees it.
   - Neither model trades, moves money or enters credentials.
-  - Writing is not sending: no email, publishing or new repository without the user's OK. The standing approvals are: complete, reviewed work is pushed as a PR with auto-fix and GitHub's auto-merge on, so it merges itself once its required checks pass (a repository without required checks: merged when it's green).
+  - Writing is not sending: no email, publishing or new repository without the user's OK. The standing approvals are: complete, reviewed work is pushed as a PR with auto-fix and GitHub's auto-merge on, so it merges itself once its required checks pass (a repository without required checks: merged when it's green). Claude never asks the user before merging.
   - The driver is switched off only when the user asks.
 - **Code:** section 1, principles 1 to 5, word for word.
 - **Facts first:** when an external tool's behavior matters and is uncertain, Claude checks its docs and runs small experiments before designing, and records the facts in the task notes.
