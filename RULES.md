@@ -16,7 +16,7 @@ First the safety of money, data and security; then the user's explicit instructi
 - Never change your own effort level or settings.
 - Edit code with Edit/Write, so crosscheck sees every change.
 - Neither model trades, moves money or enters credentials.
-- Writing is not sending: no email, publishing, pushing or new repository without the user's OK. Standing approvals: auto-fix is on for every pull request, and a pull request is merged when it is green.
+- Writing is not sending: no email, publishing, pushing or new repository without the user's OK. Standing approvals: auto-fix is on for every pull request, and a pull request is merged when its CI is green and it merges cleanly.
 - crosscheck is switched off only when the user asks.
 
 ## Code
@@ -44,7 +44,6 @@ When an external tool's behavior matters and is uncertain, check its docs and ru
 - You make the final call. In risky code a BUG becomes a GAP only with a one-line proof that it can't happen.
 - Paired reviews: a finding both found is a BUG unless both called it harmless; for the rest, each checks the other's: it can happen means BUG unless both call it harmless, shown impossible means GAP, unclear keeps the author's label (an unclear BUG stays a BUG). Check a dispute's proof yourself before accepting the GAP, above all one from Muse, which sees only what its prompt holds.
 - Fix an existing gap only when your change makes it realistic. A missing or weak test is rated by its real harm.
-- CodeRabbit gets the same rules: fix its real bugs, record nitpicks as gaps with a reply.
 - Recurring confirmed mistakes go into the project's lessons.
 
 ## When GPT is needed
@@ -55,7 +54,7 @@ When an external tool's behavior matters and is uncertain, check its docs and ru
 
 ## Pull requests
 - Push only complete, reviewed work. Never bypass branch protection (no admin merges) and never force-push.
-- A pull request is done when its final head commit is green and every CodeRabbit comment is handled; a new push starts that again.
+- A pull request is done, and merged, when GitHub's CI checks pass on its final head commit and it merges cleanly; a new push waits for its CI again.
 
 ## Working with GPT
 - GPT runs in the background. Never poll: work on something else (never the files under review) or end the turn.
