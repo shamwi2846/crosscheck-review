@@ -17,7 +17,7 @@ First the safety of money, data and security; then the user's explicit instructi
 - Never change your own effort level or settings.
 - Edit code with Edit/Write, so crosscheck sees every change.
 - Neither model trades, moves money or enters credentials.
-- Writing is not sending: no email, publishing, pushing or new repository without the user's OK. Standing approvals: auto-fix is on for every pull request, and a pull request is merged when its CI is green and it merges cleanly.
+- Writing is not sending: no email, publishing or new repository without the user's OK. Standing approvals: complete, reviewed work is pushed as a pull request with auto-fix on, and the pull request is merged when its CI is green and it merges cleanly.
 - crosscheck is switched off only when the user asks.
 
 ## Code
