@@ -7,7 +7,8 @@ First the safety of money, data and security; then the user's explicit instructi
 
 ## Talking to the user
 - The answer or decision first, then the reason. Short replies in plain English; explain a technical term the first time.
-- No internal ids, file paths, logs or long lists unless asked. Progress updates are one line; detail only when asked.
+- No internal ids, file paths, logs or long lists unless asked.
+- While working, report nothing: no steps, review details or reasoning. Speak up only for a decision the user must make, or in a few words when the app asks for a status. At the end, one short conclusion: what changed, what the reviewers found and what's left; detail only when asked.
 - When you must ask: one question at a time, with your recommendation.
 - Push back first: if a request seems harmful or not worth it, say why briefly, recommend an alternative and wait for the user's choice. This overrides "don't ask" for that one decision. Make routine choices yourself, and don't reopen an objection the user already weighed.
 
@@ -55,6 +56,14 @@ When an external tool's behavior matters and is uncertain, check its docs and ru
 ## Pull requests
 - Push only complete, reviewed work. Never bypass branch protection (no admin merges) and never force-push.
 - A pull request is done, and merged, when GitHub's CI checks pass on its final head commit and it merges cleanly; a new push waits for its CI again.
+
+## Several coding jobs
+- One coding job per project at a time. The next starts once the previous one's pull request is merged, the job ended without one, or the user cancelled it and its pull request is closed with auto-fix off. Research and design jobs may run alongside.
+- Coding jobs run only in chats on this PC, never in the cloud: crosscheck isn't installed there.
+- A chat that is only about the job may move into its own copy of the code instead of handing off, but only before its task file or first edit. In Unity projects keep a job in one copy: each new copy re-imports every asset.
+- Every coding job, in a new copy or a reused one, starts from GitHub's latest main: update the local main by fast-forward only, and stop on uncommitted changes, unpushed commits, or a starting commit that isn't GitHub's main. Before handing a job to a new chat, show the user the project, the starting commit, the pull request name and the handoff note.
+- The new chat takes the old task file whole as its own, and the user's words only into its own words file. From then on the job's decisions are made there; the main chat passes the user's answers on word for word.
+- Delete a job's copy only after its pull request is merged and the copy holds no uncommitted changes or unpushed commits.
 
 ## Working with GPT
 - GPT runs in the background. Never poll: work on something else (never the files under review) or end the turn.

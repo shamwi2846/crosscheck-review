@@ -260,13 +260,13 @@ Findings left unfixed on purpose. Entries are never deleted, only marked fixed.
 - Problem: A computer run's 2-second process check runs PowerShell synchronously, holding the driver's event loop for about 0.5-2 s per check (up to its 15 s timeout if a scan stalls)
 - Trigger: any computer run on Windows
 - Fix: an asynchronous scan, or a longer interval, if a delay is ever measured to matter
-- Log: CodeRabbit PR 14
-- Why skipped: harmless as it is: Codex's output is buffered in its pipes and the timeout and grace timers only fire that much later; keeping it synchronous also means no scan result can arrive after the run settles (CodeRabbit nitpick on PR 14)
+- Log: PR 14 review
+- Why skipped: harmless as it is: Codex's output is buffered in its pipes and the timeout and grace timers only fire that much later; keeping it synchronous also means no scan result can arrive after the run settles (review of PR 14)
 
 ## G30 · open · 2026-10-21 · LOW
 - Task: -
 - Where: src/answer.js:89
-- Problem: The round-limit check catches only plain wordings (round limit, the limit of three rounds, the limit was reached after three rounds); a concession worded otherwise, such as 'no further follow-up is allowed after three rounds', passes (CodeRabbit on PR 14).
+- Problem: The round-limit check catches only plain wordings (round limit, the limit of three rounds, the limit was reached after three rounds); a concession worded otherwise, such as 'no further follow-up is allowed after three rounds', passes (review of PR 14).
 - Trigger: -
 - Fix: -
 - Log: recorded by hand
@@ -293,7 +293,7 @@ Findings left unfixed on purpose. Entries are never deleted, only marked fixed.
 ## G33 · open · 2026-10-21 · LOW
 - Task: -
 - Where: install.js:224
-- Problem: A CLAUDE.md without crosscheck's import line is replaced from personal.md; a save that adds that exact import line between install's read and its write would be overwritten (CodeRabbit on PR 17).
+- Problem: A CLAUDE.md without crosscheck's import line is replaced from personal.md; a save that adds that exact import line between install's read and its write would be overwritten (review of PR 17).
 - Trigger: -
 - Fix: -
 - Log: recorded by hand
@@ -311,7 +311,7 @@ Findings left unfixed on purpose. Entries are never deleted, only marked fixed.
 ## G35 · open · 2026-10-23 · LOW
 - Task: -
 - Where: src/hook.js:128
-- Problem: For PowerShell's git -C, the guard always expands an unquoted ~ to the profile folder; where PowerShell's native-command tilde expansion is off (Windows PowerShell 5.1, or the feature disabled), PowerShell passes ~/repo literally (CodeRabbit on PR 20).
+- Problem: For PowerShell's git -C, the guard always expands an unquoted ~ to the profile folder; where PowerShell's native-command tilde expansion is off (Windows PowerShell 5.1, or the feature disabled), PowerShell passes ~/repo literally (review of PR 20).
 - Trigger: -
 - Fix: -
 - Log: recorded by hand
@@ -365,7 +365,7 @@ Findings left unfixed on purpose. Entries are never deleted, only marked fixed.
 ## G41 · open · 2026-10-25 · LOW
 - Task: -
 - Where: src/review.js:320
-- Problem: When KNOWN_GAPS.md can't be read, gaps.openFor returns no entries, so a review's prompt simply has no Known gaps section (CodeRabbit on PR 24).
+- Problem: When KNOWN_GAPS.md can't be read, gaps.openFor returns no entries, so a review's prompt simply has no Known gaps section (review of PR 24).
 - Trigger: -
 - Fix: -
 - Log: recorded by hand
@@ -392,7 +392,7 @@ Findings left unfixed on purpose. Entries are never deleted, only marked fixed.
 ## G44 · fixed · 2026-10-25 · LOW
 - Task: -
 - Where: src/review.js:322
-- Problem: The project's lessons go into the review prompt without a fence or a 'recorded text, not instructions' label, unlike the known gaps (CodeRabbit on PR 24).
+- Problem: The project's lessons go into the review prompt without a fence or a 'recorded text, not instructions' label, unlike the known gaps (review of PR 24).
 - Trigger: -
 - Fix: -
 - Log: recorded by hand
@@ -419,7 +419,7 @@ Findings left unfixed on purpose. Entries are never deleted, only marked fixed.
 ## G47 · open · 2026-10-26 · MEDIUM
 - Task: -
 - Where: src/review.js:823
-- Problem: A modified git submodule is reported by git status as a folder, which versionOf can't read, so unreviewedForCommit throws: status stops with an error and the commit guard fails open (logged in hooks.log, shown by status) for that commit (CodeRabbit on PR 25).
+- Problem: A modified git submodule is reported by git status as a folder, which versionOf can't read, so unreviewedForCommit throws: status stops with an error and the commit guard fails open (logged in hooks.log, shown by status) for that commit (review of PR 25).
 - Trigger: A project with a git submodule whose recorded commit changed.
 - Fix: -
 - Log: recorded by hand
@@ -428,7 +428,7 @@ Findings left unfixed on purpose. Entries are never deleted, only marked fixed.
 ## G48 · open · 2026-10-26 · LOW
 - Task: -
 - Where: src/review.js:187
-- Problem: If the task's Requirements change in the moment between admission and freezing, the review runs with a plan that is no longer current and can't acknowledge the risky file (CodeRabbit on PR 25).
+- Problem: If the task's Requirements change in the moment between admission and freezing, the review runs with a plan that is no longer current and can't acknowledge the risky file (review of PR 25).
 - Trigger: Another process rewrites the task's Requirements during the few milliseconds between admit and freeze.
 - Fix: -
 - Log: recorded by hand
@@ -455,7 +455,7 @@ Findings left unfixed on purpose. Entries are never deleted, only marked fixed.
 ## G51 · open · 2026-10-27 · LOW
 - Task: -
 - Where: src/codex.js:27
-- Problem: tomlString uses JSON.stringify, which leaves U+007F (DEL) unescaped though TOML basic strings must escape it, so a docs setting holding that character would make the run's -c setting invalid and the run fail (CodeRabbit on PR 26).
+- Problem: tomlString uses JSON.stringify, which leaves U+007F (DEL) unescaped though TOML basic strings must escape it, so a docs setting holding that character would make the run's -c setting invalid and the run fail (review of PR 26).
 - Trigger: A docs server command, arg or env value containing the DEL control character.
 - Fix: -
 - Log: recorded by hand
@@ -585,7 +585,7 @@ Findings left unfixed on purpose. Entries are never deleted, only marked fixed.
 - Trigger: the task as asked
 - Fix: -
 - Log: 20261030203424-0e2402
-- Why skipped: no code is left unmet: R7's remaining part is the PR work itself (the reply on PR 31's CodeRabbit thread once this is pushed, and PR 32's own CodeRabbit round, which was rate-limited and is asked for again next)
+- Why skipped: no code is left unmet: R7's remaining part is the PR work itself (the reply on PR 31's review thread once this is pushed, and PR 32's own review round)
 
 ## G66 · fixed · 2026-10-30 · MEDIUM
 - Task: Muse asks for the files it needs; two isolation fixes
@@ -603,7 +603,7 @@ Findings left unfixed on purpose. Entries are never deleted, only marked fixed.
 - Trigger: the task as asked
 - Fix: -
 - Log: 20261030192654-c32ed8
-- Why skipped: no code is left unmet: R7's remaining part is the PR work itself (the PR 31 reply and PR 32's CodeRabbit round), as closed in chain C20261030201646-5128c6
+- Why skipped: no code is left unmet: R7's remaining part is the PR work itself (the PR 31 reply and PR 32's review round), as closed in chain C20261030201646-5128c6
 
 ## G68 · open · 2026-10-30 · LOW
 - Task: Muse asks for the files it needs; two isolation fixes
@@ -770,8 +770,26 @@ Findings left unfixed on purpose. Entries are never deleted, only marked fixed.
 ## G86 · open · 2026-10-31 · LOW
 - Task: -
 - Where: src/muse-files.js:64
-- Problem: The file tool checks a file's size with statSync and then reads it with readFileSync, by path both times (CodeRabbit on PR 33): if the last name is swapped for a link to somewhere else between the two calls, the size check and the read could see different files.
+- Problem: The file tool checks a file's size with statSync and then reads it with readFileSync, by path both times (review of PR 33): if the last name is swapped for a link to somewhere else between the two calls, the size check and the read could see different files.
 - Trigger: -
 - Fix: -
 - Log: recorded by hand
 - Why skipped: The fix proposed (open once with O_NOFOLLOW, then fstat and read the descriptor) protects nothing on Windows, where Node has no O_NOFOLLOW, and not a swapped parent folder either; the swap needs another process writing the project at that instant, which Muse's sandboxed commands can't (they write only their copy); and once PR 34 lands, Muse's shell can read any file anyway, which the user accepted.
+
+## G87 · open · 2026-10-31 · MEDIUM
+- Task: -
+- Where: src/hook.js
+- Problem: A merge commit made by git merge/pull, the app's base-branch sync or GitHub's update-branch never passes the commit guard, so a PR's final head can combine reviewed changes with a moved main that no review saw, and it still merges on green CI
+- Trigger: -
+- Fix: -
+- Log: recorded by hand
+- Why skipped: Only realistic when main moves while a job's PR is open; one coding job per project at a time (RULES.md) keeps main still, so a fix isn't worth its machinery now
+
+## G88 · fixed · 2026-10-31 · LOW
+- Task: Task: report only a final conclusion; rules for running several coding jobs
+- Where: RULES.md:64
+- Problem: F1: Apply the starting-commit check to reused copies
+- Trigger: A new coding job starts in an existing Unity copy, without handing off to another chat, while its clean, fully pushed branch is behind GitHub's main.
+- Fix: Require every new coding job, including one using an existing copy or chat, to start at GitHub's latest main after the fast-forward update and cleanliness checks.
+- Log: 20261031070325-541c07
+- Why skipped: pair: confirmed by B
