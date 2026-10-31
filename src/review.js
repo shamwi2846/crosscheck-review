@@ -184,6 +184,9 @@ function admit(root, { attempt, session, named = [], chain = null, risky = false
     }
     const busy = keys.filter(k => s.running[k]);
     if (busy.length) return { refused: `already in a running review: ${list(busy)}` };
+    // (a recorded change, or a chain's file, may have become a link elsewhere since; named files were checked already)
+    const linked = keys.filter(k => linkedOutside(root, files[k].path));
+    if (linked.length) return { refused: `a link to somewhere outside the project is never read for a review: ${list(linked)}` };
     // (a follow-up's risky files: those of the chain's reviews and those GPT rated risky in the chain since; `risky`
     // marks the named files, or all of them when none is named, so docs and tests that come along stay normal)
     const marked = k => risky && (!named.length || named.some(n => n.key === k));
@@ -264,6 +267,7 @@ function insideProject(root, abs) {
     return false;
   }
 }
+const linkedOutside = (root, rel) => fs.existsSync(path.join(root, rel)) && !insideProject(root, path.join(root, rel));
 
 const escapeRe = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -1079,6 +1083,8 @@ function skip(root, { session = null, files = [], why = '' }) {
     if (risky.length) return { refused: `a review skip is only for comments, formatting or docs, never for risky files: ${list(risky)}` };
     const busy = keys.filter(k => s.running[k]);
     if (busy.length) return { refused: `already in a running review: ${list(busy)}` };
+    const linked = keys.filter(k => linkedOutside(root, chosen[k]));
+    if (linked.length) return { refused: `a link to somewhere outside the project is never acknowledged: ${list(linked)}` };
     const versions = {};
     for (const key of keys) {
       versions[key] = snapshot(root, bytesOf(path.join(root, chosen[key])));
@@ -1127,4 +1133,4 @@ const openBugs = root => bugsIn(stateOf(root));
 module.exports = { review, followup, close, fallback, skip, unreviewedForCommit, openChains, openBugs, bugsIn, acknowledgeGaps, DELETED,
   RISKY_FILE, sessionTask, stateOf, withMaps, bytesOf, textOf, snapshot, snapFile, asBaseline, forTask, ratedRiskyIn,
   run, newAttempt, bundleDir, findingsOf, taskInfo, docsFor, DOCS_NOTE, refused, fence, escapeRe, callersOf, listedFiles, withMuse, gptPair,
-  museIntro, MUSE_TOOLS, museTools, museCopy, withCopy, MUSE_PROMPT_MAX, located, unsendable, realName }; // (the last two lines: for modes.js, muse-files.js and the tests)
+  museIntro, MUSE_TOOLS, museTools, museCopy, withCopy, MUSE_PROMPT_MAX, located, unsendable, realName, linkedOutside }; // (the last two lines: for hook.js, modes.js, muse-files.js and the tests)

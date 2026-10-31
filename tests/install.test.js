@@ -309,6 +309,33 @@ test('an imported CLAUDE.md saved while install writes its other files keeps tha
   assert.strictEqual(read(p.claudeMd), late);
 });
 
+test('an imported CLAUDE.md saved with a byte-order mark keeps its personal lines', async () => {
+  const p = profile('t8b', { settings: oldSettings() });
+  const saved = `﻿@${path.join(p.code, 'RULES.md').replace(/\\/g, '/')}\n\n## MT5 test PC\nnever trade outside the tester\n`;
+  fs.writeFileSync(p.claudeMd, saved);
+  fs.mkdirSync(state.HOME, { recursive: true });
+  fs.writeFileSync(path.join(state.HOME, 'personal.md'), '## MT5 test PC\nolder text\n');
+  assert.strictEqual((await installer.install(quiet)).code, 0);
+  assert.strictEqual(read(p.claudeMd), saved);
+  assert.ok(commands(json(p.settings)).some(c => c.includes('hook.js')));
+});
+
+test('a settings.json change saved while install writes its other files keeps that change', async () => {
+  const p = profile('t8s', { settings: oldSettings() });
+  const realRename = fs.renameSync;
+  fs.renameSync = (from, to) => { // (the save lands as install puts its first file of the code in place)
+    if (to.startsWith(p.code) && !json(p.settings).LATE) fs.writeFileSync(p.settings, JSON.stringify({ ...json(p.settings), LATE: 'kept' }));
+    return realRename(from, to);
+  };
+  try {
+    assert.strictEqual((await installer.install(quiet)).code, 0);
+  } finally {
+    fs.renameSync = realRename;
+  }
+  assert.strictEqual(json(p.settings).LATE, 'kept');
+  assert.ok(commands(json(p.settings)).some(c => c.includes('hook.js')), 'and crosscheck\'s hooks are in it');
+});
+
 test('fast is a validated global choice that survives reinstalls', async () => {
   const p = profile('t9', { settings: oldSettings() });
   const run = (...args) => spawnSync(process.execPath, [path.join(REPO, 'src', 'crosscheck.js'), ...args], { cwd: HOME, encoding: 'utf8', env: process.env });

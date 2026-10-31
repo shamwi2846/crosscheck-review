@@ -6,7 +6,7 @@ const assert = require('node:assert');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'crosscheck gaps test ü '));
 Object.assign(process.env, { CROSSCHECK_HOME: path.join(HOME, 'state'), USERPROFILE: HOME, HOME });
@@ -215,6 +215,36 @@ test('gap bookkeeping counts as reviewed only from the reviewed text it changed,
   }
   assert.match(fs.readFileSync(gapsFile(failing), 'utf8'), /- Problem: later/);
   assert.strictEqual(stateOf(failing).acks[key], sha(LEGACY), 'a failed state write leaves the new text unreviewed');
+});
+
+// A git repository with one commit, and a linked worktree of it.
+function withWorktree(name) {
+  const main = project(name);
+  const git = (cwd, args) => assert.strictEqual(spawnSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { cwd }).status, 0);
+  git(main, ['init', '-q']);
+  git(main, ['commit', '-q', '--allow-empty', '-m', 'base']);
+  const tree = path.join(HOME, `${name}-tree`);
+  git(main, ['worktree', 'add', '-q', tree]);
+  return { main, tree, git };
+}
+
+test('a lesson recorded in a worktree belongs to the repository: every checkout reads it, and it outlives the worktree', () => {
+  const { main, tree, git } = withWorktree('wt1');
+  assert.ok(gaps.addLesson(main, 'MAIN-LESSON').ok);
+  assert.ok(gaps.addLesson(tree, 'TREE-LESSON').ok);
+  for (const root of [main, tree]) assert.match(gaps.lessons(root), /MAIN-LESSON[\s\S]*TREE-LESSON/);
+  git(main, ['worktree', 'remove', '--force', tree]);
+  assert.match(gaps.readLessons(main).text, /MAIN-LESSON[\s\S]*TREE-LESSON/);
+});
+
+test('lesson additions from two checkouts of one repository wait for one shared lock', () => {
+  const { main, tree } = withWorktree('wt2');
+  const add = `process.stdout.write(JSON.stringify(require(${JSON.stringify(GAPS)}).addLesson(${JSON.stringify(tree)}, 'WAITED')))`;
+  const whileHeld = state.withLock(state.files.project(main), () => spawnSync(process.execPath, ['-e', add], { env: process.env, encoding: 'utf8' }).stdout);
+  assert.strictEqual(JSON.parse(whileHeld).ok, false, 'the worktree\'s addition waited for the main checkout\'s lock');
+  assert.ok(!gaps.lessons(main).includes('WAITED'));
+  assert.strictEqual(JSON.parse(spawnSync(process.execPath, ['-e', add], { env: process.env, encoding: 'utf8' }).stdout).ok, true);
+  assert.match(gaps.lessons(main), /WAITED/);
 });
 
 test.after(() => fs.rmSync(HOME, { recursive: true, force: true }));

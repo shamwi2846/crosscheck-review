@@ -793,3 +793,93 @@ Findings left unfixed on purpose. Entries are never deleted, only marked fixed.
 - Fix: Require every new coding job, including one using an existing copy or chat, to start at GitHub's latest main after the fast-forward update and cleanliness checks.
 - Log: 20261031070325-541c07
 - Why skipped: pair: confirmed by B
+
+## G89 · open · 2026-10-31 · LOW
+- Task: Task: full crosscheck audit: real bugs, speed and token use
+- Where: src/modes.js:45
+- Problem: F3: testplan/skip reject in-project folders whose name starts with two dots
+- Trigger: testplan or skip is run on a file inside a project folder named like '..data' or '..cache' (legal Windows names, distinct from the parent reference '..').
+- Fix: Use the same outside rule as review.outsidePath in targetsOf (refuse rel === '..' or rel.startsWith('../'), not '..'), ideally by sharing that helper instead of a second copy. — test: New test in tests/modes.test.js: testplan/skip accept a target under a '..data' folder inside the project and still refuse ../outside.js.
+- Log: 20261031073150-04f8c8
+- Why skipped: pair: confirmed by A
+
+## G90 · open · 2026-10-31 · LOW
+- Task: Task: full crosscheck audit: real bugs, speed and token use
+- Where: src/review.js:50
+- Problem: F4: textOf throws on a UTF-16BE file with an odd byte count
+- Trigger: A reviewed file, task file, evidence file or plan is UTF-16BE and truncated/corrupt by one byte (or a binary file that happens to start with FE FF and has odd length) and anything decodes it with textOf.
+- Fix: Drop a trailing incomplete byte before swapping: swap only subarray(2, 2 + 2*floor((bytes.length-2)/2)) of the BE branch. — test: New test alongside the existing UTF-16BE case in tests/muse-files.test.js: textOf on a FE FF buffer with an odd trailing byte returns text instead of throwing.
+- Log: 20261031073150-04f8c8
+- Why skipped: pair: confirmed by A
+
+## G91 · open · 2026-10-31 · HIGH
+- Task: Task: full crosscheck audit: real bugs, speed and token use
+- Where: tests/gaps.test.js:224-250
+- Problem: F2: Planned legacy-lesson migration tests are missing
+- Trigger: Run the supplied test suite against a project containing lessons stored separately by main and worktree checkouts before the change.
+- Fix: Implement the planned tests exactly, including failure injection, concurrent writers, main-checkout-first access, and removal of the linked worktree. — test: Add regression tests that seed distinct pre-upgrade lessons.md files under the main and linked-worktree state folders, force the shared-file write to fail once, retry, and assert both histories remain visible exactly once after subsequent reads and after removing the worktree.
+- Log: 20261031083020-d26731
+- Why skipped: pair: confirmed by A
+
+## G92 · fixed · 2026-10-31 · MEDIUM
+- Task: Task: full crosscheck audit: real bugs, speed and token use
+- Where: tests/state.test.js:145-167
+- Problem: F3: Worktree state test depends on an enclosing non-repository directory
+- Trigger: Run the state tests with temporary storage located inside another git working tree.
+- Fix: Make the outside-git test create its fixture outside any repository, or explicitly control repository discovery so the test covers the intended non-repository case.
+- Log: 20261031083020-d26731
+- Why skipped: pair: confirmed by A
+
+## G93 · open · 2026-10-31 · HIGH
+- Task: Task: full crosscheck audit: real bugs, speed and token use
+- Where: src/gaps.js:150-167
+- Problem: F1: Existing linked-worktree lessons are abandoned
+- Trigger: Before upgrading, record a lesson while working in a linked worktree; then read lessons from the worktree or main checkout after this change.
+- Fix: Migrate every existing per-checkout lessons.md into the shared main-checkout file exactly once, preserving all histories and avoiding loss when a write fails. — test: Add the planned regression that seeds separate pre-change lessons in the main checkout and linked worktree, verifies both remain visible after a failed migration and retry, and verifies they survive worktree removal.
+- Log: 20261031084733-7433ca
+- Why skipped: cannot happen here - every crosscheck state folder on this PC was listed after the fix and only main checkouts (crosscheck, MarketBell, MQL5-Coding) hold a lessons.md, which GPT confirmed; after this install lessons are only ever written to the main checkout's folder, and the listing is repeated right before installing
+
+## G94 · open · 2026-10-31 · MEDIUM
+- Task: Task: full crosscheck audit: real bugs, speed and token use
+- Where: -
+- Problem: F5: R1 is PARTIAL
+- Trigger: the task as asked
+- Fix: -
+- Log: 20261031084733-7433ca
+- Why skipped: R1's only open part was F1, dispositioned above with its proof
+
+## G95 · open · 2026-10-31 · MEDIUM
+- Task: Task: full crosscheck audit: real bugs, speed and token use
+- Where: -
+- Problem: F3: G91: Legacy-lesson preservation still lacks its planned regression
+- Trigger: Run the frozen tests after changing lesson storage identity.
+- Fix: Implement T1, including pre-change histories, failed shared replacement, retry, repeated reads and worktree removal; cover the newly redirected bare-repository histories.
+- Log: 20261031085008-a3a9ae
+- Why skipped: pair: confirmed by B
+
+## G96 · open · 2026-10-31 · HIGH
+- Task: Task: full crosscheck audit: real bugs, speed and token use
+- Where: src/state.js:85-90
+- Problem: F1: A paused reclaimer can delete a live process's lock
+- Trigger: Reclaimer A pauses after checking the stale lock for over 30 seconds. B removes A's aged guard, reclaims the old lock and acquires a new one. A resumes and deletes B's live lock.
+- Fix: Make the reclaim guard process-owned, retain it while its owner lives, and release only the guard that the current reclaimer owns. — test: Pause a reclaimer after its stale-lock check, advance time past LOCK_UNOWNED_MS, and interleave competing writers around ownership checks and renames. Assert that live locks survive and every successful update remains stored.
+- Log: 20261031091023-76c171
+- Why skipped: pre-existing in main and narrowed here (the reclaim guard is now owned and appears with its owner); what remains needs a process that crashed holding a guard plus two reclaimers interleaving at exact points, and a full fix needs a different lock primitive than mkdir folders, a design change outside this audit
+
+## G97 · open · 2026-10-31 · MEDIUM
+- Task: Task: full crosscheck audit: real bugs, speed and token use
+- Where: src/state.js:198-202
+- Problem: F2: G93: The new shared root abandons existing bare-worktree lessons
+- Trigger: Upgrade a bare repository whose worktrees already contain checkout-specific lessons, or a checkout using a separate git directory.
+- Fix: Merge existing checkout lesson histories into the shared file under its lock before making that location authoritative. Record migration completion only after the replacement succeeds.
+- Log: 20261031091023-76c171
+- Why skipped: cannot happen on this PC - only the main checkouts crosscheck, MarketBell and MQL5-Coding hold a lessons.md and each still resolves to its own state folder with this code (checked), so no existing lesson is redirected; recorded with G93
+
+## G98 · open · 2026-10-31 · LOW
+- Task: Task: full crosscheck audit: real bugs, speed and token use
+- Where: tests/state.test.js:234-238
+- Problem: F1: Separate-git-dir case proves sharing but not which place is shared
+- Trigger: A maintainer later simplifies `mainRoot` in src/state.js to always return the parent of git's common directory. Tests are run.
+- Fix: Pin the identity, not only the sharing. Add `assert.strictEqual(state.projectDir(state.mainRoot(apart)), state.projectDir(path.join(repos, 'apart-git')));` or assert it differs from the bare repository's shared directory `one`.
+- Log: 20261031091122-1171c6
+- Why skipped: pair: confirmed by A

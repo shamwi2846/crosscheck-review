@@ -566,6 +566,43 @@ test('a file named for a review that is a link to somewhere outside the project 
   museOff();
 });
 
+test('a recorded change whose folder became a link to somewhere outside the project is refused by a review and a skip, before anything is read, run or acknowledged', async () => {
+  const { root, taskFile } = project('t4s', { 'src/a.js': 'a\n' });
+  put(root, 'src/linked/notes.md', 'legit\n');
+  seed(root, s => { s.changes = { [key('src/a.js')]: change('src/a.js', 'S', 1, null), [key('src/linked/notes.md')]: change('src/linked/notes.md', 'S', 2, null) }; });
+  const outside = path.join(HOME, 't4s-private');
+  put(outside, 'notes.md', 'PRIVATE-SENTINEL\n');
+  fs.rmSync(path.join(root, 'src', 'linked'), { recursive: true });
+  fs.symlinkSync(outside, path.join(root, 'src', 'linked'), 'junction');
+  const runs = museWith('t4s', [{ text: answerOf() }]);
+  setSpec({ exec: [{ text: answerOf() }] });
+  const before = stateOf(root).changes;
+  const r = await review.review(root, { session: 'S', taskFile });
+  assert.deepStrictEqual([r.status, /never read for a review: src\/linked\/notes\.md/.test(r.text)], ['REFUSED', true], r.text);
+  const s = review.skip(root, { session: 'S', why: 'wording only' });
+  assert.deepStrictEqual([s.status, /never acknowledged: src\/linked\/notes\.md/.test(s.text)], ['REFUSED', true], s.text);
+  const after = stateOf(root);
+  assert.deepStrictEqual([execCalls().length, runs().length, after.changes, after.acks || {}, after.running || {}], [0, 0, before, {}, {}],
+    'nothing ran, nothing was acknowledged or reserved, and both changes are still pending');
+  assert.ok(filesUnder(state.projectDir(root)).every(f => !fs.readFileSync(f, 'utf8').includes('PRIVATE-SENTINEL')));
+  museOff();
+});
+
+test('an edit through a link to somewhere outside the project keeps no baseline, so the link\'s removal never sends its content', async () => {
+  const { root, taskFile } = project('t4h', { 'src/a.js': 'a\n' });
+  const outside = path.join(HOME, 't4h-private');
+  put(outside, 'notes.md', 'PRIVATE-SENTINEL\n');
+  fs.symlinkSync(outside, path.join(root, 'src', 'linked'), 'junction');
+  hook.handle('edit', { tool_name: 'Edit', tool_input: { file_path: path.join(root, 'src', 'linked', 'notes.md') }, cwd: root, session_id: 'H' });
+  assert.strictEqual(stateOf(root).changes[key('src/linked/notes.md')].baseline, null, 'recorded, with nothing read through the link');
+  fs.rmSync(path.join(root, 'src', 'linked'));
+  setSpec({ exec: [{ text: answerOf() }] });
+  const r = await review.review(root, { session: 'H', taskFile });
+  assert.strictEqual(r.status, 'DONE', r.text);
+  assert.ok(!execCalls()[0].prompt.includes('PRIVATE-SENTINEL'), 'the removed link\'s content was never sent');
+  assert.ok(filesUnder(state.projectDir(root)).every(f => !fs.readFileSync(f, 'utf8').includes('PRIVATE-SENTINEL')));
+});
+
 test('Muse rejects an innocent git-listed name for a tracked secrets file, by the real name behind it', () => {
   const listed = new Set(['docs/context.txt', 'config/.env.production', '.env.example', 'src/a.js'].map(key));
   assert.strictEqual(review.unsendable(listed, 'docs/context.txt', 'config/.env.production'), 'a secrets file', 'a link named innocently to a secrets file');

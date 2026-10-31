@@ -228,7 +228,8 @@ Not carried over:
   <project>/       state.json (changes with the session that made them, chains, plans, skips, escalations)
                    tasks/<session>.md and tasks/<session>.words.md (local only)
                    snap/ (immutable snapshots by hash: baselines and frozen copies), logs/
-                   lessons.md (confirmed past mistakes, printed at session start)
+                   lessons.md (confirmed past mistakes, printed at session start; in the main checkout's folder only,
+                   so every worktree of a repository shares them)
 <project>/KNOWN_GAPS.md
 ```
 
