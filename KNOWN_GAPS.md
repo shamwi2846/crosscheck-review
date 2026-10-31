@@ -766,3 +766,12 @@ Findings left unfixed on purpose. Entries are never deleted, only marked fixed.
 - Fix: Use keep directly as the successful answer and assert that output reports 'Muse checked the plan'.
 - Log: 20261031051734-734a13
 - Why skipped: pair: confirmed by B
+
+## G86 · open · 2026-10-31 · LOW
+- Task: -
+- Where: src/muse-files.js:64
+- Problem: The file tool checks a file's size with statSync and then reads it with readFileSync, by path both times (CodeRabbit on PR 33): if the last name is swapped for a link to somewhere else between the two calls, the size check and the read could see different files.
+- Trigger: -
+- Fix: -
+- Log: recorded by hand
+- Why skipped: The fix proposed (open once with O_NOFOLLOW, then fstat and read the descriptor) protects nothing on Windows, where Node has no O_NOFOLLOW, and not a swapped parent folder either; the swap needs another process writing the project at that instant, which Muse's sandboxed commands can't (they write only their copy); and once PR 34 lands, Muse's shell can read any file anyway, which the user accepted.
