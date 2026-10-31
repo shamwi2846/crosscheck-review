@@ -658,3 +658,111 @@ Findings left unfixed on purpose. Entries are never deleted, only marked fixed.
 - Fix: Update the answer.js bullet to about 215 lines and note that the files-round extension (readAsking/withMoreFiles) was removed with the round, as the review.js bullet does.
 - Log: 20261030234430-f760d9
 - Why skipped: pair: confirmed by A
+
+## G74 · fixed · 2026-10-31 · MEDIUM
+- Task: Muse runs commands in its reviews: its shell, sandboxed, in a throwaway copy of the project
+- Where: src/muse.js
+- Problem: F3: Incomplete call arguments remain admissible and untested
+- Trigger: An exported started call has a matching call_id entry but lacks its arguments.
+- Fix: Treat missing tool names or arguments on started calls as unreadable evidence, and add the missing T4 regression case.
+- Log: 20261031043229-30baf1
+- Why skipped: pair: confirmed by B
+
+## G75 · open · 2026-10-31 · MEDIUM
+- Task: Muse runs commands in its reviews: its shell, sandboxed, in a throwaway copy of the project
+- Where: src/muse.js
+- Problem: F4: Doctor bypasses the review job setup
+- Trigger: Run doctor --live with Muse enabled.
+- Fix: Run the probe through the review setup using a disposable clone, private temp, project-files tools, ordinary admission checks and the copy description in its prompt.
+- Log: 20261031043229-30baf1
+- Why skipped: pair: confirmed by B
+
+## G76 · open · 2026-10-31 · MEDIUM
+- Task: Muse runs commands in its reviews: its shell, sandboxed, in a throwaway copy of the project
+- Where: src/muse.js
+- Problem: F5: Doctor's shell calls are never saved in a job bundle
+- Trigger: The live probe executes its PowerShell write attempt, whether the probe passes or fails.
+- Fix: Save the probe's calls and results in a persistent job bundle before cleanup, including failed probes, and reject verification if that log cannot be saved.
+- Log: 20261031043229-30baf1
+- Why skipped: pair: confirmed by B
+
+## G77 · open · 2026-10-31 · MEDIUM
+- Task: Muse runs commands in its reviews: its shell, sandboxed, in a throwaway copy of the project
+- Where: src/muse.js
+- Problem: F6: An unreadable precheck record keeps Muse verified
+- Trigger: The echo precheck completes, but its session export cannot be read.
+- Fix: Revoke verification for an unreadable precheck record as for other failed sandbox attestations.
+- Log: 20261031043229-30baf1
+- Why skipped: pair: confirmed by B
+
+## G78 · open · 2026-10-31 · MEDIUM
+- Task: Muse runs commands in its reviews: its shell, sandboxed, in a throwaway copy of the project
+- Where: src/muse.js:296
+- Problem: F7: A resumed run's call log repeats the earlier runs' calls, and the stub hides it
+- Trigger: A resumed Muse run (a pair's cross-check or an answer repair) whose session already made tool calls in its first run, in particular a command repeated identically in both runs.
+- Fix: Keep call_id in inspect's log entries and have keepCalls write only calls (with their results) whose ids are not already in the bundle's earlier muse-calls-<session>-*.jsonl files; make fake-muse.js accumulate a resumed session's record like Muse so the T4 resumed case exercises it.
+- Log: 20261031043229-30baf1
+- Why skipped: pair: confirmed by A
+
+## G79 · fixed · 2026-10-31 · LOW
+- Task: Muse runs commands in its reviews: its shell, sandboxed, in a throwaway copy of the project
+- Where: tests/doctor.test.js:265-267
+- Problem: F1: Probe-folder cleanup is asserted only for the last doctor case
+- Trigger: Each loop iteration calls setMuse, which deletes MUSE_LOG; after the loop the test reads the log once, so it only obtains the final unstarted case's target and checks only that case's folder.
+- Fix: Capture each case's probe target inside the loop, before the next setMuse call resets the log, and assert every captured probe folder is gone.
+- Log: 20261031045544-3db940
+- Why skipped: pair: confirmed by A
+
+## G80 · fixed · 2026-10-31 · LOW
+- Task: Muse runs commands in its reviews: its shell, sandboxed, in a throwaway copy of the project
+- Where: tests/doctor.test.js:265-267
+- Problem: F2: Probe target extraction truncates paths containing a single quote
+- Trigger: The probe prompt escapes an apostrophe in the temp path as two single quotes, but the test regex /-LiteralPath '(.+?)'/ stops at the first single quote.
+- Fix: Parse the PowerShell literal with the same doubled-quote-aware pattern used in tests/fake-muse.js and replace doubled single quotes with one single quote.
+- Log: 20261031045544-3db940
+- Why skipped: pair: confirmed by A
+
+## G81 · fixed · 2026-10-31 · LOW
+- Task: Muse runs commands in its reviews: its shell, sandboxed, in a throwaway copy of the project
+- Where: tests/muse-live.test.js:18
+- Problem: F3: Live probe test does not set TMPDIR for its private temp folder
+- Trigger: Run the opt-in live test on a POSIX platform, where Node temp-folder resolution uses TMPDIR rather than TEMP or TMP; the test sets TEMP and TMP only.
+- Fix: Also set TMPDIR to the test's temp folder in the Object.assign call.
+- Log: 20261031045544-3db940
+- Why skipped: pair: unsettled: A couldn't tell (The TMPDIR omission affects POSIX temp resolution, but src/muse.js:42-52 launches a Windows .exe and this test creates fresh state without a command override. I could not establish a real POSIX Muse configuration that reaches a passing probe. Windows uses the TEMP/TMP values supplied.)
+
+## G82 · fixed · 2026-10-31 · MEDIUM
+- Task: Muse runs commands in its reviews: its shell, sandboxed, in a throwaway copy of the project
+- Where: -
+- Problem: F5: R3 is PARTIAL
+- Trigger: the task as asked
+- Fix: -
+- Log: 20261031045544-3db940
+- Why skipped: pair: disputed by A: tests/fake-muse.js:29-33 models attached tools and the requested toolset; it does not grant production capabilities. src/muse.js:27-29, :74 and :83 select exactly the permitted native and MCP tools, and :144-148 reject extra or missing tools.
+
+## G83 · fixed · 2026-10-31 · MEDIUM
+- Task: Muse runs commands in its reviews: its shell, sandboxed, in a throwaway copy of the project
+- Where: -
+- Problem: F7: R5 is PARTIAL
+- Trigger: the task as asked
+- Fix: -
+- Log: 20261031045544-3db940
+- Why skipped: pair: disputed by A: tests/fake-muse.js:20 supplies six contexts, including sandbox_policy and memory_snapshot; :59 adds security_mode and skills_catalog, producing the required eight. Production validation at src/muse.js:144-159 checks the run's tools and rejects foreign contexts.
+
+## G84 · fixed · 2026-10-31 · MEDIUM
+- Task: Muse runs commands in its reviews: its shell, sandboxed, in a throwaway copy of the project
+- Where: -
+- Problem: F8: R7 is PARTIAL
+- Trigger: the task as asked
+- Fix: -
+- Log: 20261031045544-3db940
+- Why skipped: pair: disputed by A: src/modes.js:93 interpolates review.MUSE_TOOLS. That string at src/review.js:463 explicitly describes PowerShell in a disposable project copy, git history and the reviewed change, sandboxing, no network, and discarded changes. The risky-plan prompt includes the same text through museIntro at src/modes.js:224.
+
+## G85 · fixed · 2026-10-31 · LOW
+- Task: Muse runs commands in its reviews: its shell, sandboxed, in a throwaway copy of the project
+- Where: tests/modes.test.js:719-723
+- Problem: F2: T1's successful check fixture always forces Muse fallback
+- Trigger: The t9-check iteration wraps keep, already shaped as {text: JSON}, inside another text property.
+- Fix: Use keep directly as the successful answer and assert that output reports 'Muse checked the plan'.
+- Log: 20261031051734-734a13
+- Why skipped: pair: confirmed by B

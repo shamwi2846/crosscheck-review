@@ -678,3 +678,128 @@ test('Muse\'s file calls keep a review\'s frozen copy, in its first review and i
   assert.ok(planRecord(plan, P), 'the plan as read is the one recorded');
   assert.ok(state.update(state.files.global(), g => { delete g.muse; }).ok);
 });
+
+// (Muse's model runs so far, from its stand-in's log, and the folder each worked in)
+const museRuns = name => fs.readFileSync(path.join(HOME, `muse-calls-${name}.jsonl`), 'utf8').split('\n').filter(Boolean).map(JSON.parse)
+  .filter(c => c.args && c.args[0] === 'exec' && c.args.includes('meta'));
+const workspaceOf = run => run.args[run.args.indexOf('--workspace') + 1];
+const inGit = (cwd, ...args) => String(spawnSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { cwd, encoding: 'utf8' }).stdout).trimEnd();
+// (a crosscheck command started in the background, with its output so far)
+function cliRun(root, args) {
+  const child = spawn(process.execPath, [CLI, ...args], { cwd: root, env: env('A'), stdio: ['ignore', 'pipe', 'ignore'] });
+  const run = { out: '' };
+  child.stdout.on('data', d => { run.out += d; });
+  run.exited = new Promise(resolve => child.on('close', resolve));
+  return run;
+}
+const bug = { severity: 'HIGH', title: 'the stop loss goes', location: '-', trigger: 't', harm: 'lost money', failure: 'f', fix: 'x', test: 'keep it', label: 'BUG', reqs: [] };
+
+test('planning_modes_confine_muse_commands_to_disposable_project_copies (shell task, modes T1): a test plan\'s check and a risky plan\'s review run Muse\'s commands in a copy of the project at its last commit, private temp included, made afresh for the cross-check and gone afterwards, the real project untouched', async () => {
+  const root = project('t9', { 'src/pay.js': 'PAY-HEAD\n', 'tests/pay.test.js': 'PAY-TEST\n' });
+  fs.writeFileSync(path.join(root, 'src/pay.js'), 'PAY-UNCOMMITTED\n'); // (work in progress in the real project)
+  const head = inGit(root, 'rev-parse', 'HEAD');
+  const sentinel = path.join(os.tmpdir(), `crosscheck-t9-sentinel-${process.pid}`);
+  fs.writeFileSync(sentinel, 'keep');
+  // (a copy as Muse finds it, and what its commands could do there)
+  const pristine = (run, what) => {
+    const dir = workspaceOf(run);
+    assert.deepStrictEqual([inGit(dir, 'rev-parse', 'HEAD'), inGit(dir, 'status', '--porcelain'), fs.readFileSync(path.join(dir, 'src/pay.js'), 'utf8'),
+      fs.readdirSync(path.join(dir, '.crosscheck-tmp')), run.env.TEMP], [head, '', 'PAY-HEAD\n', [], path.join(dir, '.crosscheck-tmp')], what);
+  };
+  const scribble = dir => {
+    fs.writeFileSync(path.join(dir, 'src/pay.js'), 'MUSE-EDIT\n');
+    fs.writeFileSync(path.join(dir, 'scratch.txt'), 'scratch\n');
+    fs.writeFileSync(path.join(dir, '.crosscheck-tmp', 'left.txt'), 'temp\n');
+    inGit(dir, 'add', '-A');
+    inGit(dir, 'commit', '-qm', 'muse');
+  };
+  const untouched = () => assert.deepStrictEqual([fs.readFileSync(path.join(root, 'src/pay.js'), 'utf8'), inGit(root, 'rev-parse', 'HEAD'), inGit(root, 'log', '--format=%s'),
+    fs.readFileSync(sentinel, 'utf8')], ['PAY-UNCOMMITTED\n', head, 'base', 'keep'], 'the real project and the caller\'s temp are untouched');
+  const plan = json({ cases: [testCase('T1', ['src/pay.js'])], no_case: [], not_worth_testing: '-' });
+  const keep = json({ keep: ['T1'], dropped: [], added: [], no_case: [], not_worth_testing: '-' });
+  // (a test plan's check by Muse, which completes; then one whose runs fail)
+  for (const [name, answers, outcome] of [['t9-check', [keep], /Muse checked the plan/], ['t9-failed', [{ fail: 'connection reset' }, { fail: 'connection reset' }], /Muse didn't check the plan/]]) {
+    const hold = fs.mkdtempSync(path.join(HOME, `${name}-hold-`));
+    museWith(name, [{ hold, ...answers[0] }, ...answers.slice(1)]);
+    setSpec({ byPrompt: [{ match: 'You design the test cases', answers: [plan] }] });
+    const run = cliRun(root, ['testplan', '--files', 'src/pay.js']);
+    try {
+      await waitFor(path.join(hold, 'started'));
+      pristine(museRuns(name)[0], `${name}: the check's copy`);
+      scribble(workspaceOf(museRuns(name)[0]));
+    } finally {
+      fs.writeFileSync(path.join(hold, 'go'), '');
+    }
+    assert.strictEqual(await run.exited, 0, run.out);
+    assert.match(run.out, outcome);
+    assert.ok(!fs.existsSync(workspaceOf(museRuns(name)[0])), `${name}: the copy is gone`);
+    untouched();
+  }
+  // (a risky plan's review: GPT A finds a bug, so Muse cross-checks it, in a copy made afresh)
+  const file = path.join(HOME, 't9-plan.md');
+  fs.writeFileSync(file, '# Plan\n\nMove the stop loss into src/pay.js.\n');
+  const holds = [1, 2].map(n => fs.mkdtempSync(path.join(HOME, `t9-plan-hold${n}-`)));
+  museWith('t9-plan', [{ hold: holds[0], ...reviewAnswer() }, { hold: holds[1], ...marks([['A1', 'CONFIRM']]) }]);
+  setSpec({ byPrompt: [{ match: 'reviewer A. Check', answers: [reviewAnswer([bug])] }] });
+  const run = planRun(root, file);
+  try {
+    await waitFor(path.join(holds[0], 'started'));
+    pristine(museRuns('t9-plan')[0], 'the plan review\'s copy');
+    scribble(workspaceOf(museRuns('t9-plan')[0]));
+    fs.writeFileSync(path.join(holds[0], 'go'), '');
+    await waitFor(path.join(holds[1], 'started'));
+    pristine(museRuns('t9-plan')[1], 'the cross-check\'s copy, made afresh');
+  } finally {
+    for (const hold of holds) fs.writeFileSync(path.join(hold, 'go'), '');
+  }
+  assert.strictEqual(await run.exited, 0, run.out);
+  assert.ok(!fs.existsSync(workspaceOf(museRuns('t9-plan')[0])), 'the copy is gone');
+  untouched();
+  fs.rmSync(sentinel);
+  assert.ok(state.update(state.files.global(), g => { delete g.muse; }).ok);
+});
+
+test('risky_plan_muse_shell_cannot_reach_a_divergent_tracked_plan_file (shell task, modes M1): a tracked plan file in Muse\'s copy is the text under review, never its committed version or a later commit', async () => {
+  const root = project('t9m', { 'notes/plan.md': '# Plan\n\nBENIGN: keep the stop loss.\n', 'src/order.js': 'order\n' });
+  const P = '# Plan\n\nDROP-THE-STOP-LOSS: remove the stop loss from src/order.js.\n';
+  const Q = '# Plan\n\nLATER-COMMIT: a third version.\n';
+  const planFile = path.join(root, 'notes', 'plan.md');
+  fs.writeFileSync(planFile, P); // (the text under review, not committed)
+  const holds = [1, 2].map(n => fs.mkdtempSync(path.join(HOME, `t9m-hold${n}-`)));
+  museWith('t9m', [{ hold: holds[0], ...reviewAnswer() }, { hold: holds[1], ...marks([['A1', 'CONFIRM']]) }]);
+  setSpec({ byPrompt: [{ match: 'reviewer A. Check', answers: [reviewAnswer([bug])] }] });
+  const run = planRun(root, planFile);
+  try {
+    await waitFor(path.join(holds[0], 'started'));
+    assert.strictEqual(fs.readFileSync(path.join(workspaceOf(museRuns('t9m')[0]), 'notes', 'plan.md'), 'utf8'), P, 'the first review\'s copy holds the plan under review');
+    // (a third version is committed in the real project before the cross-check)
+    fs.writeFileSync(planFile, Q);
+    inGit(root, 'commit', '-qam', 'Q');
+    fs.writeFileSync(path.join(holds[0], 'go'), '');
+    await waitFor(path.join(holds[1], 'started'));
+    assert.strictEqual(fs.readFileSync(path.join(workspaceOf(museRuns('t9m')[1]), 'notes', 'plan.md'), 'utf8'), P, 'and so does the cross-check\'s');
+  } finally {
+    for (const hold of holds) fs.writeFileSync(path.join(hold, 'go'), '');
+  }
+  assert.strictEqual(await run.exited, 0, run.out);
+  assert.deepStrictEqual([!!planRecord(root, P), !!planRecord(root, Q)], [true, false], 'only the text reviewed may leave plan mode');
+  // (a plan named through a folder that is now a link to another folder of the project: the copy, made by git, has
+  // both folders, and holds the plan under review under both names)
+  const linked = project('t9j', { 'notes/plan.md': '# Plan\n\nBENIGN-NOTES.\n', 'drafts/plan.md': '# Plan\n\nBENIGN-DRAFTS.\n' });
+  fs.rmSync(path.join(linked, 'notes'), { recursive: true });
+  fs.symlinkSync(path.join(linked, 'drafts'), path.join(linked, 'notes'), 'junction');
+  fs.writeFileSync(path.join(linked, 'drafts', 'plan.md'), P);
+  const hold = fs.mkdtempSync(path.join(HOME, 't9j-hold-'));
+  museWith('t9j', [{ hold, ...reviewAnswer() }]);
+  setSpec({ byPrompt: [{ match: 'reviewer A. Check', answers: [reviewAnswer()] }, { match: 'reviewer B. Attack', answers: [reviewAnswer()] }] });
+  const linkedRun = planRun(linked, path.join(linked, 'notes', 'plan.md'));
+  try {
+    await waitFor(path.join(hold, 'started'));
+    const dir = workspaceOf(museRuns('t9j')[0]);
+    assert.deepStrictEqual(['notes', 'drafts'].map(d => fs.readFileSync(path.join(dir, d, 'plan.md'), 'utf8')), [P, P], 'under the name given and the real one');
+  } finally {
+    fs.writeFileSync(path.join(hold, 'go'), '');
+  }
+  assert.strictEqual(await linkedRun.exited, 0, linkedRun.out);
+  assert.ok(state.update(state.files.global(), g => { delete g.muse; }).ok);
+});
