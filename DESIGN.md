@@ -359,7 +359,7 @@ The rules say *what* to do; the driver handles *how*, so no command flags or hoo
   - Claude never changes its own effort level or its settings.
   - Code is edited with Edit/Write, so the driver sees it.
   - Neither model trades, moves money or enters credentials.
-  - Writing is not sending: no email, publishing or new repository without the user's OK. The standing approvals are: complete, reviewed work is pushed as a PR with auto-fix on, and a PR is merged when it's green.
+  - Writing is not sending: no email, publishing or new repository without the user's OK. The standing approvals are: complete, reviewed work is pushed as a PR with auto-fix and GitHub's auto-merge on, so it merges itself once its required checks pass (a repository without required checks: merged when it's green).
   - The driver is switched off only when the user asks.
 - **Code:** section 1, principles 1 to 5, word for word.
 - **Facts first:** when an external tool's behavior matters and is uncertain, Claude checks its docs and runs small experiments before designing, and records the facts in the task notes.
@@ -383,7 +383,7 @@ The rules say *what* to do; the driver handles *how*, so no command flags or hoo
 - **Background:** GPT runs in the background. Claude never polls; it works on something else, never on the files under review, or ends the turn while it waits. Many GPT jobs may run at once: nine research jobs at a time worked, and the limit is shared by every chat on the account. A job that fails with "too many requests" is retried once the running ones finish (fact 23).
 - **If GPT is unavailable:** the fallback reviewer takes over (section 7), and Claude tells the user.
 - **Computer use:** section 9.
-- **Pull requests:** push only complete, reviewed work, never with `--admin` and never force-pushed. A PR is done, and merged, when GitHub's CI checks pass on its final head commit and it merges cleanly. Before the merge, which may archive the chat, the chat is renamed to the project and the PR's number; when more work remains in the chat, its archive-on-merge is switched off first, so only its last merge archives it.
+- **Pull requests:** push only complete, reviewed work, never with `--admin` and never force-pushed. A PR is done, and merged, when GitHub's CI checks pass on its final head commit and it merges cleanly. Before the merge, which may archive the chat, the chat is renamed to the project and the PR's number; when more work remains in the chat, its archive-on-merge is switched off first, so only its last merge archives it; before that last merge, a new chat in the same project is started with Remote Control on, empty and ready for the user.
 - **Several coding jobs:** one per project at a time, since PRs merge on green CI unread and two each-green PRs can break main together; research and design jobs may run alongside. Coding jobs run only in local chats (crosscheck isn't installed in the cloud). A handoff shows the user its project, starting commit, PR name and note; starts from GitHub's main, verified; and carries the whole task file. A job's copy is deleted only after the merge and with nothing unsaved.
 - **Documents:** long documents are drafted by GPT and reviewed by Claude; short texts Claude writes itself.
 
