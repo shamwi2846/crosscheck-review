@@ -75,14 +75,20 @@ function isStale(dir) {
 }
 
 // Removes a lock left by a process that ended. One process at a time decides, under a second lock, and checks
-// again there, so a lock another process has just taken is never removed. (That second lock is held for a
-// moment only, so it has no owner and is reclaimed by age.)
+// again there, so a lock another process has just taken is never removed. That second lock appears with its owner
+// already in it (made aside, then renamed into place), so one that stalls holding it (a system sleep between its
+// check and the removal) keeps it: taken away by age, it could then remove a lock another process took meanwhile.
 function reclaimIfStale(dir) {
   if (!isStale(dir)) return;
   const guard = `${dir}.reclaim`;
+  const mine = `${guard}.${process.pid}`;
   try {
-    fs.mkdirSync(guard);
+    fs.rmSync(mine, { recursive: true, force: true }); // (left by an earlier process with this id)
+    fs.mkdirSync(mine);
+    fs.writeFileSync(path.join(mine, 'owner'), String(process.pid));
+    fs.renameSync(mine, guard); // (fails while another guard is there)
   } catch {
+    fs.rmSync(mine, { recursive: true, force: true });
     if (isStale(guard)) fs.rmSync(guard, { recursive: true, force: true });
     return;
   }
@@ -192,6 +198,16 @@ function projectRoot(dir) {
   return r.status === 0 ? path.resolve(r.stdout.trim()) : null;
 }
 
+// The place every checkout of `root`'s repository shares: the main checkout (the folder holding git's shared .git
+// folder), or else the shared git folder itself (a bare repository, a submodule, a git folder kept elsewhere: git
+// doesn't know a checkout for those); `root` itself outside git.
+function mainRoot(root) {
+  const r = spawnSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: root, encoding: 'utf8', windowsHide: true });
+  if (r.status !== 0) return root;
+  const common = path.resolve(r.stdout.trim());
+  return path.basename(common).toLowerCase() === '.git' ? path.dirname(common) : common;
+}
+
 // The same, found without git (for the hooks, which run on every edit): the nearest folder above `file` holding a
 // .git folder or file, as { root: its real spelling, the project's identity; dir: as `file` spells it, so a path
 // through a linked folder stays inside it }, or null.
@@ -229,4 +245,4 @@ function config() {
   return { ...DEFAULT_CONFIG, ...(read(files.config()).data || {}) };
 }
 
-module.exports = { HOME, read, update, withLock, alive, mayRun, pathKey, projectRoot, repoOf, projectDir, files, config };
+module.exports = { HOME, read, update, withLock, alive, mayRun, pathKey, projectRoot, mainRoot, repoOf, projectDir, files, config };

@@ -147,21 +147,23 @@ function openFor(root, file) {
 
 // ---- Lessons: confirmed past mistakes, printed at session start and given to every review ----
 
-const lessonsFile = root => path.join(state.projectDir(root), 'lessons.md');
+// (kept with the main checkout's state, under its lock, so every worktree of a repository shares one record)
+const lessonsFile = main => path.join(state.projectDir(main), 'lessons.md');
 
 // The lessons' text ('' when there are none or they can't be read: they are only shown).
-const lessons = root => readText(lessonsFile(root)).text || '';
+const lessons = root => readText(lessonsFile(state.mainRoot(root))).text || '';
 
 function addLesson(root, lesson) {
-  return state.withLock(state.files.project(root), write => {
-    const current = readText(lessonsFile(root));
+  const main = state.mainRoot(root);
+  return state.withLock(state.files.project(main), write => {
+    const current = readText(lessonsFile(main));
     if (current.unreadable) return { ok: false, why: `the lessons can't be read (${current.unreadable}), so nothing was added` };
     const line = `- ${new Date().toISOString().slice(0, 10)}: ${clean(root, lesson)}\n`;
-    return write(lessonsFile(root), current.text + line) ? { ok: true } : { ok: false, why: 'another process took over the lock, so the lesson was not saved' };
+    return write(lessonsFile(main), current.text + line) ? { ok: true } : { ok: false, why: 'another process took over the lock, so the lesson was not saved' };
   });
 }
 
 // The lessons file as read: { text } or { unreadable }, for a caller that reports a file it can't read.
-const readLessons = root => readText(lessonsFile(root));
+const readLessons = root => readText(lessonsFile(state.mainRoot(root)));
 
 module.exports = { NAME, STATUSES, list, readFile, compose, composeMark, add, mark, openFor, lessons, readLessons, addLesson };

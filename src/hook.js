@@ -78,9 +78,10 @@ function edit(inp) {
     const record = s.changes[key];
     first = !record || record.session !== session;
     if (record) return void Object.assign(record, { session, at: Date.now() });
-    // (the last reviewed version, so shell changes made since stay in the review; else the content as it is now)
+    // (the last reviewed version, so shell changes made since stay in the review; else the content as it is now, never
+    // read through a link to somewhere outside the project)
     const acked = s.acks[key];
-    const bytes = review.bytesOf(abs);
+    const bytes = review.linkedOutside(root, rel) ? null : review.bytesOf(abs);
     const baseline = acked !== undefined && (acked === review.DELETED || fs.existsSync(review.snapFile(root, acked)))
       ? review.asBaseline(acked) : bytes === null ? null : review.snapshot(root, bytes);
     s.changes[key] = { path: rel, session, at: Date.now(), baseline };

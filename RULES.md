@@ -17,7 +17,7 @@ First the safety of money, data and security; then the user's explicit instructi
 - Never change your own effort level or settings.
 - Edit code with Edit/Write, so crosscheck sees every change.
 - Neither model trades, moves money or enters credentials.
-- Writing is not sending: no email, publishing, pushing or new repository without the user's OK. Standing approvals: auto-fix is on for every pull request, and a pull request is merged when its CI is green and it merges cleanly.
+- Writing is not sending: no email, publishing or new repository without the user's OK. Standing approvals: complete, reviewed work is pushed as a pull request with auto-fix on, and the pull request is merged when its CI is green and it merges cleanly.
 - crosscheck is switched off only when the user asks.
 
 ## Code
@@ -56,6 +56,7 @@ When an external tool's behavior matters and is uncertain, check its docs and ru
 ## Pull requests
 - Push only complete, reviewed work. Never bypass branch protection (no admin merges) and never force-push.
 - A pull request is done, and merged, when GitHub's CI checks pass on its final head commit and it merges cleanly; a new push waits for its CI again.
+- Before merging, rename the chat to the project and the pull request's number (for example "crosscheck PR #37"), since the merge may archive it. When more work remains in the chat after this merge, first switch off the chat's archive-on-merge, so only its last merge archives it.
 
 ## Several coding jobs
 - One coding job per project at a time. The next starts once the previous one's pull request is merged, the job ended without one, or the user cancelled it and its pull request is closed with auto-fix off. Research and design jobs may run alongside.

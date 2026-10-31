@@ -93,24 +93,26 @@ const addHooks = (hooks, extra) => Object.fromEntries([...new Set([...Object.key
 // from personal.md.
 function claudeMdText(p) {
   const importLine = `@${path.join(p.code, 'RULES.md').replace(/\\/g, '/')}`;
-  if (readOr(p.claudeMd, '').split(/\r?\n/)[0] === importLine) return null;
+  if (readOr(p.claudeMd, '').replace(/^﻿/, '').split(/\r?\n/)[0] === importLine) return null; // (a byte-order mark, as Windows editors save one, is no change)
   const personal = readOr(p.personal, '').trim();
   return `${importLine}\n${personal ? `\n${personal}\n` : ''}`;
 }
 
-// Writes `files` ([[path, text, or null to delete]]) so that a failure on any of them puts every one back. Each
-// original stays in place until its replacement is renamed over it, and is kept aside as a hard link (no copy of its
-// bytes, so a full disk can't stop the rollback; a copy where links aren't possible) until all are in place.
+// Writes `files` ([[path, text, or null to delete]]; a function for text is called at the file's turn, so its text is
+// composed from the file as it is then) so that a failure on any of them puts every one back. Each original stays in
+// place until its replacement is renamed over it, and is kept aside as a hard link (no copy of its bytes, so a full
+// disk can't stop the rollback; a copy where links aren't possible) until all are in place.
 function writeAll(files) {
   const moved = [];
   try {
-    for (const [file, text] of files) {
+    for (const [file, given] of files) {
       const aside = fs.existsSync(file) ? `${file}.crosscheck-before` : null;
       if (aside) {
         fs.rmSync(aside, { force: true }); // (left by an install that was killed)
         try { fs.linkSync(file, aside); } catch { fs.copyFileSync(file, aside); }
       }
       moved.push([file, aside]);
+      const text = typeof given === 'function' ? given() : given;
       if (text === null) fs.rmSync(file, { force: true });
       else writeAtomic(file, text);
     }
@@ -149,7 +151,6 @@ async function install({ yes = false, checks = true, ask = confirm, say = text =
     const tests = run(process.execPath, ['--test'], __dirname);
     if (tests.status !== 0) return { code: 1, text: `Not installed: the tests failed.\n${String(tests.stdout).split('\n').slice(-30).join('\n')}` };
   }
-  const settings = JSON.parse(readOr(p.settings, '{}')); // (read again now, so a hook added meanwhile stays)
   const waitingNow = busy();
   if (waitingNow) return { code: 1, text: `Not installed: ${waitingNow}. Run install again once nothing is running.` };
   // config.json is read again under its lock, held until everything is written: what changed while install asked stays
@@ -171,7 +172,10 @@ async function install({ yes = false, checks = true, ask = confirm, say = text =
       [p.agent, fs.readFileSync(path.join(__dirname, 'agents', 'fallback-reviewer.md'), 'utf8')],
       [state.files.config(), JSON.stringify(config, null, 2)],
       ...(claudeMd === null ? [] : [[p.claudeMd, claudeMd]]), // (null: left out, since writeAll's null deletes)
-      [p.settings, JSON.stringify({ ...settings, hooks: addHooks(withoutOurs(settings.hooks), ourHooks(p.code)) }, null, 2)], // (the switch)
+      [p.settings, () => { // (the switch: composed from settings.json as it is at its turn, so a save made meanwhile stays)
+        const settings = JSON.parse(readOr(p.settings, '{}'));
+        return JSON.stringify({ ...settings, hooks: addHooks(withoutOurs(settings.hooks), ourHooks(p.code)) }, null, 2);
+      }],
     ]);
     return null;
   });
