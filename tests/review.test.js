@@ -10,7 +10,8 @@ const os = require('os');
 const crypto = require('crypto');
 const { spawn, spawnSync } = require('child_process');
 
-const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'crosscheck review test ü '));
+// (its real spelling, as the hooks find a project by it: a Windows runner's temp folder may be an 8.3 short name)
+const HOME = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'crosscheck review test ü ')));
 const SPEC = path.join(HOME, 'spec.json');
 const LOG = path.join(HOME, 'calls.jsonl');
 Object.assign(process.env, { CROSSCHECK_HOME: path.join(HOME, 'state'), FAKE_CODEX_SPEC: SPEC, FAKE_CODEX_LOG: LOG });

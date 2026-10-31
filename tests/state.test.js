@@ -7,7 +7,8 @@ const path = require('path');
 const os = require('os');
 const { spawn, spawnSync } = require('child_process');
 
-const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'crosscheck-state-test-'));
+// (its real spelling: git names folders by it, and a Windows runner's temp folder may be an 8.3 short name)
+const HOME = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'crosscheck-state-test-')));
 process.env.CROSSCHECK_HOME = HOME;
 const STATE = path.join(__dirname, '..', 'src', 'state.js');
 const state = require(STATE);

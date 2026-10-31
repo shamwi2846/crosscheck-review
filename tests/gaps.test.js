@@ -8,7 +8,8 @@ const path = require('path');
 const os = require('os');
 const { spawn, spawnSync } = require('child_process');
 
-const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'crosscheck gaps test ü '));
+// (its real spelling: git names folders by it, and a Windows runner's temp folder may be an 8.3 short name)
+const HOME = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'crosscheck gaps test ü ')));
 Object.assign(process.env, { CROSSCHECK_HOME: path.join(HOME, 'state'), USERPROFILE: HOME, HOME });
 const GAPS = path.join(__dirname, '..', 'src', 'gaps.js');
 const gaps = require(GAPS);
