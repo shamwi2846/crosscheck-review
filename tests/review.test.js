@@ -365,6 +365,107 @@ test('a changed file that needs a test plan it doesn\'t have refuses its review 
   assert.strictEqual(stateOf(root).acks[k['src/Kept.mqh']], sha('src/Kept.mqh 1\n'));
 });
 
+// ---- A trading file whose task skipped its plan gets the normal review (web task) ----
+
+// A project with a changed trading file (its baseline the committed version, so reviews see a diff) and this task's
+// skip for it.
+function skippedTrading(name) {
+  const { root, taskFile } = project(name, { 'src/EA.mq5': 'lots = 1;\n' });
+  fs.writeFileSync(path.join(root, 'src/EA.mq5'), 'lots = 1; // label\n');
+  const t = review.taskInfo(taskFile);
+  seed(root, s => {
+    s.changes = { [key('src/EA.mq5')]: change('src/EA.mq5', 'A', 1, undefined) };
+    s.skips = { [key('src/EA.mq5')]: { task: t.id, reqHash: t.reqHash, why: 'a label' } };
+  });
+  return { root, taskFile, t };
+}
+const effortOf = call => call.args.find(a => a.startsWith('model_reasoning_effort=')).split('=')[1];
+
+test('stale_trading_skips_cannot_bypass_review_admission (web task T1): a current skip gets the normal review, a stale one is refused before anything runs', async () => {
+  const { root, taskFile, t } = skippedTrading('t-light');
+  setSpec({ exec: [{ text: answerOf() }] });
+  const r = await review.review(root, { session: 'A', taskFile });
+  assert.strictEqual(r.status, 'DONE', r.text);
+  assert.deepStrictEqual(execCalls().map(effortOf), ['high'], 'one GPT at high effort');
+  const { prompt } = execCalls()[0];
+  assert.ok(prompt.includes('### src/EA.mq5 (diff from its last reviewed version)') && !prompt.includes('(whole file, read in full)'), 'reading the change');
+  const s = review.withMaps(stateOf(root));
+  assert.deepStrictEqual([s.acks[key('src/EA.mq5')], s.changes[key('src/EA.mq5')], s.escalations[key('src/EA.mq5')]], [sha('lots = 1; // label\n'), undefined, undefined]);
+  // (review F3: once new requirements leave its skip stale, the chain's follow-up is refused before GPT runs, as a fresh review is)
+  fs.writeFileSync(path.join(root, 'src/EA.mq5'), 'lots = 1; // label, moved\n');
+  fs.writeFileSync(taskFile, fs.readFileSync(taskFile, 'utf8').replace('R2. Keeps the sum.', 'R2. Keeps the sum, rounded.'));
+  const responseFile = path.join(HOME, 't-light-response.md');
+  fs.writeFileSync(responseFile, 'moved the label');
+  setSpec({ exec: [{ text: answerOf() }] });
+  const follow = await review.followup(root, { chain: r.chain, responseFile });
+  assert.ok(follow.status === 'REFUSED' && /test plan first/.test(follow.text) && execCalls().length === 0, follow.text);
+  // (review round 2: back at its acknowledged version, the file needs nothing, and the follow-up leaves it acknowledged)
+  fs.writeFileSync(path.join(root, 'src/EA.mq5'), 'lots = 1; // label\n');
+  setSpec({ exec: [{ text: JSON.stringify({ verdict: 'RESOLVED', followups: [], findings: [], requirements: [{ id: 'R2', status: 'MET', evidence: 'e' }],
+    possibly_missing: [], class: { level: 'normal', files: [], why: '-' }, coverage: 'c' }) }] });
+  const unchanged = await review.followup(root, { chain: r.chain, responseFile });
+  assert.strictEqual(unchanged.status, 'DONE', unchanged.text);
+  const after = review.withMaps(stateOf(root));
+  assert.deepStrictEqual([after.acks[key('src/EA.mq5')], after.changes[key('src/EA.mq5')]], [sha('lots = 1; // label\n'), undefined], 'still acknowledged, not pending');
+  fs.writeFileSync(taskFile, fs.readFileSync(taskFile, 'utf8').replace('R2. Keeps the sum, rounded.', 'R2. Keeps the sum.'));
+  // (a skip of another task with the same requirements, or of this task's older requirements, counts for nothing)
+  for (const stale of [{ task: 'another task', reqHash: t.reqHash }, { task: t.id, reqHash: sha('R1. Adds numbers.') }]) {
+    fs.writeFileSync(path.join(root, 'src/EA.mq5'), `lots = 2; // ${stale.task}\n`);
+    seed(root, st => { st.changes = { [key('src/EA.mq5')]: change('src/EA.mq5', 'A', 2, null) }; st.skips = { [key('src/EA.mq5')]: { ...stale, why: 'w' } }; });
+    const before = stateOf(root);
+    setSpec({ exec: [{ text: answerOf() }] });
+    const refused = await review.review(root, { session: 'A', taskFile });
+    assert.ok(refused.status === 'REFUSED' && /test plan first/.test(refused.text), refused.text);
+    assert.deepStrictEqual([stateOf(root), execCalls().length], [before, 0], `${stale.task}: nothing reserved, GPT never asked`);
+  }
+});
+
+test('requirements changed between admission and freezing leave a skipped trading file pending for its paired review (plan review F1)', async () => {
+  const { root, taskFile } = skippedTrading('t-light-race');
+  const hold = path.join(HOME, 't-light-race-hold');
+  fs.mkdirSync(hold);
+  museWith('t-light-race', [{ text: answerOf() }]);
+  fs.writeFileSync(process.env.FAKE_MUSE_SPEC, JSON.stringify({ echo: { hold }, exec: [{ text: answerOf() }] })); // (Muse's pre-check waits)
+  setSpec({ exec: [{ text: answerOf() }] });
+  const pending = review.review(root, { session: 'A', taskFile });
+  await waitFor(path.join(hold, 'started')); // (admitted with the skip; not frozen yet)
+  fs.writeFileSync(taskFile, fs.readFileSync(taskFile, 'utf8').replace('R2. Keeps the sum.', 'R2. Keeps the sum, rounded.'));
+  fs.writeFileSync(path.join(hold, 'go'), '');
+  const r = await pending;
+  museOff();
+  assert.strictEqual(r.status, 'DONE', r.text);
+  const s = review.withMaps(stateOf(root));
+  assert.ok(s.changes[key('src/EA.mq5')] && !s.acks[key('src/EA.mq5')], 'not acknowledged: its skip is for the old requirements');
+  setSpec({ exec: [{ text: answerOf() }] });
+  const again = await review.review(root, { session: 'A', taskFile });
+  assert.ok(again.status === 'REFUSED' && /test plan first/.test(again.text), again.text);
+});
+
+test('current_trading_plan_takes_precedence_over_retained_skip (web task T2): a planned trading file is paired, and nothing is acknowledged before the pair completes', async () => {
+  const { root, taskFile } = skippedTrading('t-planned');
+  seed(root, s => { s.plans = { [key('src/EA.mq5')]: planFor(taskFile) }; });
+  const hold = path.join(HOME, 't-planned-hold');
+  fs.mkdirSync(hold);
+  const lots = { level: 'risky', files: ['src/EA.mq5'], why: 'it sizes lots' };
+  const runs = museWith('t-planned', []);
+  fs.writeFileSync(process.env.FAKE_MUSE_SPEC, JSON.stringify({ exec: [{ text: answerOf({ class: lots }), hold }] })); // (Muse's review waits)
+  setSpec({ exec: [{ text: answerOf({ class: lots }) }] });
+  const pending = review.review(root, { session: 'A', taskFile });
+  await waitFor(path.join(hold, 'started'));
+  const during = review.withMaps(stateOf(root));
+  fs.writeFileSync(path.join(hold, 'go'), ''); // (before any assertion, so a failing one never leaves the review waiting)
+  const r = await pending;
+  museOff();
+  assert.ok(!during.acks[key('src/EA.mq5')] && during.escalations[key('src/EA.mq5')] && !during.riskyReviews[key('src/EA.mq5')], 'escalated, nothing acknowledged or certified while Muse runs');
+  assert.strictEqual(r.status, 'DONE', r.text);
+  const [gptA] = execCalls();
+  assert.ok(effortOf(gptA) === 'xhigh' && gptA.prompt.includes('### src/EA.mq5 (whole file, read in full)'), 'GPT A reads the whole file at xhigh');
+  const [muse] = runs();
+  assert.ok(muse.args[muse.args.indexOf('--reasoning-effort') + 1] === 'xhigh' && muse.prompt.includes('(whole file, read in full)'), 'and so does Muse');
+  const s = review.withMaps(stateOf(root));
+  assert.ok(s.acks[key('src/EA.mq5')] === sha('lots = 1; // label\n') && s.riskyReviews[key('src/EA.mq5')], 'the completed pair acknowledges and certifies it');
+});
+
 test('an answer still wrong after its one repair applies nothing and keeps its bundle', async () => {
   const { root, taskFile } = project('t5', { 'src/a.js': 'a0\n' });
   fs.writeFileSync(path.join(root, 'src/a.js'), 'a1\n');

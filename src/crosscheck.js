@@ -15,7 +15,8 @@ const CLI = `node "${__filename}"`;
 const USAGE = `Usage: crosscheck <command>
   review [--files a,b] [--risky] [--full] [--evidence-file out.log]
                                                    (--risky marks the named files, or all without --files: name only
-                                                   risky code, since .mq5, .mqh and .set files are risky by themselves)
+                                                   risky code, since .mq5, .mqh and .set files are risky by themselves
+                                                   unless their test plan was skipped for the task)
   review --followup <chain> --file response.md [--evidence-file out.log]
   review --fallback <bundle> --answer answer.json
   review --skip --why "..." [--files a,b]          (a task of comments, formatting or docs only)

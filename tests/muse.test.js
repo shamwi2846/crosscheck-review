@@ -25,12 +25,13 @@ const setSpec = spec => { fs.writeFileSync(SPEC, JSON.stringify(spec)); fs.rmSyn
 const execs = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').split('\n').filter(Boolean).map(JSON.parse) : []).filter(c => c.args && c.args[0] === 'exec').map(c => c.args);
 const provider = args => args[args.indexOf('--provider') + 1];
 const bundle = name => { const dir = path.join(HOME, name); fs.mkdirSync(dir, { recursive: true }); return dir; };
-// (written out, not taken from muse.js, so dropping one there fails here: the network restricted, no writes but the
-// shell's, no web, no reminders, no personal context; contributor mode on, the user's choice of 2026-10-30; exactly the
-// shell's tools, plus whatever servers the run attaches; and never a way out of the sandbox)
-const ISOLATION = ['--approval-mode', 'never', '--sandbox-network', 'restricted', '--disable-write', '--disable-web-tools', '--disable-reminders',
+// (written out, not taken from muse.js, so dropping one there fails here: the network proxy-only (the session check
+// makes sure nothing is let through), no writes but the shell's, no reminders, no personal context; contributor mode
+// on, the user's choice of 2026-10-30; exactly the shell's and web tools (web search: the user's choice of 2026-10-31),
+// plus whatever servers the run attaches; and never a way out of the sandbox)
+const ISOLATION = ['--approval-mode', 'never', '--sandbox-network', 'proxy-only', '--disable-write', '--disable-reminders',
   '--disable-request-user-input', '--no-foreign-personal-context', '--contributor-mode', 'on'];
-const SHELL = ['powershell', 'powershell_input', 'read_file', 'search'];
+const SHELL = ['powershell', 'powershell_input', 'read_file', 'search', 'web_search', 'web_fetch'];
 const BYPASS = ['--yolo', '--disable-sandbox', '--disable-approval', '--trust-workspace', '--preset', '--disable-shell'];
 const toolsetOf = args => JSON.parse(args.filter((a, i) => args[i - 1] === '-c' && a.startsWith('run.toolset='))[0].slice('run.toolset='.length));
 const isolated = args => ISOLATION.every((flag, i) => args[args.indexOf('--approval-mode') + i] === flag)
@@ -248,7 +249,7 @@ require('readline').createInterface({ input: process.stdin }).on('line', l => { 
 
 test('sandbox_attestation_is_required_before_and_after_every_run (shell task T1): a shell without its sandbox record, outside the sandbox or with network is refused at the pre-check, after a resumed run and after a failed run, before any retry', async () => {
   const bad = [['no sandbox record', { permission: false }], ['the shell sandbox off', { sandbox: 'off' }], ['a shell outside its sandbox', { filesystem: 'unrestricted' }],
-    ['a shell with network', { network: 'proxy_only' }], ['a shell with network', { network: 'enabled' }]];
+    ['a shell network other than proxy-only', { network: 'enabled' }], ['a shell network other than proxy-only', { network: { mode: 'proxy_only', targets: ['example.com:443'], unix_sockets: [] } }]];
   for (const [why, record] of bad) {
     for (const c of [{ name: 'precheck', spec: { echo: { record }, exec: [clean] }, runs: ['echo'] },
       { name: 'resumed', spec: { exec: [{ ...clean, record }] }, runs: ['meta'], resume: RESUMED },
@@ -261,11 +262,33 @@ test('sandbox_attestation_is_required_before_and_after_every_run (shell task T1)
       assert.ok(unverified(), `${why} ${c.name}`);
     }
   }
-  // (only the attested run passes, and every launch asks for the restricted network, never for a way out of the sandbox)
+  // (only the attested run passes, and every launch asks for the proxy-only network, never for a way out of the sandbox)
   config();
   setSpec({ exec: [clean] });
   assert.ok((await muse.ask({ prompt: 'review this', home: bundle('sandbox-clean'), tools: given(null) })).ok);
   assert.ok(execs().length === 2 && execs().every(isolated));
+});
+
+test('proxy_only_attestation_requires_empty_network_allowlists (web task T3): only proxy-only with no targets and no sockets, listed in every permission record, passes', async () => {
+  const net = over => ({ mode: 'proxy_only', targets: [], unix_sockets: [], ...over });
+  const bad = [net({ targets: ['example.com:443'] }), net({ unix_sockets: ['C:\\agent.sock'] }), { mode: 'proxy_only', unix_sockets: [] }, { mode: 'proxy_only', targets: [] },
+    net({ targets: 'none' }), net({ unix_sockets: {} }), net({ mode: 'enabled' }), net({ mode: 'restricted' }), ['enabled', 'proxy_only'], ['proxy_only', net({ targets: ['*'] })]];
+  for (const network of bad) {
+    config();
+    setSpec({ echo: { record: { network } }, exec: [clean] });
+    const r = await muse.ask({ prompt: 'review this', home: bundle('network-bad'), tools: given(null) });
+    assert.ok(!r.ok && /a shell network other than proxy-only with nothing let through/.test(r.reason) && /no longer verified/.test(r.reason), `${JSON.stringify(network)}: ${r.reason}`);
+    assert.deepStrictEqual(execs().map(provider), ['echo'], `${JSON.stringify(network)}: refused before any model call`);
+  }
+  config();
+  setSpec({ echo: { record: { network: ['proxy_only', 'proxy_only'] } }, exec: [clean] });
+  const r = await muse.ask({ prompt: 'review this', home: bundle('network-good'), tools: given(null) });
+  assert.ok(r.ok, r.reason);
+  // (a run without its web tools, as Muse leaves them out with the network restricted, only lacks them: its answer can't count)
+  config();
+  setSpec({ exec: [{ ...clean, record: { tools: ['powershell', 'powershell_input', 'read_file', 'search', ...FILE_TOOLS] } }] });
+  const lacking = await muse.ask({ prompt: 'review this', home: bundle('network-lacking'), tools: given(null) });
+  assert.ok(!lacking.ok && /lacked its tools \(no web_search; no web_fetch\)/.test(lacking.reason) && !unverified(), lacking.reason);
 });
 
 const { spawnSync } = require('child_process');

@@ -31,24 +31,27 @@ const attached = [...(servers['project-files'] ? ['list_files', 'read_file', 'se
 const toolset = settings.filter(a => a.startsWith('run.toolset=')).map(a => JSON.parse(a.slice('run.toolset='.length)))[0] || null;
 const named = toolset || attached;
 const unknown = named.filter(t => t.startsWith('mcp__') && !attached.includes(t));
-// (the sandbox and network the flags ask for, as Muse records them: proxy-only is its default network)
+// (the sandbox and network the flags ask for, as Muse records them: proxy-only is its default network, and with the
+// network restricted Muse leaves the web tools out of the run, named or not)
 const bypassed = args.includes('--yolo') || args.includes('--disable-sandbox');
 const NETWORK = args.includes('--sandbox-network') ? opt('--sandbox-network').replace('-', '_') : 'proxy_only';
+const offered = NETWORK === 'restricted' ? named.filter(t => !['web_search', 'web_fetch'].includes(t)) : named;
 
-// A session's record as Muse exports it: its permission record (inside a record_json string, as Muse nests it), its tool
-// calls (`toolCalls`: [{ name, args }]), each call's start (and `unlogged`: starts of calls the record doesn't list),
-// their results (`results`, chunks), and one run with its toolset and context messages.
-function record({ tools = named, context = [], skills = ['bundled:git'], filesystem = bypassed ? 'unrestricted' : 'managed', network = NETWORK,
+// A session's record as Muse exports it: its permission records (inside a record_json string, as Muse nests it; `network`
+// a mode with nothing let through, a whole local_command_network value, or a list of either for several records), its
+// tool calls (`toolCalls`: [{ name, args }]), each call's start (and `unlogged`: starts of calls the record doesn't
+// list), their results (`results`, chunks), and one run with its toolset and context messages.
+function record({ tools = offered, context = [], skills = ['bundled:git'], filesystem = bypassed ? 'unrestricted' : 'managed', network = NETWORK,
   sandbox = bypassed ? 'off' : 'on', permission = true, toolCalls = [], results = [], unlogged = [] } = {}) {
   const catalog = `<skill-catalog>\n${skills.map(id => `<skill id="${id}" scope="${id.split(':')[0]}" path="x">`).join('\n')}\n</skill-catalog>`;
-  const profile = { payload_type: 'runtime.session.permission_profile_committed',
-    payload: { resolved_snapshot: { filesystem: { mode: filesystem }, local_command_network: { mode: network } } } };
+  const profile = net => ({ payload_type: 'runtime.session.permission_profile_committed',
+    payload: { resolved_snapshot: { filesystem: { mode: filesystem }, local_command_network: typeof net === 'string' ? { mode: net, targets: [], unix_sockets: [] } : net } } });
   const ids = toolCalls.map((_, i) => `call_${i}`);
   // (`args: null`: a call recorded without its arguments)
   const committed = { kind: 'assistant_tool_calls_committed', tool_calls: toolCalls.map((c, i) => ({ call_id: ids[i], name: c.name, ...(c.args === null ? {} : { args: JSON.stringify(c.args || {}) }) })) };
   return {
     events: [
-      ...(permission ? [{ kind: 'record', envelope: { children: [{ record_json: JSON.stringify(profile) }] } }] : []),
+      ...(permission ? [].concat(network).map(net => ({ kind: 'record', envelope: { children: [{ record_json: JSON.stringify(profile(net)) }] } })) : []),
       ...(toolCalls.length ? [{ envelope: { payload_type: 'runtime.session', payload: { kind: 'run', event: committed } } }] : []),
       ...[...ids, ...unlogged].map(id => ({ envelope: { payload_type: 'tool_batch.effect.started', payload: { record: { call_id: id, tool_name: 'powershell' } } } })),
       ...results.map(chunk => ({ envelope: { payload_type: 'runtime.session',

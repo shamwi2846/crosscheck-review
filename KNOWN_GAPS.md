@@ -892,3 +892,21 @@ Findings left unfixed on purpose. Entries are never deleted, only marked fixed.
 - Fix: Add the omitted fixtures and assertions to the named tests, including successful continuation after rejecting the destination junction.
 - Log: 20261031124922-f8c445
 - Why skipped: pair: confirmed by B
+
+## G100 · fixed · 2026-10-31 · LOW
+- Task: Lighter review for safe trading changes; web search for GPT and Muse; Muse sees pictures
+- Where: src/muse.js:106
+- Problem: F2: The network validator accepts a mode R5 explicitly forbids
+- Trigger: A permission snapshot reports restricted mode with empty targets and unix_sockets.
+- Fix: Require mode === 'proxy_only', remove the restricted exception from DESIGN.md, and include restricted among T3's rejected modes.
+- Log: 20261031164408-a1a658
+- Why skipped: pair: confirmed by B
+
+## G101 · fixed · 2026-10-31 · LOW
+- Task: Lighter review for safe trading changes; web search for GPT and Muse; Muse sees pictures
+- Where: src/review.js:200
+- Problem: F3: A light trading file's follow-up runs GPT before its stale skip is noticed
+- Trigger: A skipped trading file gets its normal review, the task's requirements then change, and Claude runs that chain's follow-up instead of a fresh review
+- Fix: Include RISKY_FILE.test(k) in admit's unplanned predicate, so a follow-up is refused test-plan-first when a trading file has neither a current plan nor a counting skip, as a fresh review is
+- Log: 20261031164408-a1a658
+- Why skipped: pair: confirmed by A

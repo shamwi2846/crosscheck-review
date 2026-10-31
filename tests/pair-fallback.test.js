@@ -51,7 +51,8 @@ test('a fallback chain keeps its trading file risky: its own pair comes first, a
   write(p.root, 'src/EA.mq5', 'e1\n');
   seed(p.root, s => { s.changes = { [key('src/EA.mq5')]: pending('src/EA.mq5') }; s.skips = { [key('src/EA.mq5')]: { task: p.task, reqHash: p.reqHash, why: 'w' } }; });
   setPair({ A: [reviewAnswer()], B: [{ fail: 'error: no such session', code: 1 }] });
-  const r = await review.review(p.root, { session: 'A', taskFile: p.taskFile });
+  // (marked risky: a trading file whose task skipped its plan otherwise gets the normal review)
+  const r = await review.review(p.root, { session: 'A', taskFile: p.taskFile, risky: true });
   assert.strictEqual(r.status, 'PAIR_INCOMPLETE', r.text);
   const answerFile = path.join(HOME, 't1b-answer.json');
   fs.writeFileSync(answerFile, reviewAnswer());

@@ -54,10 +54,22 @@ test('a saved review and its resume keep isolation and the answer schema', async
   assert.strictEqual(second.ok, true, second.reason);
   const [fresh, resumed] = execCalls().map(c => placeholders(c.args));
   const head = ['--json', '-m', 'gpt-test', '-c', 'model_reasoning_effort=high', '-c', 'windows.sandbox=unelevated', '-c', 'service_tier="default"', ...ISOLATION,
-    '-c', 'web_search="disabled"', '--output-schema', '<schema>', '--skip-git-repo-check', '-o', '<answer>'];
+    '--output-schema', '<schema>', '--skip-git-repo-check', '-o', '<answer>'];
   assert.deepStrictEqual(fresh, ['exec', '--ignore-user-config', ...head, '-s', 'read-only', '-C', '<cwd>', '-']);
   assert.deepStrictEqual(resumed, ['exec', 'resume', '--ignore-user-config', ...head, '-c', 'sandbox_mode="read-only"', SESSION, '-']);
   assert.strictEqual(fs.readFileSync(profile, 'utf8'), toml);
+});
+
+// (test plan T4) Web search for every isolated mode can't reach a computer run: its one web setting is the lockdown's.
+test('a computer run keeps web search off while every isolated mode has it', () => {
+  const lockdown = ['-c', 'features.apps=false', '-c', 'web_search="disabled"'];
+  const web = args => args.filter(a => /web_search|--search/.test(a));
+  assert.deepStrictEqual(web(codex.buildArgs({ mode: 'computer', lockdown, effort: 'high', cwd: WORK, outFile: 'a' })), ['web_search="disabled"']);
+  for (const mode of ['review', 'consult', 'research', 'write']) {
+    const args = codex.buildArgs({ mode, effort: 'high', cwd: WORK, outFile: 'a' });
+    assert.deepStrictEqual(web(args), [], `${mode}: Codex's default web search`);
+    assert.ok(args.includes('--ignore-user-config') && args.includes('read-only') && ISOLATION.every(a => args.includes(a)), `${mode}: isolated and read-only`);
+  }
 });
 
 test("the computer lockdown refuses a node_repl outside Codex's runtime", () => {
@@ -250,7 +262,7 @@ test('every run explicitly selects the shared tier without weakening isolation',
     }
     assert.ok(fresh.args.includes('--output-schema') && resumed.args.includes('--output-schema'));
     assert.ok(fresh.args.includes('mcp_servers.mql5-docs.enabled_tools=["mql5_find","mql5_read"]'), 'the docs server keeps only its lookup tools');
-    assert.ok(consult.args.includes('web_search="disabled"') && !research.args.includes('web_search="disabled"'), 'only research has the web');
+    assert.ok([fresh, resumed, consult, research].every(run => !run.args.includes('web_search="disabled"')), 'every isolated mode has the web');
     assert.ok(computer.args.join('\n').includes(lockdown.args.join('\n')) && !computer.args.includes('--ignore-user-config'), 'the computer lockdown as before');
   }
   assert.strictEqual(fs.readFileSync(profile, 'utf8'), toml, "the user's Codex config is unchanged");

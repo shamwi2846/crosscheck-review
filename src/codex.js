@@ -1,6 +1,7 @@
 // codex.js: running GPT through the Codex CLI. It builds each run's command line with GPT fully isolated
-// (read-only, no connectors, plugins or other tools), locks computer-use runs down to computer use and the
-// browser, and runs Codex with a timeout that kills its whole process tree.
+// (read-only, no connectors, plugins or other tools; web search on, the user's choice of 2026-10-31), locks
+// computer-use runs down to computer use and the browser, and runs Codex with a timeout that kills its whole
+// process tree.
 'use strict';
 const fs = require('fs');
 const path = require('path');
@@ -83,7 +84,6 @@ function buildArgs({ mode, effort, cwd, outFile, schemaFile, resume, persist, do
     args.push(...lockdown);
   } else {
     args.push(...configPairs(ISOLATION_OFF.map(f => `features.${f}=false`)));
-    if (mode !== 'research') args.push(...configPairs(['web_search="disabled"']));
     if (docs) args.push(...docsArgs(docs));
   }
   if (schemaFile) args.push('--output-schema', schemaFile);
