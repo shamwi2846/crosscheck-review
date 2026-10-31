@@ -1,8 +1,9 @@
-// Tests for muse.js (test plan of the Muse task, cases T1 and T2; of the shell task, T1, T2 and T4): a Muse session
-// that would hold a tool, personal context, a foreign skill or a shell outside its sandbox is refused before any model
-// call, and a real run's answer whose session holds one is discarded with the verification taken away; the copy Muse's
-// commands run in can't reach the project's storage and is removed; every call is logged; a Muse run looping on blank
-// output is stopped with its child, and not retried. They run muse.js against the recording stub fake-muse.js.
+// Tests for muse.js (test plan of the Muse task, cases T1 and T2; of the shell task, T1, T2 and T4; of the copy task,
+// T1 to T4 and M1): a Muse session that would hold a tool, personal context, a foreign skill or a shell outside its
+// sandbox is refused before any model call, and a real run's answer whose session holds one is discarded with the
+// verification taken away; the copy Muse's commands run in can't reach the project's storage, holds the project's
+// uncommitted changes that Muse may get, and is removed; every call is logged; a Muse run looping on blank output is
+// stopped with its child, and not retried. They run muse.js against the recording stub fake-muse.js.
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert');
@@ -389,6 +390,177 @@ test('the copy is made without the user\'s git hooks, filters or template, from 
     const r = await muse.ask({ prompt: 'review this', home: bundle('temp-link'), tools: { ...given(null), copy }, resume: RESUMED });
     assert.ok(!r.ok && /temp folder .* is a link or not a folder/.test(r.reason), r.reason);
     assert.deepStrictEqual(execs(), [], 'Muse never started');
+  });
+});
+
+// A project with `files` committed; returns its folder and a writer of its working tree.
+const committed = (name, files) => {
+  const root = bundle(name);
+  gitIn(root, 'init', '-q');
+  const write = (rel, data) => {
+    fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
+    fs.writeFileSync(path.join(root, rel), data);
+  };
+  for (const [rel, text] of Object.entries(files)) write(rel, text);
+  gitIn(root, 'add', '-A');
+  gitIn(root, 'commit', '-qm', 'base');
+  return { root, write };
+};
+const fileIn = (dir, rel) => { const f = path.join(dir, rel); return fs.existsSync(f) && fs.statSync(f).isFile() ? fs.readFileSync(f) : null; };
+const textIn = (dir, rel) => { const bytes = fileIn(dir, rel); return bytes && String(bytes); };
+
+test('muse_copy_imports_current_staged_unstaged_new_and_deleted_files (copy task T1): the copy holds the project as it is now, not only its last commit, and a copy made again holds the latest', async () => {
+  const review = require('../src/review');
+  const { root, write } = committed('dirty', Object.fromEntries(['edited', 'restaged', 'staged-gone', 'gone'].map(n => [`src/${n}.js`, `${n} HEAD\n`])));
+  write('src/edited.js', 'EDITED\n');
+  write('src/restaged.js', 'STAGED\n');
+  gitIn(root, 'add', 'src/restaged.js');
+  write('src/restaged.js', 'EDITED AFTER STAGING\n');
+  write('src/added.js', 'ADDED\n');
+  gitIn(root, 'add', 'src/added.js');
+  const binary = require('crypto').randomBytes(3 << 20);
+  write('data/refund rules.bin', binary);
+  gitIn(root, 'rm', '-q', 'src/staged-gone.js');
+  fs.rmSync(path.join(root, 'src', 'gone.js'));
+  await review.withCopy(root, {}, async copy => {
+    assert.strictEqual(copy.remake(), null);
+    assert.deepStrictEqual(['edited', 'restaged', 'added', 'staged-gone', 'gone'].map(n => textIn(copy.dir, `src/${n}.js`)),
+      ['EDITED\n', 'EDITED AFTER STAGING\n', 'ADDED\n', null, null]);
+    assert.ok(binary.equals(fileIn(copy.dir, 'data/refund rules.bin')), 'a new binary file, byte for byte');
+    write('src/edited.js', 'EDITED AGAIN\n');
+    assert.strictEqual(copy.remake(), null);
+    assert.strictEqual(textIn(copy.dir, 'src/edited.js'), 'EDITED AGAIN\n', 'a copy made again holds the latest');
+  });
+});
+
+test('muse_copy_checks_both_source_names_and_preserves_rejected_entries (copy task T2): a changed file Muse may not get keeps its committed version, a new one stays out, and no live secret reaches the copy', async () => {
+  const review = require('../src/review');
+  const { root, write } = committed('guarded', { 'credentials.json': 'COMMITTED-PLACEHOLDER\n', 'vendor/lib.js': 'VENDOR-HEAD\n', 'src/ok.js': 'OK-HEAD\n', '.gitignore': 'ignored/\n' });
+  // (a changed secrets file; a tracked folder made a link to an ignored folder of the project; a new file the user's own
+  // git ignore rules leave out; and a changed file Muse may get)
+  write('credentials.json', 'LIVE-SECRET creds\n');
+  write('ignored/lib.js', 'LIVE-SECRET ignored\n');
+  fs.rmSync(path.join(root, 'vendor'), { recursive: true });
+  fs.symlinkSync(path.join(root, 'ignored'), path.join(root, 'vendor'), 'junction');
+  const excludes = path.join(HOME, 'user-excludes');
+  fs.writeFileSync(excludes, 'private-notes.txt\n');
+  const userConfig = path.join(HOME, 'user-gitconfig');
+  fs.writeFileSync(userConfig, `[core]\n\texcludesFile = ${excludes.split(path.sep).join('/')}\n`);
+  write('private-notes.txt', 'LIVE-SECRET notes\n');
+  write('src/ok.js', 'OK-LIVE\n');
+  const before = process.env.GIT_CONFIG_GLOBAL;
+  process.env.GIT_CONFIG_GLOBAL = userConfig;
+  try {
+    await review.withCopy(root, {}, async copy => {
+      assert.strictEqual(copy.remake(), null);
+      assert.deepStrictEqual(['credentials.json', 'vendor/lib.js', 'private-notes.txt', 'src/ok.js'].map(rel => textIn(copy.dir, rel)),
+        ['COMMITTED-PLACEHOLDER\n', 'VENDOR-HEAD\n', null, 'OK-LIVE\n']);
+      const texts = filesIn(copy.dir).filter(f => !path.relative(copy.dir, f).startsWith('.git')).map(f => fs.readFileSync(f, 'utf8'));
+      assert.ok(!texts.some(t => t.includes('LIVE-SECRET')), 'no live secret anywhere in the copy');
+    });
+  } finally {
+    if (before === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+    else process.env.GIT_CONFIG_GLOBAL = before;
+  }
+});
+
+test('muse_copy_skips_optional_overlays_behind_destination_links (copy task T3): nothing is written or removed through a link in the copy, and a link at the path itself is removed, never followed', () => {
+  const review = require('../src/review');
+  const dir = bundle('linked-copy');
+  const outside = bundle('copy-ledger');
+  fs.writeFileSync(path.join(outside, 'ledger.csv'), 'LEDGER\n');
+  fs.symlinkSync(outside, path.join(dir, 'docs'), 'junction');
+  assert.match(review.writeIn(dir, 'docs/ledger.csv', Buffer.from('OVERWRITTEN\n')), /behind a link/);
+  assert.match(review.writeIn(dir, 'docs/ledger.csv', null), /behind a link/);
+  assert.strictEqual(review.writeIn(dir, 'docs', null), null);
+  assert.ok(!fs.existsSync(path.join(dir, 'docs')), 'the link is gone');
+  assert.strictEqual(fs.readFileSync(path.join(outside, 'ledger.csv'), 'utf8'), 'LEDGER\n', 'what it pointed to is untouched');
+});
+
+test('muse_copy_distinguishes_inventory_failure_from_unreadable_optional_files (copy task T4): a file that can\'t be read keeps its committed version, and a project whose changes git can\'t list gets no copy', async () => {
+  const review = require('../src/review');
+  const { root, write } = committed('unreadable', { 'src/auth.js': 'AUTH-HEAD\n', 'src/held.js': 'HELD-HEAD\n' });
+  write('src/auth.js', 'AUTH-LIVE\n');
+  write('src/held.js', 'HELD-LIVE, longer\n');
+  // (a file whose content can't be read now, as when another program holds it)
+  const held = path.join(root, 'src', 'held.js');
+  const lock = on => (process.platform === 'win32'
+    ? spawnSync('icacls', [held, on ? '/deny' : '/remove:d', `${os.userInfo().username}${on ? ':(RD)' : ''}`], { encoding: 'utf8' })
+    : fs.chmodSync(held, on ? 0o000 : 0o644));
+  lock(true);
+  try {
+    assert.throws(() => fs.readFileSync(held), 'the file really can\'t be read');
+    await review.withCopy(root, {}, async copy => {
+      assert.strictEqual(copy.remake(), null);
+      assert.deepStrictEqual([textIn(copy.dir, 'src/auth.js'), textIn(copy.dir, 'src/held.js')], ['AUTH-LIVE\n', 'HELD-HEAD\n']);
+    });
+  } finally {
+    lock(false);
+  }
+  // (a damaged index: git can't list the changes, so no copy at all, never one missing some)
+  fs.writeFileSync(path.join(root, '.git', 'index'), 'not an index');
+  await review.withCopy(root, {}, async copy => {
+    assert.match(copy.remake(), /git status failed/);
+  });
+});
+
+test('muse_copy_matches_renames_and_file_directory_replacements (copy task, Muse\'s M1): a move, a file made a folder and a folder made a file all reach the copy as they are now', async () => {
+  const review = require('../src/review');
+  const { root, write } = committed('reshaped', { 'src/pay-old.js': 'PAY-OLD\n', 'scripts/refund': 'REFUND-FILE\n', 'scripts/ledger/index.js': 'LEDGER-DIR\n' });
+  gitIn(root, 'mv', 'src/pay-old.js', 'src/pay-new.js');
+  write('src/pay-new.js', 'PAY-NEW edited\n');
+  fs.rmSync(path.join(root, 'scripts', 'refund'));
+  write('scripts/refund/index.js', 'REFUND-DIR\n');
+  fs.rmSync(path.join(root, 'scripts', 'ledger'), { recursive: true });
+  write('scripts/ledger', 'LEDGER-FILE\n');
+  await review.withCopy(root, {}, async copy => {
+    assert.strictEqual(copy.remake(), null);
+    assert.deepStrictEqual(['src/pay-old.js', 'src/pay-new.js', 'scripts/refund/index.js', 'scripts/ledger', 'scripts/ledger/index.js'].map(rel => textIn(copy.dir, rel)),
+      [null, 'PAY-NEW edited\n', 'REFUND-DIR\n', 'LEDGER-FILE\n', null]);
+  });
+});
+
+test('a change the copy can\'t take in place is made to fit, or left out, never costing the whole copy (copy review F1, F2, F4)', async () => {
+  const review = require('../src/review');
+  // (F4: a tracked file made a link to a folder of the project, with a new file in it, beside an unrelated edit)
+  const linked = committed('file-made-link', { a: 'A-FILE\n', 'src/edit.js': 'EDIT-HEAD\n' });
+  linked.write('src/new.js', 'NEW\n');
+  linked.write('src/edit.js', 'EDIT-LIVE\n');
+  fs.rmSync(path.join(linked.root, 'a'));
+  fs.symlinkSync(path.join(linked.root, 'src'), path.join(linked.root, 'a'), 'junction');
+  await review.withCopy(linked.root, {}, async copy => {
+    assert.strictEqual(copy.remake(), null);
+    assert.deepStrictEqual([textIn(copy.dir, 'src/new.js'), textIn(copy.dir, 'src/edit.js')], ['NEW\n', 'EDIT-LIVE\n']);
+  });
+  assert.ok(fs.lstatSync(path.join(linked.root, 'a')).isSymbolicLink() && textIn(linked.root, 'src/new.js') === 'NEW\n', 'the project untouched');
+  // (F1: a reviewed file whose folder the project has since made a file: the frozen change still goes in)
+  const reshaped = committed('folder-made-file', { 'src/pay/index.js': 'PAY-HEAD\n' });
+  const frozen = review.snapshot(reshaped.root, Buffer.from('PAY-FROZEN\n'));
+  fs.rmSync(path.join(reshaped.root, 'src', 'pay'), { recursive: true });
+  reshaped.write('src/pay', 'NOW A FILE\n');
+  await review.withCopy(reshaped.root, { 'src/pay/index.js': { path: 'src/pay/index.js', frozen } }, async copy => {
+    assert.strictEqual(copy.remake(), null);
+    assert.strictEqual(textIn(copy.dir, 'src/pay/index.js'), 'PAY-FROZEN\n');
+  });
+  // (F2: a file of the copy whose write fails partway, the disk full say: it keeps its committed version, whole)
+  // (F5: beside a project file whose name ends as a temporary one might)
+  const held = committed('held-in-copy', { 'src/held.js': 'HELD-HEAD\n', 'src/edit.js': 'EDIT-HEAD\n', 'src/edit.js.crosscheck-new': 'SIBLING\n' });
+  held.write('src/held.js', 'HELD-LIVE\n');
+  held.write('src/edit.js', 'EDIT-LIVE\n');
+  const write = fs.writeFileSync;
+  await review.withCopy(held.root, {}, async copy => {
+    fs.writeFileSync = (file, data, ...rest) => {
+      if (!path.resolve(String(file)).startsWith(path.join(copy.dir, 'src', 'held.js'))) return write(file, data, ...rest);
+      write(file, String(data).slice(0, 3), ...rest);
+      throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
+    };
+    try {
+      assert.strictEqual(copy.remake(), null);
+    } finally {
+      fs.writeFileSync = write;
+    }
+    assert.deepStrictEqual(['src/held.js', 'src/edit.js', 'src/edit.js.crosscheck-new'].map(rel => textIn(copy.dir, rel)), ['HELD-HEAD\n', 'EDIT-LIVE\n', 'SIBLING\n']);
+    assert.deepStrictEqual(fs.readdirSync(path.join(copy.dir, 'src')).sort(), ['edit.js', 'edit.js.crosscheck-new', 'held.js'], 'nothing left beside it, nothing taken');
   });
 });
 

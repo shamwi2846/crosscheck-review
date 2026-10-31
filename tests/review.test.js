@@ -660,7 +660,7 @@ test('a test a stored plan names through a link to somewhere outside the project
   assert.ok(state.update(state.files.global(), g => { delete g.muse; }).ok);
 });
 
-test('muse_shell_copy_is_exact_pristine_and_secret_free_on_every_turn (shell task M1): Muse\'s commands run in a copy holding the last commit plus exactly the frozen change, never an ignored, untracked or linked-in file, made afresh for its cross-check', async () => {
+test('muse_shell_copy_is_exact_pristine_and_secret_free_on_every_turn (shell task M1; copy task): Muse\'s commands run in a copy holding the last commit, the project\'s other uncommitted changes and exactly the frozen change over them, never an ignored or linked-in file, made afresh for its cross-check', async () => {
   fs.mkdirSync(path.join(HOME, 't-copy', 'vendor'), { recursive: true });
   const { root, taskFile, git } = project('t-copy', { 'src/pay.js': 'PAY-HEAD\n', 'src/old.js': 'OLD-HEAD\n', 'src/other.js': 'OTHER-HEAD\n', 'vendor/lib.js': 'VENDOR-HEAD\n', '.gitignore': '.env\n' });
   const head = String(spawnSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).stdout).trim();
@@ -705,11 +705,13 @@ test('muse_shell_copy_is_exact_pristine_and_secret_free_on_every_turn (shell tas
     const look = () => ({ pay: read('src/pay.js'), new: String(read('src/new.js')), old: read('src/old.js'), other: String(read('src/other.js')), vendor: String(read('vendor/lib.js')),
       env: read('.env'), creds: read('creds.json'), head: inCopy('rev-parse', 'HEAD'), log: inCopy('log', '--format=%s'), status: inCopy('status', '--porcelain'),
       temp: fs.readdirSync(path.join(copy, '.crosscheck-tmp')) });
-    const expected = { pay: frozenPay, new: 'NEW-FROZEN\n', old: null, other: 'OTHER-HEAD\n', vendor: 'VENDOR-HEAD\n', env: null, creds: null, head, log: 'base',
-      status: ' D src/old.js\n M src/pay.js\n?? src/new.js', temp: [] };
+    // (the other dirty file and the new one beside the change are the project as it is, so they come in; the ignored
+    // .env and what the linked folder points to never do)
+    const expected = { pay: frozenPay, new: 'NEW-FROZEN\n', old: null, other: 'OTHER-DIRTY\n', vendor: 'VENDOR-HEAD\n', env: null, creds: Buffer.from('CREDS-SENTINEL\n'), head, log: 'base',
+      status: ' D src/old.js\n M src/other.js\n M src/pay.js\n?? creds.json\n?? src/new.js', temp: [] };
     assert.deepStrictEqual(look(), expected, 'the first review\'s copy');
     const texts = fs.readdirSync(copy, { recursive: true }).filter(f => !/^\.git([\\/]|$)/.test(f)).map(f => path.join(copy, f)).filter(f => fs.statSync(f).isFile()).map(f => fs.readFileSync(f, 'utf8'));
-    assert.ok(!texts.some(t => /ENV-SENTINEL|CREDS-SENTINEL|JUNCTION-SENTINEL|OTHER-DIRTY/.test(t)), 'no secret, untracked, linked-in or unrelated dirty file');
+    assert.ok(!texts.some(t => /ENV-SENTINEL|JUNCTION-SENTINEL/.test(t)), 'no ignored or linked-in file');
     // (the project changes again while Muse works, and the commands of each Muse run change the copy, commit there and
     // leave a temp file: the run after it, the first one's retry and then the cross-check, gets the copy made afresh)
     fs.writeFileSync(path.join(root, 'src/pay.js'), 'PAY-LIVE\n');

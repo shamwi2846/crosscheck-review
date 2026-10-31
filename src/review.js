@@ -497,13 +497,96 @@ function museTools(root, attempt, { docs = null, files = {}, plan = null } = {})
   return { files: manifest, docs };
 }
 
+// Writes `bytes` at project path `rel` of Muse's copy at `dir`, or removes the entry there when `bytes` is null: only
+// where no folder on its way is a link, never through one. A file on the way, where the project now has a folder, is
+// removed for a write (and nothing lies beneath it to remove); a folder or a link at the path itself is removed, never
+// followed, while a file there is replaced in one step by one written beside it, so a write that fails, on a full
+// disk say, leaves it whole. Returns why not, or null.
+function writeIn(dir, rel, bytes) {
+  const name = path.relative(dir, path.join(dir, rel)).replace(/\\/g, '/');
+  const parent = path.posix.dirname(name);
+  if (!name || outsidePath(name) || (parent !== '.' && state.pathKey(realName(dir, parent) || '') !== state.pathKey(parent))) {
+    return `${rel} lies outside the copy or behind a link in it`;
+  }
+  const entry = p => {
+    try {
+      return fs.lstatSync(p);
+    } catch {
+      return null;
+    }
+  };
+  const segments = name.split('/');
+  for (let i = 1; i < segments.length; i++) {
+    const above = path.join(dir, ...segments.slice(0, i));
+    const found = entry(above);
+    if (!found || !found.isFile()) continue;
+    if (bytes === null) return null;
+    fs.rmSync(above);
+    break;
+  }
+  const target = path.join(dir, name);
+  const now = entry(target);
+  if (now && (bytes === null || !now.isFile())) fs.rmSync(target, { recursive: true, force: true });
+  if (bytes === null) return null;
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  // (a name of its own, so no project file is ever taken for it; 'wx' creates it afresh, never through a link)
+  const aside = `${target}.${crypto.randomBytes(6).toString('hex')}.crosscheck-new`;
+  try {
+    fs.writeFileSync(aside, bytes, { flag: 'wx' });
+    fs.renameSync(aside, target);
+  } finally {
+    fs.rmSync(aside, { force: true });
+  }
+  return null;
+}
+
+// The project's uncommitted changes (changed and new files git lists, and deletions) written into Muse's copy at `dir`
+// as they are now, so the copy's code matches the tree under review even before earlier steps are committed. A file
+// comes in only under the rule for every file Muse gets (located, unsendable); one that fails it, can't be read now or
+// can't be written in keeps its committed version, and never stops the copy. Deletions go first, so a folder replaced
+// by a file makes way (a file replaced by a folder makes way in writeIn). Returns why not when git can't list the
+// changes, or null.
+function bringChanges(root, dir) {
+  // (--no-optional-locks: the project's index is never rewritten under the user's own git commands; --no-renames: a
+  // move is a deletion and an addition, one path each)
+  const r = git(root, ['--no-optional-locks', 'status', '--porcelain=v1', '-z', '--untracked-files=all', '--no-renames'], 'utf8');
+  if (r.status !== 0) return `git status failed: ${String(r.stderr || r.error || '').trim().slice(0, 300)}`;
+  const missing = rel => {
+    try {
+      fs.lstatSync(path.join(root, rel));
+      return false;
+    } catch (e) {
+      return e.code === 'ENOENT' || e.code === 'ENOTDIR';
+    }
+  };
+  const bring = (rel, bytes) => {
+    try {
+      writeIn(dir, rel, bytes);
+    } catch {} // (held by another program in the copy, say: that one change is left out)
+  };
+  const changes = r.stdout.split('\0').filter(Boolean).map(entry => entry.slice(3));
+  for (const rel of changes.filter(missing)) bring(rel, null);
+  const listed = new Set(listedFiles(root).map(state.pathKey));
+  for (const rel of changes) {
+    // (read before anything in the copy changes: a file that can't be read now, held by another program say, keeps
+    // its committed version, never becomes a deletion)
+    let bytes = null;
+    try {
+      const at = located(root, rel);
+      if (!at.why && !unsendable(listed, at.rel, at.realRel)) bytes = fs.readFileSync(at.real);
+    } catch {}
+    if (bytes !== null) bring(rel, bytes);
+  }
+  return null;
+}
+
 // A throwaway copy of the project at `dir`, where Muse's commands run (DESIGN.md section 8), made afresh for every Muse
 // run so each one starts from the tree under review: a clone of the project's history cut off from it (no remote, and
 // no hardlinked or borrowed objects, since the sandbox lets Muse write the copy's git storage), at the project's HEAD
-// (a worktree's, or a detached one), with the change under review written in (`files`, a review manifest's: each
-// frozen copy, each deletion). Git runs with no system or user configuration and an empty template, so no hook,
-// filter or fsmonitor of the user's runs. A reviewed file is written only where no folder on its way is a link, over
-// its old entry, never through it. Returns why not, or null.
+// (a worktree's, or a detached one), with the project's other uncommitted changes brought in (bringChanges), then the
+// change under review written in over them (`files`, a review manifest's: each frozen copy, each deletion). Git runs
+// with no system or user configuration and an empty template, so no hook, filter or fsmonitor of the user's runs.
+// Every file goes in through writeIn. Returns why not, or null.
 function museCopy(root, files, dir) {
   try {
     fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
@@ -519,22 +602,15 @@ function museCopy(root, files, dir) {
       return r.status === 0 ? null : `git ${args[0]} failed: ${String(r.stderr || r.error || '').trim().slice(0, 300)}`;
     };
     // (a clone checks out the project's own HEAD: a worktree's, or a detached one)
-    const why = failed(path.dirname(dir), ['clone', '-q', '--no-hardlinks', '--dissociate', root, dir]) || failed(dir, ['remote', 'remove', 'origin']);
+    const why = failed(path.dirname(dir), ['clone', '-q', '--no-hardlinks', '--dissociate', root, dir]) || failed(dir, ['remote', 'remove', 'origin'])
+      || bringChanges(root, dir);
     if (why) return why;
     fs.mkdirSync(path.join(dir, '.git', 'info'), { recursive: true });
     fs.appendFileSync(path.join(dir, '.git', 'info', 'exclude'), `/${muse.TEMP_DIR}/\n`);
     for (const f of Object.values(files)) {
       if (!f.frozen) continue;
-      const rel = path.relative(dir, path.join(dir, f.path)).replace(/\\/g, '/');
-      const parent = path.posix.dirname(rel);
-      if (!rel || outsidePath(rel) || (parent !== '.' && state.pathKey(realName(dir, parent) || '') !== state.pathKey(parent))) {
-        return `${f.path} lies outside the copy or behind a link in it`;
-      }
-      const target = path.join(dir, rel);
-      fs.rmSync(target, { force: true });
-      if (f.frozen === DELETED) continue;
-      fs.mkdirSync(path.dirname(target), { recursive: true });
-      fs.copyFileSync(snapFile(root, f.frozen), target);
+      const unsafe = writeIn(dir, f.path, f.frozen === DELETED ? null : fs.readFileSync(snapFile(root, f.frozen)));
+      if (unsafe) return unsafe;
     }
     return null;
   } catch (e) {
@@ -1133,4 +1209,4 @@ const openBugs = root => bugsIn(stateOf(root));
 module.exports = { review, followup, close, fallback, skip, unreviewedForCommit, openChains, openBugs, bugsIn, acknowledgeGaps, DELETED,
   RISKY_FILE, sessionTask, stateOf, withMaps, bytesOf, textOf, snapshot, snapFile, asBaseline, forTask, ratedRiskyIn,
   run, newAttempt, bundleDir, findingsOf, taskInfo, docsFor, DOCS_NOTE, refused, fence, escapeRe, callersOf, listedFiles, withMuse, gptPair,
-  museIntro, MUSE_TOOLS, museTools, museCopy, withCopy, MUSE_PROMPT_MAX, located, unsendable, realName, linkedOutside }; // (the last two lines: for hook.js, modes.js, muse-files.js and the tests)
+  museIntro, MUSE_TOOLS, museTools, museCopy, writeIn, withCopy, MUSE_PROMPT_MAX, located, unsendable, realName, linkedOutside }; // (the last two lines: for hook.js, modes.js, muse-files.js and the tests)
