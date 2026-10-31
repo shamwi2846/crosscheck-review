@@ -350,7 +350,7 @@ The rules say *what* to do; the driver handles *how*, so no command flags or hoo
   - the answer or decision first, then the reason;
   - short replies in plain English, and a technical term explained the first time;
   - no internal ids, file paths, logs or long lists unless asked;
-  - progress updates of one line, with detail only when asked;
+  - nothing reported while working (no steps, review details or reasoning), except a decision the user must make or a few words when the app asks for a status; at the end, one short conclusion, with detail only when asked;
   - when Claude must ask, one question at a time, with a recommendation;
   - Claude pushes back first (section 1, principle 6).
 - **Roles and ground rules:**
