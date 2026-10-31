@@ -431,6 +431,41 @@ test('a normal review\'s pair with Muse can\'t certify a file Muse newly rates r
   assert.ok(state.update(state.files.global(), g => { delete g.muse; }).ok);
 });
 
+test('skipped_trading_file_rated_risky_in_its_normal_review_escalates_and_voids_the_skip (web task M1)', async () => {
+  const museSpec = path.join(HOME, 'muse-spec-m1.json');
+  const museLog = path.join(HOME, 'muse-calls-m1.jsonl');
+  Object.assign(process.env, { FAKE_MUSE_SPEC: museSpec, FAKE_MUSE_LOG: museLog });
+  const config = JSON.parse(fs.readFileSync(state.files.config(), 'utf8'));
+  fs.writeFileSync(state.files.config(), JSON.stringify({ ...config, museCommand: [process.execPath, path.join(__dirname, 'fake-muse.js')], museVerified: '9.9.9-test', museSkills: ['bundled:git'] }));
+  assert.ok(state.update(state.files.global(), g => { g.muse = true; }).ok);
+  const p = project('t-m1', { 'src/EA.mq5': 'maxLots = 5;\nlots = min(lots, maxLots);\n' });
+  write(p.root, 'src/EA.mq5', 'maxLots = 5;\n');
+  const k = key('src/EA.mq5');
+  const t = review.taskInfo(p.taskFile);
+  // (its baseline the committed version, so the reviewers see a diff)
+  seed(p.root, s => { s.changes = { [k]: { ...pending('src/EA.mq5'), baseline: undefined } }; s.skips = { [k]: { task: t.id, reqHash: t.reqHash, why: 'a label' } }; });
+  setPair({ A: [reviewAnswer()] }); // (GPT A: normal, nothing found)
+  fs.writeFileSync(museSpec, JSON.stringify({ exec: [{ text: reviewAnswer([], { cls: { level: 'risky', files: ['src/EA.mq5'], why: 'the lot cap is gone' } }) }] }));
+  fs.rmSync(museLog, { force: true });
+  const museRuns = () => (fs.existsSync(museLog) ? fs.readFileSync(museLog, 'utf8').split('\n').filter(Boolean).map(JSON.parse) : []).filter(c => c.args && c.args[0] === 'exec' && c.args.includes('meta'));
+  const r = await review.review(p.root, { session: 'A', taskFile: p.taskFile });
+  assert.strictEqual(r.status, 'DONE', r.text);
+  const [gptA] = execCalls();
+  assert.ok(gptA.args.includes('model_reasoning_effort=high') && gptA.prompt.includes('### src/EA.mq5 (diff from its last reviewed version)')
+    && !gptA.prompt.includes('(whole file, read in full)'), 'the normal path: high effort, the diff');
+  assert.strictEqual(museRuns()[0].args[museRuns()[0].args.indexOf('--reasoning-effort') + 1], 'high');
+  const s = review.withMaps(stateOf(p.root));
+  assert.ok(s.changes[k] && !s.acks[k] && s.escalations[k], 'pending and escalated, not acknowledged');
+  assert.ok([].concat(s.needsPlan[k]).some(rec => rec.task === t.id && rec.reqHash === t.reqHash), 'rated risky for this task');
+  assert.ok(!s.riskyReviews[k] && !s.riskyVersions[k], 'no receipt');
+  fs.rmSync(museLog, { force: true });
+  setPair({ A: [reviewAnswer()] });
+  const again = await review.review(p.root, { session: 'A', taskFile: p.taskFile });
+  assert.ok(again.status === 'REFUSED' && /test plan first/.test(again.text), again.text);
+  assert.deepStrictEqual([execCalls().length, museRuns().length], [0, 0], 'no reviewer runs');
+  assert.ok(state.update(state.files.global(), g => { delete g.muse; }).ok);
+});
+
 // ---- The merge's rules (test plan of the cross-check task) ----
 
 test('a one-sided SAME_AS can\'t erase a separate refund failure: both bugs stay, each with its own fix', () => {

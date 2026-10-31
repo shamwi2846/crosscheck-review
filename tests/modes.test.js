@@ -1,4 +1,4 @@
-// Tests for modes.js, step 5b (test plan P1): GPT's other jobs stay read-only (research alone has the web), a test
+// Tests for modes.js, step 5b (test plan P1): GPT's other jobs stay read-only (each with web search), a test
 // plan is checked and stored only for its task and only while the requirements hold, a skip is refused once GPT rated
 // a file risky, and the plan gate accepts only the reviewed text or a reasoned skip. They run the real CLI with the
 // recording Codex stub fake-codex.js, and the Muse stub fake-muse.js, which calls Muse's file tool as Muse would.
@@ -65,9 +65,9 @@ function writeTask(file, reqs = 'R1. Every order keeps its stop loss.') {
   return review.taskInfo(file);
 }
 
-// Each recorded Codex call, in full, is read-only and isolated: web search only for research, the docs server (with
-// exactly its read tools) only for MQL5 work. Only the generated paths and the resumed session are placeholders.
-function isolated(call, { web = false, docs = false, effort }) {
+// Each recorded Codex call, in full, is read-only and isolated, with Codex's default web search, and the docs server
+// (with exactly its read tools) only for MQL5 work. Only the generated paths and the resumed session are placeholders.
+function isolated(call, { docs = false, effort }) {
   const c = value => ['-c', value];
   const k = 'mcp_servers.mql5-docs';
   const docsArgs = !docs ? [] : [...c(`${k}.command="C:/docs/node.exe"`), ...c(`${k}.args=["--serve"]`), ...c(`${k}.env.MQL5_DOCS_DATA="C:/docs/data"`), ...c(`${k}.required=false`),
@@ -75,14 +75,14 @@ function isolated(call, { web = false, docs = false, effort }) {
   const resume = call.args[1] === 'resume';
   const expected = ['exec', ...(resume ? ['resume'] : []), '--ignore-user-config', '--json', '-m', 'gpt-test', ...c(`model_reasoning_effort=${effort}`), ...c('windows.sandbox=unelevated'), ...c('service_tier="default"'),
     ...['apps', 'plugins', 'multi_agent', 'image_generation', 'tool_suggest', 'computer_use', 'browser_use', 'in_app_browser'].flatMap(f => c(`features.${f}=false`)),
-    ...(web ? [] : c('web_search="disabled"')), ...docsArgs, '--output-schema', '<schema>', '--skip-git-repo-check', '-o', '<out>',
+    ...docsArgs, '--output-schema', '<schema>', '--skip-git-repo-check', '-o', '<out>',
     ...(resume ? [...c('sandbox_mode="read-only"'), '<session>', '-'] : ['-s', 'read-only', '-C', '<cwd>', '-'])];
   const actual = call.args.map((a, i, all) => (all[i - 1] === '--output-schema' ? '<schema>' : all[i - 1] === '-o' ? '<out>' : all[i - 1] === '-C' ? '<cwd>'
     : resume && i === all.length - 2 ? '<session>' : a));
   assert.deepStrictEqual(actual, expected);
 }
 
-test('every GPT job is read-only and isolated; research alone has the web, MQL5 work alone the docs', () => {
+test('every GPT job is read-only and isolated, with web search; MQL5 work alone has the docs', () => {
   const root = project('t1', { 'src/EA.mq5': 'e\n', 'logs/run.log': 'ok\n', 'notes/idea.md': 'use a cache\n', 'notes/brief.md': 'release notes\n', 'notes/plan.md': '# Plan\nStep.\n' });
   fs.writeFileSync(path.join(root, 'src/EA.mq5'), 'e2\n');
   seed(root, s => { s.changes = { [key('src/EA.mq5')]: { path: 'src/EA.mq5', session: 'A', at: 1, baseline: null } }; });
@@ -115,7 +115,7 @@ test('every GPT job is read-only and isolated; research alone has the web, MQL5 
   isolated(of('You review a plan before')[0], { effort: 'high' });
   isolated(of('second opinion')[0], { effort: 'high' });
   isolated(of('You read large material')[0], { effort: 'high' });
-  isolated(of('You look things up on the web')[0], { web: true, effort: 'high' });
+  isolated(of('You look things up on the web')[0], { effort: 'high' });
   isolated(of('You write a long document')[0], { effort: 'medium' });
   assert.match(of('You design the test cases')[0].prompt, /MQL5 docs tools/);
   assert.match(of('You read large material')[0].prompt, new RegExp(path.join(root, 'logs', 'run.log').replace(/\\/g, '\\\\')));

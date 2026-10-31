@@ -1,8 +1,9 @@
 // muse.js: running Muse Wonder Full through Muse Code, reviewer B while `crosscheck muse on` (DESIGN.md section 8).
 // Muse gets exactly these tools: its shell, in Muse Code's own sandbox without network, working in a throwaway copy of
-// the project with a temp folder inside it, so its commands can change nothing outside that copy; its own read_file and
-// search, without which Meta refuses the shell; crosscheck's read-only project-files tool; and on MQL5 work the MQL5
-// docs lookups. No edit, web, memory, scheduling or sub-agent tool. That is never taken on trust: Muse's own record of
+// the project with a temp folder inside it, so its commands can change nothing outside that copy; its own read_file
+// (which shows pictures too) and search, without which Meta refuses the shell; its web search and page fetch;
+// crosscheck's read-only project-files tool; and on MQL5 work the MQL5 docs lookups. No edit, memory, scheduling or
+// sub-agent tool. That is never taken on trust: Muse's own record of
 // each session (its export) must show exactly the tools that run was given, the sandbox and network it was asked for,
 // only the context a clean run has and only the skills doctor --live verified, before the first real run (an echo
 // run, which makes no model call) and after every run, or its answer doesn't count. Every call it makes, and every
@@ -17,14 +18,15 @@ const state = require('./state');
 const { spawnRun, TIMEOUT_MINUTES, COOLDOWN_MS } = require('./codex');
 
 const MODEL = 'muse-wonder-full-1.0';
-// (the sandbox stays on and the network restricted, the most Muse allows: never --yolo, --disable-sandbox or
-// --disable-approval. Contributor mode on: the user chose to let Meta train on their code, 2026-10-30)
-const SANDBOXED = ['--approval-mode', 'never', '--sandbox-network', 'restricted', '--disable-write', '--disable-web-tools', '--disable-reminders',
+// (the sandbox stays on, never --yolo, --disable-sandbox or --disable-approval; the network proxy-only with no targets,
+// the most restricted mode that keeps the web tools, fact 27: the user chose web search on 2026-10-31. Contributor mode
+// on: the user chose to let Meta train on their code, 2026-10-30)
+const SANDBOXED = ['--approval-mode', 'never', '--sandbox-network', 'proxy-only', '--disable-write', '--disable-reminders',
   '--disable-request-user-input', '--no-foreign-personal-context', '--contributor-mode', 'on'];
 // Muse's tools, under the names its session record gives them: its own shell, read_file and search (every run; Meta
-// refuses the shell without the other two, fact 26), then crosscheck's servers (mcp__<server>__<tool>): the read-only
-// project-files tool (muse-files.js), and on MQL5 work the MQL5 docs lookups.
-const SHELL_TOOLS = ['powershell', 'powershell_input', 'read_file', 'search'];
+// refuses the shell without the other two, fact 26) and its web tools (every run), then crosscheck's servers
+// (mcp__<server>__<tool>): the read-only project-files tool (muse-files.js), and on MQL5 work the MQL5 docs lookups.
+const SHELL_TOOLS = ['powershell', 'powershell_input', 'read_file', 'search', 'web_search', 'web_fetch'];
 const FILE_TOOLS = ['list_files', 'read_file', 'search'].map(t => `mcp__project_files__${t}`);
 const DOCS_TOOLS = ['mql5_find', 'mql5_read'].map(t => `mcp__mql5_docs__${t}`);
 const FILES_SERVER = path.join(__dirname, 'muse-files.js');
@@ -95,8 +97,16 @@ function serversOf(tools) {
   return { args, env };
 }
 
+// Whether a permission record's shell network is exactly the one crosscheck asks for: the proxy-only mode, with its
+// targets and sockets both listed, and empty (a list that is missing or of another shape proves nothing).
+const isEmptyList = x => Array.isArray(x) && x.length === 0;
+const noNetwork = snapshot => {
+  const net = snapshot.local_command_network || {};
+  return net.mode === 'proxy_only' && isEmptyList(net.targets) && isEmptyList(net.unix_sockets);
+};
+
 // What Muse's own record of a session shows that a review must not have: a tool the run wasn't given (`given`, as for
-// serversOf), a shell outside Muse's sandbox (its files not managed, or its network not restricted, or the sandbox off),
+// serversOf), a shell outside Muse's sandbox (its files not managed, or its network not noNetwork's, or the sandbox off),
 // a context message a clean run doesn't have, a skill catalog it can't read, a skill not in `allowed` (null: doctor
 // judges the skills itself), or a tool call the record doesn't show. Returns { problems, skills: [{ id, scope }],
 // incomplete: the given tools the run didn't have, log: every call ({ tool, args }) and result ({ result }) in the
@@ -110,7 +120,7 @@ function inspect(command, session, allowed, given = null) {
     try {
       record = JSON.parse(fs.readFileSync(file, 'utf8'));
     } catch (e) {
-      return { problems: [`no readable session record (${e.message})`], skills: [], log: [], unreadable: true };
+      return { problems: [`no readable session record (${e.message})`], skills: [], incomplete: [], log: [], unreadable: true };
     }
     const toolsets = [];
     const context = [];
@@ -148,7 +158,7 @@ function inspect(command, session, allowed, given = null) {
     const incomplete = granted.filter(t => !tools.includes(t)).map(t => `no ${t}`);
     if (!sandboxes.length) problems.push('no sandbox record');
     if (sandboxes.some(s => (s.filesystem || {}).mode !== 'managed')) problems.push('a shell outside its sandbox');
-    if (sandboxes.some(s => (s.local_command_network || {}).mode !== 'restricted')) problems.push('a shell with network');
+    if (!sandboxes.every(noNetwork)) problems.push('a shell network other than proxy-only with nothing let through');
     const modes = context.filter(m => m && m.id === 'security_mode');
     if (!modes.length || modes.some(m => !/Shell sandbox: on\./.test(String(m.text)))) problems.push('the shell sandbox off');
     // (every call that started must be in the log, or a command could run unseen)
@@ -379,7 +389,7 @@ const refusedWrite = (log, quoted) => log.some(e => {
 // doctor --live: a run made exactly as a review makes it, shell and sandbox included (in a scratch folder, without the
 // file tool: there is no project), asked to write a file outside its folder with its shell. It passes only if it
 // completed, it really tried and its sandbox refused (a Muse that never tried proves nothing), the file doesn't exist,
-// and its session passes the check (its shell only, the sandbox and network asked for, a clean run's context), with
+// and its session passes the check (exactly its shell and web tools, the sandbox and network asked for, a clean run's context), with
 // skills only of Muse's own (scope bundled, or plugin while nobody installed a plugin), on one version before and
 // after. Then that version and those skills are recorded as verified; anything else takes the verification away.
 // { ok, info }.
@@ -401,12 +411,12 @@ async function probe() {
     const plugins = installedPlugins(p.command);
     const foreign = seen.skills.filter(s => s.scope !== 'bundled' && !(s.scope === 'plugin' && plugins && !plugins.length)).map(s => s.id);
     const problems = [...(r.ok ? [] : [`the run failed: ${r.reason}${r.limit ? cooldown() : ''}`]), ...(fs.existsSync(target) ? ['Muse WROTE the probe file'] : []),
-      ...(refusedWrite(seen.log, quoted) ? [] : ['its shell never had the write denied, so its sandbox is unproven']), ...seen.problems,
+      ...(refusedWrite(seen.log, quoted) ? [] : ['its shell never had the write denied, so its sandbox is unproven']), ...seen.problems, ...seen.incomplete,
       ...(plugins ? [] : ['the installed plugins can\'t be listed']), ...(foreign.length ? [`skills that aren't Muse's own: ${foreign.join(', ')}`] : [])];
     if (!before || versionOf(p.command) !== before) problems.push('Muse changed during the check');
     if (problems.length) return { ok: false, info: `${problems.join('; ')}; ${unverify()}` };
     const saved = state.update(state.files.config(), c => { c.museVerified = before; c.museSkills = seen.skills.map(s => s.id); });
-    return saved.ok ? { ok: true, info: `Muse ${before} verified: its shell sandboxed (a write outside its folder refused), no network, a clean context, ${seen.skills.length} skills of its own` }
+    return saved.ok ? { ok: true, info: `Muse ${before} verified: its shell sandboxed (a write outside its folder refused) with no network let through, its web tools, a clean context, ${seen.skills.length} skills of its own` }
       : { ok: false, info: `couldn't record Muse ${before}: ${saved.why}` };
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });

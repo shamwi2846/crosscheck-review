@@ -251,7 +251,11 @@ test('a Muse whose shell writes the probe file, or never tries, fails doctor --l
   for (const c of [{ answer: { attempt: 'written', text: 'The write was refused.' }, problem: /Muse WROTE the probe file/ },
     { answer: { text: 'I won\'t try that.' }, problem: /its shell never had the write denied, so its sandbox is unproven/ },
     { answer: { attempt: 'parse', text: 'The write failed.' }, problem: /its shell never had the write denied/ }, // (a failure, but not a denial)
-    { answer: { attempt: 'unstarted', text: 'The write failed.' }, problem: /its shell never had the write denied/ }]) { // (no exit code: it never ran)
+    { answer: { attempt: 'unstarted', text: 'The write failed.' }, problem: /its shell never had the write denied/ }, // (no exit code: it never ran)
+    // (plan review F2: a sandboxed Muse that didn't get its web tools isn't verified either)
+    { answer: { attempt: 'denied', text: 'Access was denied.', record: { tools: ['powershell', 'powershell_input', 'read_file', 'search'] } }, problem: /no web_search; no web_fetch/ },
+    // (review F1: a probe that wrote outside its folder and left no readable record still takes the verification away)
+    { answer: { attempt: 'written', text: 'Done.', noRecord: true }, problem: /no readable session record/ }]) {
     await freshInstall({ ...fake, museVerified: '9.9.9-test', museSkills: ['bundled:git'] });
     assert.ok(state.update(state.files.global(), g => { g.muse = true; }).ok);
     setSpec([probe('probe.txt'), probe('probe-resumed.txt')]);
