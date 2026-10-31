@@ -181,7 +181,12 @@ test('the session check admits exactly the tools a run was given, never by a ser
   assert.ok(!lacking.ok && /lacked its tools/.test(lacking.reason) && !unverified(), lacking.reason);
 });
 
-test('docs settings reach Muse only as crosscheck-named variables of its own process, and its docs server gets them as configured', async () => {
+test('docs settings reach Muse only as crosscheck-named variables of its own process, and its docs server gets them as configured', async t => {
+  // (a NODE_OPTIONS the test runner inherited, as a debugging terminal sets one, would reach Muse like any variable:
+  // it is set aside, so the test sees only what crosscheck sets)
+  const inherited = process.env.NODE_OPTIONS;
+  delete process.env.NODE_OPTIONS;
+  t.after(() => { if (inherited !== undefined) process.env.NODE_OPTIONS = inherited; });
   const docs = { command: process.execPath, args: [path.join(HOME, 'docs "quoted" dir', 'server.js')],
     env: { NODE_OPTIONS: `--require=${path.join(HOME, 'missing-module.js')}`, MQL5_DOCS_DATA: 'C:\\docs data\\x' } };
   const before = JSON.stringify(process.env);
