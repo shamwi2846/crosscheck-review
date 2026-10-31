@@ -294,7 +294,7 @@ Each real bug found later gets a regression test that would catch it again (an e
 - **The requirement-list ceremony** (task --start, --update or --same after every message, words-file rules, strict requirements text block): replaced by `task.md`, updated only when the request changes, plus JSON requirement rows in the review.
 - **The `done` check:** the final review already checks every requirement against the code, so done added a slow GPT run that mostly flagged items outside the task.
 - **`score`:** a review with the rubric in `task.md` does the same.
-- **`run` and its evidence records, and `triage`:** never used. Claude runs tests itself and passes the output; CodeRabbit comments are short.
+- **`run` and its evidence records, and `triage`:** never used. Claude runs tests itself and passes the output.
 - **`mql5-compile`:** the mql5-coding skill compiles (`Compile-Mql5.ps1`).
 - **Paired runs for ideas, test plans and investigations:** the rules never pair them.
 - **The word-vocabulary risk scanner:** too noisy (section 6).
@@ -327,7 +327,7 @@ Each real bug found later gets a regression test that would catch it again (an e
 11. A running Claude desktop app writes its in-memory settings back over its config file. Edit that file, then restart the app.
 12. Windows: paths with spaces and non-ASCII letters, UTF-16 files, process trees (Codex starts children, and killing the parent alone leaves them running), and the slow `npm root -g` (find Codex once and store the path).
 13. A risky-review receipt counts only for the files the reviewers read whole. A chain's start time must be exact: whole-second log stamps let a same-second review pass as later.
-14. GitHub: never `--admin`, never force-push. A PR is done, and merged, when GitHub's CI checks pass on its final head commit and it merges cleanly. (CodeRabbit's review, a third reviewer after GPT and Muse, was dropped on 2026-10-31, the user's choice: its findings were minor and its free use rate-limited.)
+14. GitHub: never `--admin`, never force-push. A PR is done, and merged, when GitHub's CI checks pass on its final head commit and it merges cleanly.
 15. Claude Code honors a hook's `"onFailure": "block"` only from version 2.1.295; older versions run a crashed hook as "allow".
 16. `codex exec --output-schema <file>` (and `codex exec resume --output-schema`) makes GPT's final answer follow a JSON Schema. `doctor --live` checks that it is enforced on the installed version.
 17. Claude Code passes a Stop hook `stop_hook_active` when Claude is continuing because of that same hook's block. That is enough to block only once in a row.
