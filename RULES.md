@@ -56,7 +56,7 @@ When an external tool's behavior matters and is uncertain, check its docs and ru
 ## Pull requests
 - Push only complete, reviewed work. Never bypass branch protection (no admin merges) and never force-push.
 - A pull request is done, and merged, when GitHub's CI checks pass on its final head commit and it merges cleanly; a new push waits for its CI again.
-- Before merging, rename the chat to the project and the pull request's number (for example "crosscheck PR #37"), since the merge may archive it. When more work remains in the chat after this merge, first switch off the chat's archive-on-merge, so only its last merge archives it. Before that last merge, start a new chat in the same project with Remote Control on, left empty and ready for the user.
+- Before merging, rename the chat to the project and the pull request's number (for example "crosscheck PR #37"), since the merge may archive it. When more work remains in the chat after this merge, first switch off the chat's archive-on-merge, so only its last merge archives it. Before that last merge, start a new chat in the same project with Remote Control on, left empty and ready for the user. Ask a question for the user before that merge when you can; one still unanswered goes into the new chat instead, standing on its own (what to do, why and where), and the new chat holds nothing else. Only decisions move; updates stay in the old chat's conclusion.
 
 ## Several coding jobs
 - One coding job per project at a time. The next starts once the previous one's pull request is merged, the job ended without one, or the user cancelled it and its pull request is closed with auto-fix off. Research and design jobs may run alongside.
