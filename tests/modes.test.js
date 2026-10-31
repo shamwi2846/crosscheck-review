@@ -694,7 +694,7 @@ function cliRun(root, args) {
 }
 const bug = { severity: 'HIGH', title: 'the stop loss goes', location: '-', trigger: 't', harm: 'lost money', failure: 'f', fix: 'x', test: 'keep it', label: 'BUG', reqs: [] };
 
-test('planning_modes_confine_muse_commands_to_disposable_project_copies (shell task, modes T1): a test plan\'s check and a risky plan\'s review run Muse\'s commands in a copy of the project at its last commit, private temp included, made afresh for the cross-check and gone afterwards, the real project untouched', async () => {
+test('planning_modes_confine_muse_commands_to_disposable_project_copies (shell task, modes T1): a test plan\'s check and a risky plan\'s review run Muse\'s commands in a copy of the project as it is (its last commit and the work in progress), private temp included, made afresh for the cross-check and gone afterwards, the real project untouched', async () => {
   const root = project('t9', { 'src/pay.js': 'PAY-HEAD\n', 'tests/pay.test.js': 'PAY-TEST\n' });
   fs.writeFileSync(path.join(root, 'src/pay.js'), 'PAY-UNCOMMITTED\n'); // (work in progress in the real project)
   const head = inGit(root, 'rev-parse', 'HEAD');
@@ -704,7 +704,7 @@ test('planning_modes_confine_muse_commands_to_disposable_project_copies (shell t
   const pristine = (run, what) => {
     const dir = workspaceOf(run);
     assert.deepStrictEqual([inGit(dir, 'rev-parse', 'HEAD'), inGit(dir, 'status', '--porcelain'), fs.readFileSync(path.join(dir, 'src/pay.js'), 'utf8'),
-      fs.readdirSync(path.join(dir, '.crosscheck-tmp')), run.env.TEMP], [head, '', 'PAY-HEAD\n', [], path.join(dir, '.crosscheck-tmp')], what);
+      fs.readdirSync(path.join(dir, '.crosscheck-tmp')), run.env.TEMP], [head, ' M src/pay.js', 'PAY-UNCOMMITTED\n', [], path.join(dir, '.crosscheck-tmp')], what);
   };
   const scribble = dir => {
     fs.writeFileSync(path.join(dir, 'src/pay.js'), 'MUSE-EDIT\n');

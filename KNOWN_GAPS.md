@@ -883,3 +883,12 @@ Findings left unfixed on purpose. Entries are never deleted, only marked fixed.
 - Fix: Pin the identity, not only the sharing. Add `assert.strictEqual(state.projectDir(state.mainRoot(apart)), state.projectDir(path.join(repos, 'apart-git')));` or assert it differs from the bare repository's shared directory `one`.
 - Log: 20261031091122-1171c6
 - Why skipped: pair: confirmed by A
+
+## G99 · open · 2026-10-31 · MEDIUM
+- Task: Task: Muse's copy of the project holds the project's uncommitted changes
+- Where: tests/muse.test.js:436-504
+- Problem: F3: Planned safety cases are only partly tested
+- Trigger: Run the tests named by T2–T4.
+- Fix: Add the omitted fixtures and assertions to the named tests, including successful continuation after rejecting the destination junction.
+- Log: 20261031124922-f8c445
+- Why skipped: pair: confirmed by B
