@@ -457,10 +457,11 @@ function freeze(root, { attempt, session, names = [], files, admittedAt, rev, ta
   return { manifest, prompt, musePrompt };
 }
 
-// What Muse is told about its tools (DESIGN.md section 7): none of its own, only crosscheck's read-only file tool, and
-// the MQL5 docs lookups when the run has them (`docs`).
-const museIntro = docs => 'You have no tools of your own in this review, only these: list_files, read_file and search read this project\'s files (read-only; a file under review comes back as its frozen copy)'
-  + `${docs ? ', and mql5_find and mql5_read look up the MQL5 docs, for API facts' : ''}. The files shown whole and the copies inline at the end are already here; use the tools for any other file a finding depends on. Say in coverage what you couldn't check, and mark a finding UNCLEAR in a cross-check when what you have can't settle it.`;
+// What Muse is told about its tools (DESIGN.md section 8, Muse runs): its shell in a throwaway copy of the project, its
+// own read_file and search, crosscheck's read-only file tool, and the MQL5 docs lookups when the run has them
+// (`docs`). MUSE_TOOLS is also a test-plan check's, in modes.js.
+const MUSE_TOOLS = 'Your tools: powershell (with powershell_input) runs PowerShell commands in a throwaway copy of this project, your working folder, with its git history (git status and git diff show the change under review, if any), inside Muse Code\'s sandbox and without network; nothing you change there is kept. read_file and search are your own; list_files, read_file and search of project-files read this project\'s files (read-only; a file under review comes back as its frozen copy)';
+const museIntro = docs => `${MUSE_TOOLS}${docs ? ', and mql5_find and mql5_read look up the MQL5 docs, for API facts' : ''}. The files shown whole and the copies inline at the end are already here; use the tools for any other file a finding depends on, and commands when reading can't settle one (run a test, try the code). Say in coverage what you couldn't check, and mark a finding UNCLEAR in a cross-check when what you have can't settle it.`;
 const MUSE_PROMPT_MAX = 2000000; // characters, about half of Muse's context: material past it is GPT's alone
 
 // Muse's version of a prompt: its tools said, the MQL5 docs note kept only when the run has the docs (`docs`), and the
@@ -490,6 +491,69 @@ function museTools(root, attempt, { docs = null, files = {}, plan = null } = {})
   const manifest = path.join(dir, 'muse-files.json');
   fs.writeFileSync(manifest, JSON.stringify({ root, reviewed, plan, log: path.join(dir, 'muse-files.log') }, null, 2));
   return { files: manifest, docs };
+}
+
+// A throwaway copy of the project at `dir`, where Muse's commands run (DESIGN.md section 8), made afresh for every Muse
+// run so each one starts from the tree under review: a clone of the project's history cut off from it (no remote, and
+// no hardlinked or borrowed objects, since the sandbox lets Muse write the copy's git storage), at the project's HEAD
+// (a worktree's, or a detached one), with the change under review written in (`files`, a review manifest's: each
+// frozen copy, each deletion). Git runs with no system or user configuration and an empty template, so no hook,
+// filter or fsmonitor of the user's runs. A reviewed file is written only where no folder on its way is a link, over
+// its old entry, never through it. Returns why not, or null.
+function museCopy(root, files, dir) {
+  try {
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
+    const blank = path.join(path.dirname(dir), 'git-blank');
+    fs.mkdirSync(path.join(blank, 'template'), { recursive: true });
+    fs.writeFileSync(path.join(blank, 'config'), '');
+    // (no GIT_* variable of crosscheck's own environment either: GIT_CONFIG_COUNT and its keys would outrank the blank
+    // files, and GIT_DIR and its kind would point git elsewhere)
+    const env = { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^GIT_/i.test(k))),
+      GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: path.join(blank, 'config'), GIT_TEMPLATE_DIR: path.join(blank, 'template') };
+    const failed = (cwd, args) => {
+      const r = spawnSync('git', args, { cwd, env, encoding: 'utf8', windowsHide: true, timeout: 300000 });
+      return r.status === 0 ? null : `git ${args[0]} failed: ${String(r.stderr || r.error || '').trim().slice(0, 300)}`;
+    };
+    // (a clone checks out the project's own HEAD: a worktree's, or a detached one)
+    const why = failed(path.dirname(dir), ['clone', '-q', '--no-hardlinks', '--dissociate', root, dir]) || failed(dir, ['remote', 'remove', 'origin']);
+    if (why) return why;
+    fs.mkdirSync(path.join(dir, '.git', 'info'), { recursive: true });
+    fs.appendFileSync(path.join(dir, '.git', 'info', 'exclude'), `/${muse.TEMP_DIR}/\n`);
+    for (const f of Object.values(files)) {
+      if (!f.frozen) continue;
+      const rel = path.relative(dir, path.join(dir, f.path)).replace(/\\/g, '/');
+      const parent = path.posix.dirname(rel);
+      if (!rel || outsidePath(rel) || (parent !== '.' && state.pathKey(realName(dir, parent) || '') !== state.pathKey(parent))) {
+        return `${f.path} lies outside the copy or behind a link in it`;
+      }
+      const target = path.join(dir, rel);
+      fs.rmSync(target, { force: true });
+      if (f.frozen === DELETED) continue;
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.copyFileSync(snapFile(root, f.frozen), target);
+    }
+    return null;
+  } catch (e) {
+    return e.message;
+  }
+}
+
+// Runs `job(copy)` with one job's copy of the project for Muse's commands: { dir, remake }, where remake() makes it
+// afresh (museCopy, with the change under review in `files`), as muse.ask does before every run. The folder is removed
+// with whatever Muse's commands left there once the job ends; a removal that still fails after retries is reported,
+// never left silently.
+async function withCopy(root, files, job) {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'crosscheck-copy-'));
+  const dir = path.join(base, 'project');
+  try {
+    return await job({ dir, remake: () => museCopy(root, files, dir) });
+  } finally {
+    try {
+      fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    } catch (e) {
+      process.stderr.write(`crosscheck: Muse's copy of the project in ${base} couldn't be removed (${e.message}); delete it by hand\n`);
+    }
+  }
 }
 
 // A secrets file by its name: .env and its variants other than examples, private keys, key stores and password
@@ -563,9 +627,9 @@ function historyOf(root, chain) {
 // cross-check, which needs that very session) a failed resume is the end. `kind` and `asked` default to the
 // manifest's; `label` names the turns saved in the bundle (turn-<label>-<n>.md), so a pair's turns don't overlap.
 // `mode` is Codex's ('research' alone has the web); `docs` defaults to the MQL5 docs server the attempt froze, if any.
-// `reviewer: 'muse'` runs Muse instead (muse.js: only the `tools` crosscheck gives it, see museTools, its own folders
-// in the bundle); any failure of its is MUSE_FAILED, so the caller goes on without Muse and GPT is never taken for
-// unavailable.
+// `reviewer: 'muse'` runs Muse instead (muse.js: only the `tools` crosscheck gives it, see museTools and withCopy, its
+// calls logged in the bundle); any failure of its is MUSE_FAILED, so the caller goes on without Muse and GPT is never
+// taken for unavailable.
 async function run(root, manifest, prompt, { resume = null, history = '', strict = false, kind = manifest.kind, asked = askedOf(manifest), label = '', effort = 'high',
   mode = 'review', docs = manifest.docs || null, reviewer = 'gpt', tools = null } = {}) {
   const schema = answer.SCHEMAS[kind];
@@ -866,7 +930,10 @@ async function review(root, { session = null, files = [], taskFile = null, evide
     if (frozen.why) return refused(frozen.why);
     if (museOn && !museOut && !frozen.musePrompt) museOut = 'the material is too large for its prompt';
     let result;
-    if (frozen.musePrompt) ({ result, museOut } = await withMuse(root, { ...frozen, tools: museTools(root, attempt, { docs, files: frozen.manifest.files }) }));
+    if (frozen.musePrompt) {
+      const files = frozen.manifest.files;
+      ({ result, museOut } = await withCopy(root, files, copy => withMuse(root, { ...frozen, tools: { ...museTools(root, attempt, { docs, files }), copy } })));
+    }
     else {
       result = frozen.manifest.paired ? await gptPair(root, frozen.manifest, frozen.prompt) : await run(root, frozen.manifest, frozen.prompt);
     }
@@ -1060,4 +1127,4 @@ const openBugs = root => bugsIn(stateOf(root));
 module.exports = { review, followup, close, fallback, skip, unreviewedForCommit, openChains, openBugs, bugsIn, acknowledgeGaps, DELETED,
   RISKY_FILE, sessionTask, stateOf, withMaps, bytesOf, textOf, snapshot, snapFile, asBaseline, forTask, ratedRiskyIn,
   run, newAttempt, bundleDir, findingsOf, taskInfo, docsFor, DOCS_NOTE, refused, fence, escapeRe, callersOf, listedFiles, withMuse, gptPair,
-  museIntro, museTools, MUSE_PROMPT_MAX, located, unsendable, realName }; // (the last two lines: for modes.js, muse-files.js and the tests)
+  museIntro, MUSE_TOOLS, museTools, museCopy, withCopy, MUSE_PROMPT_MAX, located, unsendable, realName }; // (the last two lines: for modes.js, muse-files.js and the tests)

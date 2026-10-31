@@ -90,7 +90,7 @@ async function testplan(root, { taskFile, files, context = [] }) {
     `not worth testing: ${plan.not_worth_testing}`, ...checked.notes, `stored as this task's test plan of: ${rels.join(', ')}`].join('\n') };
 }
 
-const TESTPLAN_CHECK_RULES = `You check another reviewer's test plan for a change, before its code is written. You have no tools of your own, only these: list_files, read_file and search read this project's files (read-only), and the MQL5 docs lookups when the note below offers them. The files the plan most needs are inline at the end; use the tools for any other.
+const TESTPLAN_CHECK_RULES = `You check another reviewer's test plan for a change, before its code is written. ${review.MUSE_TOOLS}, and the MQL5 docs lookups when the note below offers them. The files the plan most needs are inline at the end; use the tools for any other, and commands when reading can't settle a case.
 The plan's cases are realistic ways the change could lose money, lose data or open a security hole (rare ones included) that no existing test already catches; at most 5 in all, and only as many as earn their cost.
 keep: the ids of the plan's cases that stand. dropped: each case you drop, with why; drop one only to make room for a case of yours that matters more, when the plan would otherwise pass 5 cases. Every case of the plan is kept or dropped, once.
 added: the realistic loss paths the plan and the existing tests miss, ids M1, M2, ... in order, each with the fields of a case: severity (CRITICAL, HIGH or MEDIUM); covers: target paths exactly as listed; reqs: requirement ids; input; expected; test_file (a path inside the project) and test_name.
@@ -118,9 +118,9 @@ function projectFiles(root, paths) {
   return [...shown.values()];
 }
 
-// Files inline for Muse, which has no tools: each under its path, fenced. null, before anything is read, when their
-// size alone shows their text can't fit Muse's prompt (a character takes at most 3 bytes), so a huge file named in a
-// plan never has to be read whole just to learn that.
+// Files inline for Muse, so it needs no tool call for them: each under its path, fenced. null, before anything is
+// read, when their size alone shows their text can't fit Muse's prompt (a character takes at most 3 bytes), so a huge
+// file named in a plan never has to be read whole just to learn that.
 function inlineFiles(root, files) {
   const bytes = files.reduce((n, p) => n + fs.statSync(path.resolve(root, p)).size, 0);
   if (bytes > 3 * review.MUSE_PROMPT_MAX) return null;
@@ -130,8 +130,9 @@ function inlineFiles(root, files) {
 // Muse's check of GPT's test plan: the same task, targets and context, GPT's plan, and inline the files it may read
 // (the targets and context files, the test files GPT's cases name, any project file GPT's reasons cite, and every test
 // file that mentions a target's name, found apart from GPT). Its final plan replaces GPT's only after passing every
-// check of a plan (with its one repair); else GPT's plan stands and the notes say why. Muse has crosscheck's file tool,
-// and GPT's test plan's docs server (`docs`) when it had one. Returns { plan, notes }.
+// check of a plan (with its one repair); else GPT's plan stands and the notes say why. Muse has its shell in a copy of
+// the project at its last commit, crosscheck's file tool, and GPT's test plan's docs server (`docs`) when it had one.
+// Returns { plan, notes }.
 async function museCheck(root, { task, rels, context, plan, docs = null }) {
   const attempt = review.newAttempt();
   const tools = review.museTools(root, attempt, { docs });
@@ -146,7 +147,8 @@ async function museCheck(root, { task, rels, context, plan, docs = null }) {
   // (as for a review: material past the limit is GPT's alone, so GPT's plan never waits on a Muse run bound to fail)
   if (prompt === null || prompt.length > review.MUSE_PROMPT_MAX) return { plan, notes: ['Muse didn\'t check the plan: the material is too large for its prompt'] };
   const manifest = bundleFor(root, 'testplan_check', prompt, { attempt });
-  const r = await review.run(root, manifest, prompt, { kind: 'testplan_check', asked: { targets: rels, linkIds: task.ids, cases: plan.cases }, effort: 'xhigh', reviewer: 'muse', tools });
+  const r = await review.withCopy(root, {}, copy => review.run(root, manifest, prompt, { kind: 'testplan_check', asked: { targets: rels, linkIds: task.ids, cases: plan.cases },
+    effort: 'xhigh', reviewer: 'muse', tools: { ...tools, copy } }));
   if (r.status !== 'OK') return { plan, notes: [`Muse didn't check the plan: ${r.why}`] };
   const a = r.answer;
   return {
@@ -223,7 +225,15 @@ async function plan(root, { file, taskFile, risky, skipWhy }) {
   if (museOn && !museOut && (musePrompt === null || musePrompt.length > review.MUSE_PROMPT_MAX)) museOut = 'the material is too large for its prompt';
   else if (musePrompt) fs.writeFileSync(path.join(manifest.dir, 'prompt-muse.md'), musePrompt);
   let r;
-  if (museOn && !museOut) ({ result: r, museOut } = await review.withMuse(root, { manifest: { ...manifest, paired: true }, prompt, musePrompt, tools }));
+  if (museOn && !museOut) {
+    // (the plan file itself, when it lies in the project, is written into Muse's copy as the text reviewed here, under
+    // the name it was given and its real one: the copy's committed version of either could be another revision)
+    const asked = path.relative(root, path.resolve(file)).replace(/\\/g, '/');
+    const real = review.realName(root, asked);
+    const frozen = real ? review.snapshot(root, bytes) : null;
+    const planFiles = real ? Object.fromEntries([...new Set([asked, real])].map(rel => [state.pathKey(rel), { path: rel, frozen }])) : {};
+    ({ result: r, museOut } = await review.withCopy(root, planFiles, copy => review.withMuse(root, { manifest: { ...manifest, paired: true }, prompt, musePrompt, tools: { ...tools, copy } })));
+  }
   else r = risky ? await review.gptPair(root, manifest, prompt) : await review.run(root, manifest, prompt, { effort: 'high' });
   const note = museOut ? `\nMuse didn't take part: ${museOut}` : '';
   if (r.status !== 'OK') {

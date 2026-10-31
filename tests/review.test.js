@@ -621,3 +621,79 @@ test('a test a stored plan names through a link to somewhere outside the project
   assert.ok(!sent.includes('PRIVATE-SENTINEL') && sent.includes('frozen test src/linked/ext.test.js: (outside the project: not read)'), 'the linked one is named, never read');
   assert.ok(state.update(state.files.global(), g => { delete g.muse; }).ok);
 });
+
+test('muse_shell_copy_is_exact_pristine_and_secret_free_on_every_turn (shell task M1): Muse\'s commands run in a copy holding the last commit plus exactly the frozen change, never an ignored, untracked or linked-in file, made afresh for its cross-check', async () => {
+  fs.mkdirSync(path.join(HOME, 't-copy', 'vendor'), { recursive: true });
+  const { root, taskFile, git } = project('t-copy', { 'src/pay.js': 'PAY-HEAD\n', 'src/old.js': 'OLD-HEAD\n', 'src/other.js': 'OTHER-HEAD\n', 'vendor/lib.js': 'VENDOR-HEAD\n', '.gitignore': '.env\n' });
+  const head = String(spawnSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).stdout).trim();
+  // (the change: a UTF-16 file edited, a new file, a deletion; beside it a dirty file, secrets and a folder made a link)
+  const frozenPay = Buffer.from('﻿PAY-FROZEN refund once\n', 'utf16le');
+  fs.writeFileSync(path.join(root, 'src/pay.js'), frozenPay);
+  fs.writeFileSync(path.join(root, 'src/new.js'), 'NEW-FROZEN\n');
+  fs.rmSync(path.join(root, 'src/old.js'));
+  fs.writeFileSync(path.join(root, 'src/other.js'), 'OTHER-DIRTY\n');
+  fs.writeFileSync(path.join(root, '.env'), 'ENV-SENTINEL\n');
+  fs.writeFileSync(path.join(root, 'creds.json'), 'CREDS-SENTINEL\n');
+  const outside = fs.mkdtempSync(path.join(HOME, 'vendor-outside-'));
+  fs.writeFileSync(path.join(outside, 'lib.js'), 'JUNCTION-SENTINEL\n');
+  fs.rmSync(path.join(root, 'vendor'), { recursive: true });
+  fs.symlinkSync(outside, path.join(root, 'vendor'), 'junction');
+  seed(root, s => {
+    s.changes = { [key('src/pay.js')]: change('src/pay.js', 'A', 1), [key('src/new.js')]: change('src/new.js', 'A', 2, null), [key('src/old.js')]: change('src/old.js', 'A', 3) };
+    s.plans = Object.fromEntries(['src/pay.js', 'src/new.js', 'src/old.js'].map(rel => [key(rel), planFor(taskFile)]));
+  });
+  const museSpec = path.join(HOME, 'muse-spec-copy.json');
+  const museLog = path.join(HOME, 'muse-calls-copy.jsonl');
+  Object.assign(process.env, { FAKE_MUSE_SPEC: museSpec, FAKE_MUSE_LOG: museLog });
+  const config = JSON.parse(fs.readFileSync(state.files.config(), 'utf8'));
+  fs.writeFileSync(state.files.config(), JSON.stringify({ ...config, museCommand: [process.execPath, path.join(__dirname, 'fake-muse.js')], museVerified: '9.9.9-test', museSkills: ['bundled:git'] }));
+  assert.ok(state.update(state.files.global(), g => { g.muse = true; }).ok);
+  const bug = { severity: 'HIGH', title: 'a refund can be paid twice', location: 'src/pay.js:1', trigger: 't', harm: 'lost money', failure: 'f', fix: 'x', test: 'pay once', label: 'BUG', reqs: [] };
+  const holds = [1, 2, 3].map(n => fs.mkdtempSync(path.join(HOME, `t-copy-hold${n}-`)));
+  const marks = JSON.stringify({ marks: [{ id: 'A1', mark: 'CONFIRM', label: 'BUG', evidence: '', same_as: null }] });
+  setSpec({ exec: [{ text: answerOf({ verdict: 'ISSUES_FOUND', findings: [bug] }) }] }); // (GPT A finds a bug, so Muse B cross-checks it)
+  // (Muse's first review fails once and is retried, then it cross-checks)
+  fs.writeFileSync(museSpec, JSON.stringify({ exec: [{ hold: holds[0], fail: 'connection reset' }, { hold: holds[1], text: answerOf() }, { hold: holds[2], text: marks }] }));
+  fs.rmSync(museLog, { force: true });
+  const until = async file => { for (let i = 0; i < 1500 && !fs.existsSync(file); i++) await sleep(20); assert.ok(fs.existsSync(file), `${file} never appeared`); };
+  const running = review.review(root, { session: 'A', taskFile, risky: true });
+  let copy;
+  try {
+    await until(path.join(holds[0], 'started'));
+    const real = fs.readFileSync(museLog, 'utf8').split('\n').filter(Boolean).map(JSON.parse).find(c => c.args[0] === 'exec' && c.args.includes('meta')).args;
+    copy = real[real.indexOf('--workspace') + 1];
+    const read = rel => (fs.existsSync(path.join(copy, rel)) ? fs.readFileSync(path.join(copy, rel)) : null);
+    const inCopy = (...args) => String(spawnSync('git', args, { cwd: copy, encoding: 'utf8' }).stdout).trimEnd();
+    const look = () => ({ pay: read('src/pay.js'), new: String(read('src/new.js')), old: read('src/old.js'), other: String(read('src/other.js')), vendor: String(read('vendor/lib.js')),
+      env: read('.env'), creds: read('creds.json'), head: inCopy('rev-parse', 'HEAD'), log: inCopy('log', '--format=%s'), status: inCopy('status', '--porcelain'),
+      temp: fs.readdirSync(path.join(copy, '.crosscheck-tmp')) });
+    const expected = { pay: frozenPay, new: 'NEW-FROZEN\n', old: null, other: 'OTHER-HEAD\n', vendor: 'VENDOR-HEAD\n', env: null, creds: null, head, log: 'base',
+      status: ' D src/old.js\n M src/pay.js\n?? src/new.js', temp: [] };
+    assert.deepStrictEqual(look(), expected, 'the first review\'s copy');
+    const texts = fs.readdirSync(copy, { recursive: true }).filter(f => !/^\.git([\\/]|$)/.test(f)).map(f => path.join(copy, f)).filter(f => fs.statSync(f).isFile()).map(f => fs.readFileSync(f, 'utf8'));
+    assert.ok(!texts.some(t => /ENV-SENTINEL|CREDS-SENTINEL|JUNCTION-SENTINEL|OTHER-DIRTY/.test(t)), 'no secret, untracked, linked-in or unrelated dirty file');
+    // (the project changes again while Muse works, and the commands of each Muse run change the copy, commit there and
+    // leave a temp file: the run after it, the first one's retry and then the cross-check, gets the copy made afresh)
+    fs.writeFileSync(path.join(root, 'src/pay.js'), 'PAY-LIVE\n');
+    fs.writeFileSync(path.join(root, 'src/old.js'), 'OLD-RECREATED\n');
+    for (const [n, next] of [[0, 'the retry\'s copy'], [1, 'the cross-check\'s copy']]) {
+      for (const [rel, text] of [['src/pay.js', 'MUSE-EDIT\n'], ['src/old.js', 'MUSE-RESTORED\n'], ['src/other.js', 'MUSE-OTHER\n'], ['.crosscheck-tmp/left.txt', 'temp\n']]) {
+        fs.writeFileSync(path.join(copy, rel), text);
+      }
+      git(['-C', copy, 'add', '-A']);
+      git(['-C', copy, 'commit', '-qm', 'muse']);
+      fs.writeFileSync(path.join(holds[n], 'go'), '');
+      await until(path.join(holds[n + 1], 'started'));
+      assert.deepStrictEqual(look(), expected, `${next} is made afresh, from the frozen change`);
+    }
+  } finally {
+    // (so a failure never leaves the review waiting, or still running once the test's folder is removed)
+    for (const hold of holds) fs.writeFileSync(path.join(hold, 'go'), '');
+    await running;
+  }
+  const r = await running;
+  assert.strictEqual(r.status, 'DONE', r.text);
+  assert.ok(!fs.existsSync(copy), 'the copy is gone');
+  assert.strictEqual(fs.readdirSync(r.bundle).filter(f => f.startsWith('muse-calls-')).length, 3, 'each Muse run\'s calls are logged in the bundle, the failed one\'s too');
+  assert.ok(state.update(state.files.global(), g => { delete g.muse; }).ok);
+});

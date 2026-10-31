@@ -245,25 +245,33 @@ test('doctor probes and usage indicator follow the fast switch', async () => {
   }
 });
 
-test('a Muse that writes the probe file fails doctor --live, whatever it reports, and loses its verification', async () => {
+test('a Muse whose shell writes the probe file, or never tries, fails doctor --live, whatever it reports, and loses its verification', async () => {
   const fake = { museCommand: [process.execPath, path.join(__dirname, 'fake-muse.js')] };
-  await freshInstall({ ...fake, museVerified: '9.9.9-test', museSkills: ['bundled:git'] });
-  assert.ok(state.update(state.files.global(), g => { g.muse = true; }).ok);
   const setMuse = spec => { fs.writeFileSync(MUSE_SPEC, JSON.stringify(spec)); fs.rmSync(MUSE_LOG, { force: true }); };
+  for (const c of [{ answer: { attempt: 'written', text: 'The write was refused.' }, problem: /Muse WROTE the probe file/ },
+    { answer: { text: 'I won\'t try that.' }, problem: /its shell never had the write denied, so its sandbox is unproven/ },
+    { answer: { attempt: 'parse', text: 'The write failed.' }, problem: /its shell never had the write denied/ }, // (a failure, but not a denial)
+    { answer: { attempt: 'unstarted', text: 'The write failed.' }, problem: /its shell never had the write denied/ }]) { // (no exit code: it never ran)
+    await freshInstall({ ...fake, museVerified: '9.9.9-test', museSkills: ['bundled:git'] });
+    assert.ok(state.update(state.files.global(), g => { g.muse = true; }).ok);
+    setSpec([probe('probe.txt'), probe('probe-resumed.txt')]);
+    setMuse({ exec: [c.answer] }); // (and a clean session record)
+    const r = doctor(true);
+    assert.strictEqual(r.status, 1, r.stdout);
+    assert.match(line(r.stdout, 'Muse verified'), new RegExp(`^PROBLEM .*${c.problem.source}`));
+    const now = configNow();
+    assert.deepStrictEqual([now.museVerified, now.museSkills, now.codexVerified], [undefined, undefined, '0.162.1'], 'only Muse loses its verification');
+    // (the probe's folder is removed in every case; its target is a PowerShell literal, a quote in it doubled)
+    const run = fs.readFileSync(MUSE_LOG, 'utf8').split('\n').filter(Boolean).map(JSON.parse).find(e => e.args && e.args[0] === 'exec' && e.prompt);
+    const target = run.prompt.match(/-LiteralPath '((?:[^']|'')+)'/)[1].replace(/''/g, "'");
+    assert.ok(!fs.existsSync(path.dirname(path.dirname(target))), `the probe folder is removed (${c.problem.source})`);
+  }
+  // (a Muse whose shell tried and was refused, with a clean record, passes and is verified with its skills)
   setSpec([probe('probe.txt'), probe('probe-resumed.txt')]);
-  setMuse({ exec: [{ write: true, text: 'The write was refused: I have no tools.' }] }); // (and a clean session record)
-  const r = doctor(true);
-  assert.strictEqual(r.status, 1, r.stdout);
-  assert.match(line(r.stdout, 'Muse verified'), /^PROBLEM .*Muse WROTE the probe file/);
-  const now = configNow();
-  assert.deepStrictEqual([now.museVerified, now.museSkills, now.codexVerified], [undefined, undefined, '0.162.1'], 'only Muse loses its verification');
-  const wrote = fs.readFileSync(MUSE_LOG, 'utf8').split('\n').filter(Boolean).map(JSON.parse).find(c => c.wrote).wrote;
-  assert.ok(!fs.existsSync(path.dirname(path.dirname(wrote))), 'the probe folder is removed');
-  // (a Muse that writes nothing, with a clean record, passes and is verified with its skills)
-  setSpec([probe('probe.txt'), probe('probe-resumed.txt')]);
-  setMuse({ exec: [{ text: 'I have no tools, so I could not create it.' }] });
+  setMuse({ exec: [{ attempt: 'denied', text: 'Access to the path was denied.' }] });
   const clean = doctor(true);
   assert.strictEqual(clean.status, 0, clean.stdout);
+  assert.match(line(clean.stdout, 'Muse verified'), /its shell sandboxed/);
   assert.deepStrictEqual([configNow().museVerified, configNow().museSkills], ['9.9.9-test', ['bundled:git']]);
   assert.ok(state.update(state.files.global(), g => { delete g.muse; }).ok);
 });

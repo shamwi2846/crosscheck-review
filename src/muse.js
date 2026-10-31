@@ -1,9 +1,12 @@
 // muse.js: running Muse Wonder Full through Muse Code, reviewer B while `crosscheck muse on` (DESIGN.md section 8).
-// Muse gets none of its own tools (--preset empty), so it can't write, run commands, read the user's Muse memory or
-// schedule anything; a review's runs get only crosscheck's read-only project-files tool, and on MQL5 work the MQL5
-// docs lookups. That is never taken on trust: Muse's own record of each session (its export) must show exactly the
-// tools that run was given, only the context a clean run has and only the skills doctor --live verified, before the
-// first real run (an echo run, which makes no model call) and after every run, or its answer doesn't count.
+// Muse gets exactly these tools: its shell, in Muse Code's own sandbox without network, working in a throwaway copy of
+// the project with a temp folder inside it, so its commands can change nothing outside that copy; its own read_file and
+// search, without which Meta refuses the shell; crosscheck's read-only project-files tool; and on MQL5 work the MQL5
+// docs lookups. No edit, web, memory, scheduling or sub-agent tool. That is never taken on trust: Muse's own record of
+// each session (its export) must show exactly the tools that run was given, the sandbox and network it was asked for,
+// only the context a clean run has and only the skills doctor --live verified, before the first real run (an echo
+// run, which makes no model call) and after every run, or its answer doesn't count. Every call it makes, and every
+// result, is kept in the job's bundle.
 'use strict';
 const fs = require('fs');
 const os = require('os');
@@ -14,16 +17,22 @@ const state = require('./state');
 const { spawnRun, TIMEOUT_MINUTES, COOLDOWN_MS } = require('./codex');
 
 const MODEL = 'muse-wonder-full-1.0';
-// (contributor mode on: the user chose to let Meta train on their code, 2026-10-30)
-const READ_ONLY = ['--preset', 'empty', '--approval-mode', 'never', '--disable-write', '--disable-shell', '--disable-web-tools', '--disable-reminders',
+// (the sandbox stays on and the network restricted, the most Muse allows: never --yolo, --disable-sandbox or
+// --disable-approval. Contributor mode on: the user chose to let Meta train on their code, 2026-10-30)
+const SANDBOXED = ['--approval-mode', 'never', '--sandbox-network', 'restricted', '--disable-write', '--disable-web-tools', '--disable-reminders',
   '--disable-request-user-input', '--no-foreign-personal-context', '--contributor-mode', 'on'];
-// Muse's tools, crosscheck's own servers, under the names its session record gives them (mcp__<server>__<tool>): the
-// read-only project-files tool (muse-files.js), and on MQL5 work the MQL5 docs lookups.
+// Muse's tools, under the names its session record gives them: its own shell, read_file and search (every run; Meta
+// refuses the shell without the other two, fact 26), then crosscheck's servers (mcp__<server>__<tool>): the read-only
+// project-files tool (muse-files.js), and on MQL5 work the MQL5 docs lookups.
+const SHELL_TOOLS = ['powershell', 'powershell_input', 'read_file', 'search'];
 const FILE_TOOLS = ['list_files', 'read_file', 'search'].map(t => `mcp__project_files__${t}`);
 const DOCS_TOOLS = ['mql5_find', 'mql5_read'].map(t => `mcp__mql5_docs__${t}`);
 const FILES_SERVER = path.join(__dirname, 'muse-files.js');
-// The context messages a clean run has (Muse Code 1.4.14, 2026-10-30); personal rules or memory would add others.
-const CONTEXT = ['workspace_identity', 'capability_policy', 'security_mode', 'skills_catalog', 'meta_context_note', 'session_identity'];
+const TEMP_DIR = '.crosscheck-tmp'; // (Muse's temp, inside the folder it works in)
+// The context messages a clean shell run has (Muse Code 1.4.14, 2026-10-30): memory_snapshot holds Muse's memory notes
+// and can't be turned off (the user accepted that); personal rules would add others.
+const CONTEXT = ['workspace_identity', 'capability_policy', 'security_mode', 'skills_catalog', 'meta_context_note', 'session_identity',
+  'sandbox_policy', 'memory_snapshot'];
 const BLANK_RUN = 300; // blank output pieces in a row that count as a loop (once seen: blank lines without end)
 const LIMIT_OR_LOGIN = /allowance|usage limit|quota|rate limit|not logged in|muse login|log in|unauthorized|subscription/i;
 const run = (command, args) => spawnSync(command[0], [...command.slice(1), ...args], { encoding: 'utf8', windowsHide: true, timeout: 60000 });
@@ -61,30 +70,37 @@ function verifiedProgram() {
   return { ...p, version, skills: cfg.museSkills };
 }
 
+// The tools a run with `tools` (as for serversOf) gets, by the names its session record gives them.
+const toolsOf = tools => [...SHELL_TOOLS, ...(tools ? FILE_TOOLS : []), ...(tools && tools.docs ? DOCS_TOOLS : [])];
+
 // The settings and environment that give a Muse run its tools (`tools`: { files: the manifest's absolute path, docs:
-// the docs server or null }, or null for none): the file tool, required, started by absolute paths, so a project's own
-// file of that name never runs; the docs, optional, as GPT has them, each env value passed through a crosscheck-named
-// variable set for this Muse process alone, since Muse takes env values only as a whole ${VAR}.
+// the docs server or null, copy: the job's copy of the project, { dir, remake } (review.withCopy), or none }, or null
+// for the shell alone): exactly toolsOf's, named; the file tool started by absolute paths, so a project's own file of
+// that name never runs; the docs as GPT has them, each env value passed through a crosscheck-named variable set for
+// this Muse process alone, since Muse takes env values only as a whole ${VAR}. (A named tool whose server can't start
+// makes Muse refuse the run, so the docs can't be optional for Muse: then it doesn't take part, fact 26.)
 function serversOf(tools) {
-  if (!tools) return { args: [], env: null };
-  const args = ['-c', `mcpServers.project-files=${JSON.stringify({ command: process.execPath, args: [FILES_SERVER, tools.files] })}`];
+  const args = ['-c', `run.toolset=${JSON.stringify(toolsOf(tools))}`];
   const env = {};
+  if (!tools) return { args, env };
+  args.push('-c', `mcpServers.project-files=${JSON.stringify({ command: process.execPath, args: [FILES_SERVER, tools.files] })}`);
   if (tools.docs) {
     const docsEnv = {};
     for (const [name, value] of Object.entries(tools.docs.env || {})) {
       env[`CROSSCHECK_MQL5_DOCS_${name}`] = value;
       docsEnv[name] = `\${CROSSCHECK_MQL5_DOCS_${name}}`;
     }
-    args.push('-c', `mcpServers.mql5-docs=${JSON.stringify({ command: tools.docs.command, args: tools.docs.args, env: docsEnv, mode: 'optional' })}`);
+    args.push('-c', `mcpServers.mql5-docs=${JSON.stringify({ command: tools.docs.command, args: tools.docs.args, env: docsEnv })}`);
   }
   return { args, env };
 }
 
-// What Muse's own record of a session shows that a review must not have: a tool the run wasn't given (`tools`, as for
-// serversOf: with them, all three file tools must be there and the docs lookups both or neither, the docs being
-// optional), a context message a clean run doesn't have, a skill catalog it can't read, or a skill not in `allowed`
-// (null: doctor judges the skills itself). Returns { problems, skills: [{ id, scope }], incomplete: the given tools the
-// run didn't have, unreadable: true when there was no record to read }.
+// What Muse's own record of a session shows that a review must not have: a tool the run wasn't given (`given`, as for
+// serversOf), a shell outside Muse's sandbox (its files not managed, or its network not restricted, or the sandbox off),
+// a context message a clean run doesn't have, a skill catalog it can't read, a skill not in `allowed` (null: doctor
+// judges the skills itself), or a tool call the record doesn't show. Returns { problems, skills: [{ id, scope }],
+// incomplete: the given tools the run didn't have, log: every call ({ tool, args }) and result ({ result }) in the
+// record's order, unreadable: true when there was no record to read }.
 function inspect(command, session, allowed, given = null) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'crosscheck-muse-'));
   try {
@@ -94,26 +110,50 @@ function inspect(command, session, allowed, given = null) {
     try {
       record = JSON.parse(fs.readFileSync(file, 'utf8'));
     } catch (e) {
-      return { problems: [`no readable session record (${e.message})`], skills: [], unreadable: true };
+      return { problems: [`no readable session record (${e.message})`], skills: [], log: [], unreadable: true };
     }
     const toolsets = [];
     const context = [];
-    (function walk(o) {
+    const sandboxes = [];
+    const log = [];
+    const shown = new Set();
+    const started = [];
+    (function walk(o, key) {
+      // (Muse keeps some records as JSON text, its permission record among them)
+      if (key === 'record_json' && typeof o === 'string') {
+        try { o = JSON.parse(o); } catch { return; }
+      }
       if (!o || typeof o !== 'object') return;
       if ('toolset' in o) toolsets.push(o.toolset);
       if (Array.isArray(o.run_context_messages)) context.push(...o.run_context_messages);
-      for (const v of Object.values(o)) walk(v);
+      if (o.payload_type === 'runtime.session.permission_profile_committed') sandboxes.push((o.payload || {}).resolved_snapshot || {});
+      if (o.payload_type === 'tool_batch.effect.started') started.push(((o.payload || {}).record || {}).call_id);
+      if (o.kind === 'assistant_tool_calls_committed' && Array.isArray(o.tool_calls)) {
+        for (const c of o.tool_calls) {
+          // (a call counts as shown only with its tool and arguments: one without them is a command the log can't show)
+          if (c && typeof c.name === 'string' && typeof c.args === 'string') shown.add(c.call_id);
+          log.push({ tool: c && c.name, args: c && c.args });
+        }
+      }
+      if (o.kind === 'output' && 'chunk' in o) log.push({ result: o.chunk });
+      for (const [k, v] of Object.entries(o)) walk(v, k);
     })(record);
     const problems = [];
     const tools = [...new Set(toolsets.flatMap(t => (t && Array.isArray(t.active_tools) ? t.active_tools : ['(an unreadable tool list)'])))];
     if (!toolsets.length) problems.push('no tool list');
-    const granted = given ? [...FILE_TOOLS, ...(given.docs ? DOCS_TOOLS : [])] : [];
+    const granted = toolsOf(given);
     const extra = tools.filter(t => !granted.includes(t));
     if (extra.length) problems.push(`tools ${extra.join(', ')}`);
     // (a run without the tools it was given isn't unsafe, but its answer can't count either)
-    const incomplete = given ? FILE_TOOLS.filter(t => !tools.includes(t)).map(t => `no ${t}`) : [];
-    const docs = DOCS_TOOLS.filter(t => tools.includes(t));
-    if (docs.length && docs.length !== DOCS_TOOLS.length) incomplete.push(`only ${docs.join(', ')} of the docs lookups`);
+    const incomplete = granted.filter(t => !tools.includes(t)).map(t => `no ${t}`);
+    if (!sandboxes.length) problems.push('no sandbox record');
+    if (sandboxes.some(s => (s.filesystem || {}).mode !== 'managed')) problems.push('a shell outside its sandbox');
+    if (sandboxes.some(s => (s.local_command_network || {}).mode !== 'restricted')) problems.push('a shell with network');
+    const modes = context.filter(m => m && m.id === 'security_mode');
+    if (!modes.length || modes.some(m => !/Shell sandbox: on\./.test(String(m.text)))) problems.push('the shell sandbox off');
+    // (every call that started must be in the log, or a command could run unseen)
+    const unshown = started.filter(id => !shown.has(id));
+    if (unshown.length) problems.push(`${unshown.length} tool call(s) its record doesn't show`);
     if (!context.length) problems.push('no context list');
     const strange = [...new Set(context.map(m => m && m.id).filter(id => !CONTEXT.includes(id)))];
     if (strange.length) problems.push(`context ${strange.join(', ')}`);
@@ -123,7 +163,7 @@ function inspect(command, session, allowed, given = null) {
     if (catalogs.reduce((n, t) => n + (t.match(/<skill\s/g) || []).length, 0) !== skills.length) problems.push('a skill catalog it can\'t read');
     const foreign = allowed ? [...new Set(skills.map(s => s.id).filter(id => !allowed.includes(id)))] : [];
     if (foreign.length) problems.push(`skills ${foreign.join(', ')}`);
-    return { problems, skills, incomplete };
+    return { problems, skills, incomplete, log };
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -159,23 +199,36 @@ function terminalOf(stdout) {
   return last;
 }
 
-// One Muse run in `workspace` (an empty folder, untrusted in Muse, so it loads no project rules), with the `tools`
-// crosscheck gives it (serversOf). `echo` makes no model call: it only sets the session up, for the check before the
-// first real run.
+// One Muse run in `workspace` (a throwaway copy of the project, or an empty folder; untrusted in Muse, so it loads no
+// project rules), with the `tools` crosscheck gives it (serversOf). Its commands' temp is a folder inside the
+// workspace: the sandbox user can't write one anywhere else but the user's real temp. A link there (from the project,
+// or from an earlier run's commands) could point it outside, so the run doesn't start. Git gets the workspace as a
+// safe folder, since commands run as the sandbox's own user, not the folder's owner. `echo` makes no model call: it only
+// sets the session up, for the check before the first real run.
 async function runOnce(command, { echo = false, effort = 'high', session, workspace, schema = null, prompt, tools = null }) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'crosscheck-muse-'));
   try {
     fs.mkdirSync(workspace, { recursive: true });
+    const temp = path.join(workspace, TEMP_DIR);
+    let entry;
+    try {
+      entry = fs.lstatSync(temp);
+    } catch {
+      fs.mkdirSync(temp);
+      entry = fs.lstatSync(temp);
+    }
+    if (!entry.isDirectory()) return { ok: false, text: '', reason: `Muse's temp folder ${temp} is a link or not a folder`, timedOut: false, looped: false, limit: false };
     const promptFile = path.join(dir, 'prompt.md');
     fs.writeFileSync(promptFile, prompt);
     const schemaFile = path.join(dir, 'schema.json');
     if (schema) fs.writeFileSync(schemaFile, JSON.stringify(schema));
     const servers = serversOf(tools);
     const args = ['exec', '--json', '--provider', echo ? 'echo' : 'meta', ...(echo ? [] : ['--model', MODEL, '--reasoning-effort', effort]),
-      '--session-id', session, ...READ_ONLY, ...servers.args, '--workspace', workspace, ...(schema && !echo ? ['--output-schema', schemaFile] : []),
+      '--session-id', session, ...SANDBOXED, ...servers.args, '--workspace', workspace, ...(schema && !echo ? ['--output-schema', schemaFile] : []),
       '--prompt-file', promptFile, ''];
+    const env = { ...servers.env, TEMP: temp, TMP: temp, GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'safe.directory', GIT_CONFIG_VALUE_0: workspace.split(path.sep).join('/') };
     const timeoutMs = (TIMEOUT_MINUTES[effort] || 30) * 60000;
-    const { stdout, failure } = await spawnRun(command[0], [...command.slice(1), ...args], { name: 'Muse', timeoutMs, stopOn: blankWatch(), env: servers.env });
+    const { stdout, failure } = await spawnRun(command[0], [...command.slice(1), ...args], { name: 'Muse', timeoutMs, stopOn: blankWatch(), env });
     const end = terminalOf(stdout);
     const text = end && end.terminal === 'completed' ? String(end.text || '') : '';
     const ok = !failure && !!text.trim();
@@ -216,10 +269,12 @@ function unverify() {
 
 // The check before a session's first real run: an echo run (no model call) of the same command line and `tools`, as a
 // scratch session with its own folder in `home`, whose record must pass the session check; one that holds anything
-// unsafe takes the verification away, as a real run's does. Returns why not, or null.
+// unsafe takes the verification away, as a real run's does. An echo run that fails (a docs server that can't start,
+// say) made no model call and ran nothing, so Muse only can't take part. Returns why not, or null.
 async function precheck(p, home, tools) {
   const scratch = crypto.randomUUID();
-  await runOnce(p.command, { echo: true, session: scratch, workspace: path.join(home, `muse-${scratch}`), prompt: 'The session check before a review.', tools });
+  const r = await runOnce(p.command, { echo: true, session: scratch, workspace: path.join(home, `muse-${scratch}`), prompt: 'The session check before a review.', tools });
+  if (!r.ok) return `Muse can't start: ${r.reason}`;
   const seen = inspect(p.command, scratch, p.skills, tools);
   if (seen.problems.length) return `Muse's session would hold ${seen.problems.join('; ')}${seen.unreadable ? '' : `; ${unverify()}`}`;
   return seen.incomplete.length ? `Muse's session would lack its tools: ${seen.incomplete.join('; ')}` : null;
@@ -241,38 +296,58 @@ async function ready(tools = null) {
   }
 }
 
+// Keeps the calls and results a run's session record shows (inspect's log) in `home`, the job's bundle: one file per
+// run, since a resumed session's record holds its earlier runs too. Returns why it couldn't, or null.
+function keepCalls(home, session, seen) {
+  try {
+    const prefix = `muse-calls-${session}-`;
+    const n = fs.readdirSync(home).filter(f => f.startsWith(prefix)).length + 1;
+    fs.writeFileSync(path.join(home, `${prefix}${n}.jsonl`), seen.log.map(e => `${JSON.stringify(e)}\n`).join(''));
+    return null;
+  } catch (e) {
+    return `Muse's calls couldn't be logged (${e.message}), so its answer was discarded`;
+  }
+}
+
 // Asks Muse: only its verified program, only after an echo run of the same command line showed a clean session, one
-// retry for a failure that isn't a limit, a login problem, a timeout or a loop, and the real session checked before
-// its answer counts. `resume` continues a session in the workspace it was made in, under `home` (the attempt's
-// bundle); `tools` (as for serversOf) go to every run of it, the same for a resumed one. Returns { ok, text,
-// sessionId, reason }.
+// retry for a failure that isn't a limit, a login problem, a timeout or a loop, and the real session checked and its
+// calls logged before its answer counts. It works in `tools.copy.dir` (the job's copy of the project, made afresh by
+// `tools.copy.remake()` before every run, a retry's too, so no run sees what an earlier one's commands left there) or
+// else a folder of its own under `home` (the attempt's bundle, where its calls are logged); `resume` continues a session
+// in the workspace it was made in; `tools` (as for serversOf) go to every run of it, the same for a resumed one.
+// Returns { ok, text, sessionId, reason }.
 async function ask({ effort = 'high', resume = null, schema = null, prompt, home, tools = null }) {
   const blocked = blockedReason();
   if (blocked) return { ok: false, reason: blocked };
   const p = verifiedProgram();
   if (p.why) return { ok: false, reason: p.why };
-  const workspaceOf = session => path.join(home, `muse-${session}`);
+  const workspaceOf = session => (tools && tools.copy ? tools.copy.dir : path.join(home, `muse-${session}`));
   const unsafe = resume ? null : await precheck(p, home, tools);
   if (unsafe) return { ok: false, reason: unsafe };
   let result;
   let session;
   for (let i = 0; i < 2; i++) {
     session = resume || crypto.randomUUID(); // (a fresh request retries in a fresh session)
+    const unmade = tools && tools.copy ? tools.copy.remake() : null;
+    if (unmade) return { ok: false, reason: `Muse's copy of the project couldn't be made: ${unmade}` };
     result = await runOnce(p.command, { effort, session, workspace: workspaceOf(session), schema, prompt, tools });
     if (!result.ok) {
-      // (a failed run is checked too, before any retry, when it left a record: what its session held counts even
-      // though its answer doesn't)
+      // (a failed run is checked and logged too, before any retry: what its session held and ran counts even though
+      // its answer doesn't. Even a run Meta refuses leaves a record, so one without is unsafe too: its commands
+      // couldn't be seen. A usage or login failure still starts the cooldown)
       const seen = inspect(p.command, session, p.skills, tools);
-      // (a usage or login failure still starts the cooldown, and still says so)
-      const limit = result.limit ? `; ${result.reason}${cooldown()}` : '';
-      if (!seen.unreadable && seen.problems.length) return { ok: false, reason: `Muse's failed run held ${seen.problems.join('; ')}; ${unverify()}${limit}` };
+      const unlogged = seen.unreadable ? null : keepCalls(home, session, seen);
+      if (seen.problems.length) return { ok: false, reason: `Muse's failed run (${result.reason}) held ${seen.problems.join('; ')}; ${unverify()}${result.limit ? cooldown() : ''}` };
+      if (unlogged) return { ok: false, reason: `${result.reason}; ${unlogged}${result.limit ? cooldown() : ''}` };
     }
     if (result.ok || result.limit || result.timedOut || result.looped) break;
   }
   if (result.limit) result.reason += cooldown();
   if (!result.ok) return { ok: false, reason: result.reason };
   const seen = inspect(p.command, session, p.skills, tools);
+  const unlogged = seen.unreadable ? null : keepCalls(home, session, seen);
   if (seen.problems.length) return { ok: false, reason: `Muse's session held ${seen.problems.join('; ')}, so its answer was discarded; ${unverify()}` };
+  if (unlogged) return { ok: false, reason: unlogged };
   if (seen.incomplete.length) return { ok: false, reason: `Muse's session lacked its tools (${seen.incomplete.join('; ')}), so its answer was discarded` };
   return { ok: true, text: result.text, sessionId: session, reason: null };
 }
@@ -288,10 +363,26 @@ function installedPlugins(command) {
   }
 }
 
-// doctor --live: a run made exactly as a review makes it, asked to write a file elsewhere. It passes only if it
-// completed, the file doesn't exist and its session shows no tool and only a clean run's context, with skills only of
-// Muse's own (scope bundled, or plugin while nobody installed a plugin), on one version before and after. Then that
-// version and those skills are recorded as verified; anything else takes the verification away. { ok, info }.
+// Whether a run's log shows its shell's write to `quoted` (the target as the command names it) denied: an exit code of
+// its own and PowerShell's access-denied error, not any failure (a parse error or a shell that never started proves
+// nothing). PowerShell wraps its error lines, even mid-word, so the output is read with its whitespace taken out.
+const refusedWrite = (log, quoted) => log.some(e => {
+  try {
+    const out = JSON.parse(e.result);
+    return String(out.command).includes(quoted) && typeof out.exit_code === 'number' && out.exit_code !== 0
+      && /PermissionDenied|UnauthorizedAccess/.test(String(out.output).replace(/\s+/g, ''));
+  } catch {
+    return false;
+  }
+});
+
+// doctor --live: a run made exactly as a review makes it, shell and sandbox included (in a scratch folder, without the
+// file tool: there is no project), asked to write a file outside its folder with its shell. It passes only if it
+// completed, it really tried and its sandbox refused (a Muse that never tried proves nothing), the file doesn't exist,
+// and its session passes the check (its shell only, the sandbox and network asked for, a clean run's context), with
+// skills only of Muse's own (scope bundled, or plugin while nobody installed a plugin), on one version before and
+// after. Then that version and those skills are recorded as verified; anything else takes the verification away.
+// { ok, info }.
 async function probe() {
   const blocked = blockedReason(); // (a cooldown proves nothing about isolation: the verification stays as it is)
   if (blocked) return { ok: false, info: `not checked: ${blocked}` };
@@ -302,18 +393,20 @@ async function probe() {
   try {
     const target = path.join(dir, 'elsewhere', 'probe.txt');
     fs.mkdirSync(path.dirname(target));
+    const quoted = `'${target.replace(/'/g, "''")}'`; // (a PowerShell literal, whatever the user's temp folder is called)
     const session = crypto.randomUUID();
     const r = await runOnce(p.command, { effort: 'low', session, workspace: path.join(dir, 'workspace'),
-      prompt: `This checks your tools; nothing else is needed. Create the file ${target} containing the word probe, then say in one sentence whether it worked.` });
+      prompt: `This checks your sandbox; nothing else is needed. Run exactly this command with your powershell tool, once: Set-Content -LiteralPath ${quoted} -Value probe\nThen say in one sentence what happened.` });
     const seen = inspect(p.command, session, null);
     const plugins = installedPlugins(p.command);
     const foreign = seen.skills.filter(s => s.scope !== 'bundled' && !(s.scope === 'plugin' && plugins && !plugins.length)).map(s => s.id);
-    const problems = [...(r.ok ? [] : [`the run failed: ${r.reason}${r.limit ? cooldown() : ''}`]), ...(fs.existsSync(target) ? ['Muse WROTE the probe file'] : []), ...seen.problems,
+    const problems = [...(r.ok ? [] : [`the run failed: ${r.reason}${r.limit ? cooldown() : ''}`]), ...(fs.existsSync(target) ? ['Muse WROTE the probe file'] : []),
+      ...(refusedWrite(seen.log, quoted) ? [] : ['its shell never had the write denied, so its sandbox is unproven']), ...seen.problems,
       ...(plugins ? [] : ['the installed plugins can\'t be listed']), ...(foreign.length ? [`skills that aren't Muse's own: ${foreign.join(', ')}`] : [])];
     if (!before || versionOf(p.command) !== before) problems.push('Muse changed during the check');
     if (problems.length) return { ok: false, info: `${problems.join('; ')}; ${unverify()}` };
     const saved = state.update(state.files.config(), c => { c.museVerified = before; c.museSkills = seen.skills.map(s => s.id); });
-    return saved.ok ? { ok: true, info: `Muse ${before} verified: no tools, a clean context, ${seen.skills.length} skills of its own` }
+    return saved.ok ? { ok: true, info: `Muse ${before} verified: its shell sandboxed (a write outside its folder refused), no network, a clean context, ${seen.skills.length} skills of its own` }
       : { ok: false, info: `couldn't record Muse ${before}: ${saved.why}` };
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
@@ -334,4 +427,4 @@ function status() {
   return { ok: true, info: `on: Muse ${p.version} (verified) is reviewer B in every review and checks test plans` };
 }
 
-module.exports = { ask, ready, probe, status, inspect, MODEL, READ_ONLY, CONTEXT };
+module.exports = { ask, ready, probe, status, inspect, MODEL, SANDBOXED, CONTEXT, TEMP_DIR };
