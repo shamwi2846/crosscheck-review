@@ -775,3 +775,21 @@ Findings left unfixed on purpose. Entries are never deleted, only marked fixed.
 - Fix: -
 - Log: recorded by hand
 - Why skipped: The fix proposed (open once with O_NOFOLLOW, then fstat and read the descriptor) protects nothing on Windows, where Node has no O_NOFOLLOW, and not a swapped parent folder either; the swap needs another process writing the project at that instant, which Muse's sandboxed commands can't (they write only their copy); and once PR 34 lands, Muse's shell can read any file anyway, which the user accepted.
+
+## G87 · open · 2026-10-31 · MEDIUM
+- Task: -
+- Where: src/hook.js
+- Problem: A merge commit made by git merge/pull, the app's base-branch sync or GitHub's update-branch never passes the commit guard, so a PR's final head can combine reviewed changes with a moved main that no review saw, and it still merges on green CI
+- Trigger: -
+- Fix: -
+- Log: recorded by hand
+- Why skipped: Only realistic when main moves while a job's PR is open; one coding job per project at a time (RULES.md) keeps main still, so a fix isn't worth its machinery now
+
+## G88 · fixed · 2026-10-31 · LOW
+- Task: Task: report only a final conclusion; rules for running several coding jobs
+- Where: RULES.md:64
+- Problem: F1: Apply the starting-commit check to reused copies
+- Trigger: A new coding job starts in an existing Unity copy, without handing off to another chat, while its clean, fully pushed branch is behind GitHub's main.
+- Fix: Require every new coding job, including one using an existing copy or chat, to start at GitHub's latest main after the fast-forward update and cleanliness checks.
+- Log: 20261031070325-541c07
+- Why skipped: pair: confirmed by B
