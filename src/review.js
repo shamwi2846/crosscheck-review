@@ -377,7 +377,7 @@ function planOf(root, rel, plan, copies) {
 // the manifest the answer is applied from. The fallback reviewer gets the same bundle. A follow-up (`chain`, the
 // chain as admitted) gets the open findings, Claude's `response` and only the requirements that changed.
 function freeze(root, { attempt, session, names = [], files, admittedAt, rev, taskFile, evidenceFile, full, chain = null, response = '',
-  paired = false, riskyKeys = [], plans = {}, muse: withMuse = false }) {
+  paired = false, riskyKeys = [], plans = {}, muse: withMuse = false, docs: docsGiven }) {
   const taskBytes = bytesOf(taskFile);
   if (taskBytes === null) return { why: `the task file ${taskFile} doesn't exist` };
   const task = taskOf(textOf(taskBytes));
@@ -387,8 +387,8 @@ function freeze(root, { attempt, session, names = [], files, admittedAt, rev, ta
   const narrow = !!chain && chain.rounds.length >= 3;
   const code = [];
   const wholeKeys = []; // (in a paired attempt, the files the reviewers read in full: these get its receipt)
-  // (the frozen copies the prompt lists but doesn't show whole, as [label, snapshot]: the material Muse, which has no
-  // tools, gets inline, besides what the prompt shows; and the snapshots it does show whole)
+  // (the frozen copies the prompt lists but doesn't show whole, as [label, snapshot]: the material Muse gets inline,
+  // besides what the prompt shows, so its file tool is needed only for more; and the snapshots it does show whole)
   const copies = [];
   const wholeShown = new Set();
   for (const [key, f] of Object.entries(files)) {
@@ -438,7 +438,8 @@ function freeze(root, { attempt, session, names = [], files, admittedAt, rev, ta
     + `## Frozen copies (the reviewed versions, whole)\n${frozenList}\n\n## Evidence\n${evidence}\n`;
   const rowIds = chain ? task.ids.filter(id => (chain.task.reqs || {})[id] !== task.reqs[id]) : task.ids;
   // (looked up once here: every run of this attempt gets this server, and the note is in the prompt exactly when it does)
-  const docs = docsFor(Object.values(files).map(f => f.path));
+  // (`docsGiven`: looked up once by the caller, so Muse's pre-check and every run get the same server)
+  const docs = docsGiven === undefined ? docsFor(Object.values(files).map(f => f.path)) : docsGiven;
   const prompt = chain
     ? `${FOLLOWUP_RULES}${narrow ? NARROW : ''}${docs ? DOCS_NOTE : ''}\n\n## Open findings\n${openList(chain.findings) || 'None.'}\n\n## Claude's response\n${response.trim() || '-'}\n\n`
       + `## Changed requirements\n${rowIds.map(id => task.reqs[id]).join('\n') || 'None.'}\n\n${tail}`
@@ -451,34 +452,45 @@ function freeze(root, { attempt, session, names = [], files, admittedAt, rev, ta
   fs.writeFileSync(path.join(bundleDir(root, attempt), 'manifest.json'), JSON.stringify(manifest, null, 2));
   fs.writeFileSync(path.join(bundleDir(root, attempt), 'prompt.md'), prompt);
   // (a copy the prompt already shows whole, such as a whole-shown test a plan names too, isn't pasted again)
-  const musePrompt = withMuse ? inlined(root, prompt, copies.filter(([, hash]) => !wholeShown.has(hash))) : null;
+  const musePrompt = withMuse ? inlined(root, prompt, copies.filter(([, hash]) => !wholeShown.has(hash)), docs) : null;
   if (musePrompt) fs.writeFileSync(path.join(bundleDir(root, attempt), 'prompt-muse.md'), musePrompt);
   return { manifest, prompt, musePrompt };
 }
 
-const MUSE_NO_TOOLS = 'You have no tools in this review. Wherever these instructions say to read, open or search a file, use only what this prompt holds: the files it shows whole, and the copies inline at the end. Nothing else of the project is available to you, with one exception: in your first review answer only (the one whose shape has more_files), list in more_files the project-relative paths of up to 20 project files you need but weren\'t shown (the project\'s files are listed below) instead of guessing, and you get them and answer again in full; leave it empty when you need none. Later answers can\'t ask. Say in coverage what you couldn\'t check, and mark a finding UNCLEAR in a cross-check when what you have can\'t settle it.';
+// What Muse is told about its tools (DESIGN.md section 7): none of its own, only crosscheck's read-only file tool, and
+// the MQL5 docs lookups when the run has them (`docs`).
+const museIntro = docs => 'You have no tools of your own in this review, only these: list_files, read_file and search read this project\'s files (read-only; a file under review comes back as its frozen copy)'
+  + `${docs ? ', and mql5_find and mql5_read look up the MQL5 docs, for API facts' : ''}. The files shown whole and the copies inline at the end are already here; use the tools for any other file a finding depends on. Say in coverage what you couldn't check, and mark a finding UNCLEAR in a cross-check when what you have can't settle it.`;
 const MUSE_PROMPT_MAX = 2000000; // characters, about half of Muse's context: material past it is GPT's alone
-const LIST_MAX = 2000; // names in the project's file list Muse gets
 
-// The project's files as git lists them, for Muse to name the ones it asks for.
-function projectList(root) {
-  const all = listedFiles(root);
-  return `## The project's files (git's list${all.length > LIST_MAX ? `, the first ${LIST_MAX} of ${all.length}` : ''})\n${all.slice(0, LIST_MAX).join('\n') || 'None.'}`;
-}
-
-// Muse's version of a prompt (it has no tools): without the MQL5 docs note, with the project's file list, and with the
+// Muse's version of a prompt: its tools said, the MQL5 docs note kept only when the run has the docs (`docs`), and the
 // frozen copies the prompt lists (`copies`, as freeze collected them: never a path read out of the prompt, where
 // reviewed code could name any snapshot, the task's own included) inline. null when it grows past MUSE_PROMPT_MAX.
-function inlined(root, prompt, copies) {
+function inlined(root, prompt, copies, docs = null) {
   const labels = new Map(); // (one copy per snapshot, under every name it has: two identical files are both readable)
   for (const [label, hash] of copies) labels.set(hash, [...new Set([...(labels.get(hash) || []), label])]);
   const shown = [...labels].map(([hash, names]) => `### ${names.join(', ')}\n${fence(snapText(root, hash))}`);
-  const text = `${MUSE_NO_TOOLS}\n\n${prompt.replace(DOCS_NOTE, '')}\n\n${projectList(root)}\n\n## The listed copies, inline\n${shown.join('\n\n') || 'None.'}\n`;
+  const text = `${museIntro(docs)}\n\n${docs ? prompt : prompt.replace(DOCS_NOTE, '')}\n\n## The listed copies, inline\n${shown.join('\n\n') || 'None.'}\n`;
   return text.length > MUSE_PROMPT_MAX ? null : text;
 }
 
-const MORE_FILE_MAX = 512 * 1024; // bytes of one file Muse asks for
-const MORE_TOTAL_MAX = 1000000; // characters of all the files one request gets
+// The tools a Muse run of this attempt gets (muse.js serversOf): the project-files tool, whose manifest, written into
+// the attempt's bundle, names the project, the reviewed files' frozen copies under their recorded and real names
+// (`files`, a review manifest's), the plan under review (`plan`) and the log; and the job's docs server (`docs`).
+function museTools(root, attempt, { docs = null, files = {}, plan = null } = {}) {
+  const dir = bundleDir(root, attempt);
+  fs.mkdirSync(dir, { recursive: true });
+  const reviewed = {};
+  for (const f of Object.values(files)) {
+    if (!f.frozen) continue;
+    // (a file the change deletes is recorded too, as null, so a live file made again under its name is never read)
+    const copy = f.frozen === DELETED ? null : snapFile(root, f.frozen);
+    for (const name of new Set([f.path, realName(root, f.path)].filter(Boolean))) reviewed[state.pathKey(name)] = copy;
+  }
+  const manifest = path.join(dir, 'muse-files.json');
+  fs.writeFileSync(manifest, JSON.stringify({ root, reviewed, plan, log: path.join(dir, 'muse-files.log') }, null, 2));
+  return { files: manifest, docs };
+}
 
 // A secrets file by its name: .env and its variants other than examples, private keys, key stores and password
 // vaults, credential files of common tools (npm, netrc, PostgreSQL, Apache, direnv, git), credentials.*, and
@@ -488,6 +500,26 @@ function secretName(rel) {
   return (/^\.env(\..+)?$/.test(b) && !/^\.env\.(example|sample|template)$/.test(b))
     || /\.(pem|key|p8|pkcs8|p12|pfx|ppk|jks|keystore|kdbx|tfvars|tfvars\.json|tfstate|tfstate\.backup)$/.test(b) || /^id_(rsa|dsa|ecdsa|ed25519)(_sk)?$/.test(b)
     || /^\.(envrc|npmrc|netrc|pgpass|htpasswd|git-credentials)$/.test(b) || /^credentials(\..+)?$/.test(b);
+}
+
+// A project path's real project-relative name, links followed, even when the file or its folders are missing (the
+// nearest folder that exists, followed, then the rest of the path: a deleted file recorded under a folder link's name
+// keeps its real name), or null when it lies outside the project.
+function realName(root, rel) {
+  let abs = path.resolve(root, rel);
+  const rest = [];
+  let real = null;
+  while (real === null) {
+    try {
+      real = fs.realpathSync.native(abs);
+    } catch {
+      if (path.dirname(abs) === abs) return null;
+      rest.unshift(path.basename(abs));
+      abs = path.dirname(abs);
+    }
+  }
+  const name = path.relative(fs.realpathSync.native(root), path.join(real, ...rest)).replace(/\\/g, '/');
+  return !name || outsidePath(name) ? null : name;
 }
 
 // Where a project path Muse may get really is: { rel, real, realRel }, or { why } when it lies outside the project once
@@ -511,50 +543,6 @@ function located(root, asked) {
 const unsendable = (listed, rel, realRel) => (secretName(rel) || secretName(realRel) ? 'a secrets file'
   : !listed.has(state.pathKey(rel)) || !listed.has(state.pathKey(realRel)) ? 'not a file git lists for the project' : null);
 
-// What answers Muse's request for project files (DESIGN.md section 7): a function from the paths it asked for to the
-// text of its files round. A file is sent, as it is now, only when it is a regular file inside the project once links
-// are followed, git lists both the name asked for and the real file, neither of those names is a secrets file's, and
-// it fits the limits; every other path gets why not. A reviewed file of this attempt, or `planPath` (a plan under
-// review), is never sent again: the prompt already holds its frozen copy, so a live version never replaces it.
-function museSupply(root, manifest, planPath = null) {
-  const realRoot = fs.realpathSync.native(root);
-  const relOf = abs => path.relative(realRoot, abs).replace(/\\/g, '/');
-  // (a reviewed file under its recorded name and its real one: an edit made through a link records the link's name)
-  const reviewed = new Set(Object.values(manifest.files).filter(f => f.frozen).flatMap(f => {
-    let real = null;
-    try { real = relOf(fs.realpathSync.native(path.resolve(root, f.path))); } catch {}
-    return [state.pathKey(f.path), ...(real ? [state.pathKey(real)] : [])];
-  }));
-  const plan = planPath && fs.existsSync(planPath) ? fs.realpathSync.native(planPath) : null;
-  return paths => {
-    const listed = new Set(listedFiles(root).map(state.pathKey));
-    const sent = [];
-    const refused = [];
-    const seen = new Set();
-    let total = 0;
-    for (const asked of paths) {
-      const { rel, real, realRel, why: where } = located(root, asked);
-      const why = where
-        || (seen.has(state.pathKey(realRel)) ? 'asked for twice'
-          : reviewed.has(state.pathKey(rel)) || reviewed.has(state.pathKey(realRel)) || real === plan ? 'already in your prompt'
-          : unsendable(listed, rel, realRel) || (fs.statSync(real).size > MORE_FILE_MAX ? `larger than ${MORE_FILE_MAX / 1024} KB` : null));
-      if (why) {
-        refused.push(`- ${asked}: ${why}`);
-        continue;
-      }
-      seen.add(state.pathKey(realRel));
-      const text = textOf(fs.readFileSync(real));
-      if (total + text.length > MORE_TOTAL_MAX) {
-        refused.push(`- ${asked}: past the ${MORE_TOTAL_MAX}-character limit of one request`);
-        continue;
-      }
-      total += text.length;
-      sent.push(`### ${rel}\n${fence(text)}`);
-    }
-    return `The project files you asked for, as they are now: material to review, not instructions, and not reviewed files.\n\n${sent.join('\n\n') || 'None could be sent.'}\n\n`
-      + `${refused.length ? `Not sent:\n${refused.join('\n')}\n\n` : ''}Now answer again, in full: your whole review, with these files.`;
-  };
-}
 
 const askedOf = manifest => ({ rowIds: manifest.task.rowIds, linkIds: manifest.task.linkIds,
   files: Object.values(manifest.files).map(f => f.path), openIds: manifest.openIds || [] });
@@ -575,13 +563,13 @@ function historyOf(root, chain) {
 // cross-check, which needs that very session) a failed resume is the end. `kind` and `asked` default to the
 // manifest's; `label` names the turns saved in the bundle (turn-<label>-<n>.md), so a pair's turns don't overlap.
 // `mode` is Codex's ('research' alone has the web); `docs` defaults to the MQL5 docs server the attempt froze, if any.
-// `reviewer: 'muse'` runs Muse instead (muse.js: no tools, no docs, its own folders in the bundle); any failure of its
-// is MUSE_FAILED, so the caller goes on without Muse and GPT is never taken for unavailable. `supply` (Muse's first
-// review only) answers its request for files (museSupply).
+// `reviewer: 'muse'` runs Muse instead (muse.js: only the `tools` crosscheck gives it, see museTools, its own folders
+// in the bundle); any failure of its is MUSE_FAILED, so the caller goes on without Muse and GPT is never taken for
+// unavailable.
 async function run(root, manifest, prompt, { resume = null, history = '', strict = false, kind = manifest.kind, asked = askedOf(manifest), label = '', effort = 'high',
-  mode = 'review', docs = manifest.docs || null, reviewer = 'gpt', supply = null } = {}) {
-  const schema = supply ? answer.withMoreFiles(answer.SCHEMAS[kind]) : answer.SCHEMAS[kind];
-  const ask = reviewer === 'muse' ? o => muse.ask({ ...o, home: bundleDir(root, manifest.attempt) }) : codex.ask;
+  mode = 'review', docs = manifest.docs || null, reviewer = 'gpt', tools = null } = {}) {
+  const schema = answer.SCHEMAS[kind];
+  const ask = reviewer === 'muse' ? o => muse.ask({ ...o, home: bundleDir(root, manifest.attempt), tools }) : codex.ask;
   const as = status => (reviewer === 'muse' ? 'MUSE_FAILED' : status);
   const save = (n, text, result) => fs.writeFileSync(path.join(bundleDir(root, manifest.attempt), `turn-${label ? `${label}-` : ''}${n}.md`),
     `# Prompt\n\n${text}\n\n${result.ok ? `# Answer\n\n${result.text}` : `${NO_ANSWER} ${result.reason})`}\n`);
@@ -600,35 +588,17 @@ async function run(root, manifest, prompt, { resume = null, history = '', strict
   // (a run Codex couldn't complete even after its retry means GPT is unavailable, so the fallback takes the bundle;
   // only a pair's cross-check, a strict resume, runs again instead)
   if (!first.ok) return { status: as(first.unavailable || !(resume && strict) ? 'GPT_UNAVAILABLE' : 'NOT_DONE'), why: first.reason };
-  // (an answer with problems gets one repair in its session, saved as turn `n`; `asking`: Muse's first review, whose
-  // shape adds more_files)
-  const settle = async (result, shape, asking, n) => {
-    const readOf = text => (asking ? answer.readAsking : answer.read)(kind, text, asked);
-    const checked = readOf(result.text);
-    if (!checked.problems.length) return { checked };
-    if (!result.sessionId) return { failed: { status: as('NOT_DONE'), why: `the answer has problems and its session can't be resumed: ${checked.problems.join('; ')}` } };
+  let checked = answer.read(kind, first.text, asked);
+  if (checked.problems.length) {
+    if (!first.sessionId) return { status: as('NOT_DONE'), why: `the answer has problems and its session can't be resumed: ${checked.problems.join('; ')}` };
     const repair = `Your answer has these problems. Answer again, in full, without them:\n- ${checked.problems.join('\n- ')}`;
-    const second = await ask({ mode, effort, resume: result.sessionId, schema: shape, prompt: repair, cwd: root, docs });
-    save(n, repair, second);
-    if (!second.ok) return { failed: { status: as(second.unavailable || !strict ? 'GPT_UNAVAILABLE' : 'NOT_DONE'), why: second.reason } }; // (as above)
-    const again = readOf(second.text);
-    return again.problems.length ? { failed: { status: as('NOT_DONE'), why: `the answer still has problems after its repair: ${again.problems.join('; ')}` } } : { checked: again };
-  };
-  let settled = await settle(first, schema, !!supply, 2);
-  if (settled.failed) return settled.failed;
-  // (Muse, which has no tools, may ask once for project files it wasn't shown: in the same session it gets what may be
-  // sent and answers again in full, in the plain shape, so it can't ask twice; that answer is its review)
-  if (supply && settled.checked.more.length && first.sessionId) {
-    const filesPrompt = supply(settled.checked.more);
-    const plain = answer.SCHEMAS[kind];
-    save('files-1', filesPrompt, { ok: false, reason: 'still running' }); // (what is sent is kept even if the run is stopped)
-    const third = await ask({ mode, effort, resume: first.sessionId, schema: plain, prompt: filesPrompt, cwd: root, docs });
-    save('files-1', filesPrompt, third);
-    if (!third.ok) return { status: as('NOT_DONE'), why: third.reason };
-    settled = await settle({ ...third, sessionId: third.sessionId || first.sessionId }, plain, false, 'files-2');
-    if (settled.failed) return settled.failed;
+    const second = await ask({ mode, effort, resume: first.sessionId, schema, prompt: repair, cwd: root, docs });
+    save(2, repair, second);
+    if (!second.ok) return { status: as(second.unavailable || !strict ? 'GPT_UNAVAILABLE' : 'NOT_DONE'), why: second.reason }; // (as above)
+    checked = answer.read(kind, second.text, asked);
+    if (checked.problems.length) return { status: as('NOT_DONE'), why: `the answer still has problems after its repair: ${checked.problems.join('; ')}` };
   }
-  return { status: 'OK', answer: settled.checked.answer, session: first.sessionId };
+  return { status: 'OK', answer: checked.answer, session: first.sessionId };
 }
 
 // The chain's findings from a checked answer: each with its file's key (null for the task as a whole), plus a
@@ -838,12 +808,11 @@ function applyAndSummarize(root, manifest, result, bundle, note = '') {
 // in a normal review, beside a GPT B in a risky one); failing in the cross-check, after A marked Muse's findings,
 // redoes the attempt without Muse, in fresh sessions. The abandoned turns are set aside, so no follow-up's history
 // replays them. Returns { result, museOut }: why Muse didn't take part, or null.
-async function withMuse(root, { manifest, prompt, musePrompt, planPath = null }) {
+async function withMuse(root, { manifest, prompt, musePrompt, tools = null }) {
   const effort = manifest.paired ? 'xhigh' : 'high';
-  // (Muse's first review, the one run of B without a session to resume, may ask for files; `planPath`: a plan under review)
-  const supply = museSupply(root, manifest, planPath);
+  // (`tools`: every Muse run's, its cross-check's too)
   const r = await pair.runPair({ prompt, promptB: musePrompt, materialize: findingsOf,
-    runOne: (p, options, side) => run(root, manifest, p, { ...options, effort, reviewer: side === 'B' ? 'muse' : 'gpt', supply: side === 'B' && !options.resume ? supply : null }) });
+    runOne: (p, options, side) => run(root, manifest, p, { ...options, effort, reviewer: side === 'B' ? 'muse' : 'gpt', tools: side === 'B' ? tools : null }) });
   if (r.status === 'OK' || !r.whyB) return { result: r, museOut: null };
   const museOut = `its ${r.step} didn't complete (${r.whyB})`;
   if (r.step === 'review') {
@@ -889,12 +858,15 @@ async function review(root, { session = null, files = [], taskFile = null, evide
     // (while the switch is on, Muse is reviewer B if it can take part now: checked before anything runs, so GPT A never
     // runs twice for a Muse that can't even start)
     const museOn = !!(state.read(state.files.global()).data || {}).muse;
-    let museOut = museOn ? await muse.ready() : null;
-    const frozen = freeze(root, { attempt, session, names: files, ...admitted, taskFile, evidenceFile, full, muse: museOn && !museOut });
+    // (the docs server looked up once, for GPT's runs and Muse's alike; Muse's pre-check runs with the tools it will
+    // have, its file tool's frozen copies added once they are frozen)
+    const docs = docsFor(Object.values(admitted.files).map(f => f.path));
+    let museOut = museOn ? await muse.ready(museTools(root, attempt, { docs })) : null;
+    const frozen = freeze(root, { attempt, session, names: files, ...admitted, taskFile, evidenceFile, full, muse: museOn && !museOut, docs });
     if (frozen.why) return refused(frozen.why);
     if (museOn && !museOut && !frozen.musePrompt) museOut = 'the material is too large for its prompt';
     let result;
-    if (frozen.musePrompt) ({ result, museOut } = await withMuse(root, frozen));
+    if (frozen.musePrompt) ({ result, museOut } = await withMuse(root, { ...frozen, tools: museTools(root, attempt, { docs, files: frozen.manifest.files }) }));
     else {
       result = frozen.manifest.paired ? await gptPair(root, frozen.manifest, frozen.prompt) : await run(root, frozen.manifest, frozen.prompt);
     }
@@ -1088,4 +1060,4 @@ const openBugs = root => bugsIn(stateOf(root));
 module.exports = { review, followup, close, fallback, skip, unreviewedForCommit, openChains, openBugs, bugsIn, acknowledgeGaps, DELETED,
   RISKY_FILE, sessionTask, stateOf, withMaps, bytesOf, textOf, snapshot, snapFile, asBaseline, forTask, ratedRiskyIn,
   run, newAttempt, bundleDir, findingsOf, taskInfo, docsFor, DOCS_NOTE, refused, fence, escapeRe, callersOf, listedFiles, withMuse, gptPair,
-  MUSE_NO_TOOLS, MUSE_PROMPT_MAX, projectList, museSupply, located, unsendable }; // (the last two lines: for modes.js and the tests)
+  museIntro, museTools, MUSE_PROMPT_MAX, located, unsendable, realName }; // (the last two lines: for modes.js, muse-files.js and the tests)

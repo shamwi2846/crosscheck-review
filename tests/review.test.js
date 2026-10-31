@@ -1,5 +1,6 @@
 // Tests for review.js, fresh reviews: only frozen versions count, state changes happen in one locked write, and a
-// run that fails applies nothing (test plan P1 of step 2b). Codex is the recording stub fake-codex.js.
+// run that fails applies nothing (test plan P1 of step 2b); what Muse's file tool may give is tested in
+// muse-files.test.js. Codex is the recording stub fake-codex.js.
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert');
@@ -550,98 +551,6 @@ const museOff = () => assert.ok(state.update(state.files.global(), g => { delete
 const filesUnder = dir => (fs.existsSync(dir) ? fs.readdirSync(dir, { recursive: true }).map(f => path.join(dir, f)).filter(f => fs.statSync(f).isFile()) : []);
 const put = (root, rel, text) => { fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true }); fs.writeFileSync(path.join(root, rel), text); };
 
-test('a file Muse asks for is sent only when it is a git-listed, regular, non-secret project file within the limits; every other gets why not', () => {
-  const { root, git } = project('t2s', { 'src/seed.js': 's\n' });
-  // (credential files of common tools, each holding NAME-SECRET)
-  const secrets = ['.npmrc', 'deploy/.netrc', '.pgpass', 'web/.htpasswd', '.envrc', '.git-credentials', 'config/credentials.json', 'infra/prod.tfvars',
-    'infra/prod.tfvars.json', 'infra/terraform.tfstate', 'infra/terraform.tfstate.backup', 'vault.kdbx'];
-  const files = { 'src/app.js': 'APP-PUBLIC\n', '.env.example': 'EXAMPLE-PUBLIC\n', '.gitignore': 'ignored.txt\n', 'config/.env.production': 'ENV-SECRET\n',
-    'keys/id_ed25519': 'KEY-SECRET\n', 'keys/client.p12': 'P12-SECRET\n', 'vendor/lib.js': 'VENDOR-COMMITTED\n', '..cache/x.js': 'DOTDOT-PUBLIC\n',
-    'big/edge.js': 'e'.repeat(512 * 1024), 'big/over.js': 'o'.repeat(512 * 1024 + 1), 'big/a.js': 'a'.repeat(500 * 1024),
-    ...Object.fromEntries(secrets.map(rel => [rel, `${path.basename(rel)}-SECRET\n`])) };
-  for (const [rel, text] of Object.entries(files)) put(root, rel, text);
-  git(['add', '-A']);
-  git(['commit', '-qm', 'files']);
-  put(root, 'src/new.js', 'NEW-PUBLIC\n'); // (new and not ignored)
-  put(root, 'ignored.txt', 'IGNORED-SECRET\n');
-  const outside = path.join(HOME, 't2s-private');
-  put(outside, 'credentials.json', 'OUTSIDE-SECRET\n');
-  put(outside, 'lib.js', 'VENDOR-OUTSIDE-SECRET\n');
-  fs.rmSync(path.join(root, 'vendor'), { recursive: true }); // (a tracked path whose folder is now a link outside)
-  fs.symlinkSync(outside, path.join(root, 'vendor'), 'junction');
-  const snap = path.join(state.projectDir(root), 'snap', 'SNAP-NAME');
-  put(path.dirname(snap), 'SNAP-NAME', 'SNAP-SECRET\n');
-  // (a backslash names the same file only on Windows; elsewhere it is part of a file name)
-  const twice = process.platform === 'win32' ? ['src\\app.js'] : [];
-  const asked = ['src/app.js', 'src/new.js', '.env.example', '..cache/x.js', 'big/edge.js', 'big/a.js', 'big/over.js', 'config/.env.production', 'keys/id_ed25519',
-    'keys/client.p12', ...secrets, 'ignored.txt', 'src', 'src/missing.js', '../t2s-private/credentials.json', snap, 'vendor/lib.js', ...twice];
-  const text = review.museSupply(root, { files: {} })(asked);
-  for (const [rel, sentinel] of [['src/app.js', 'APP-PUBLIC'], ['src/new.js', 'NEW-PUBLIC'], ['.env.example', 'EXAMPLE-PUBLIC'], ['..cache/x.js', 'DOTDOT-PUBLIC'], ['big/edge.js', 'eeee']]) {
-    assert.ok(text.includes(`### ${rel}\n`) && text.includes(sentinel), `${rel} is sent`);
-  }
-  const why = {
-    'big/a.js': 'past the 1000000-character limit of one request', 'big/over.js': 'larger than 512 KB', 'config/.env.production': 'a secrets file',
-    'keys/id_ed25519': 'a secrets file', 'keys/client.p12': 'a secrets file', 'ignored.txt': 'not a file git lists for the project', src: 'not a file',
-    'src/missing.js': 'no such file', '../t2s-private/credentials.json': 'outside the project', [snap]: 'outside the project',
-    'vendor/lib.js': 'a link to somewhere outside the project', ...Object.fromEntries(secrets.map(rel => [rel, 'a secrets file'])),
-    ...Object.fromEntries(twice.map(rel => [rel, 'asked for twice'])),
-  };
-  for (const [rel, reason] of Object.entries(why)) assert.ok(text.includes(`- ${rel}: ${reason}\n`), `${rel}: ${reason}`);
-  for (const secret of ['ENV-SECRET', 'KEY-SECRET', 'P12-SECRET', 'IGNORED-SECRET', 'OUTSIDE-SECRET', 'SNAP-SECRET', 'VENDOR-OUTSIDE-SECRET', 'aaaa', 'oooo',
-    ...secrets.map(rel => `${path.basename(rel)}-SECRET`)]) {
-    assert.ok(!text.includes(secret), `${secret} is never sent`);
-  }
-});
-
-test('Muse\'s files round never sends a reviewed file again, even through a link or changed meanwhile, and its turns keep exactly what was sent', async () => {
-  const { root, taskFile } = project('t3f', { 'src/q.js': 'q0\n', 'src/ctx.js': 'CTX-1\n' });
-  fs.writeFileSync(path.join(root, 'src/q.js'), 'FROZEN-A\n');
-  fs.symlinkSync(path.join(root, 'src'), path.join(root, 'alias'), 'junction');
-  const hold = fs.mkdtempSync(path.join(HOME, 't3f-hold-'));
-  const asking = JSON.stringify({ ...JSON.parse(answerOf()), more_files: ['src/q.js', 'alias/q.js', 'src/ctx.js'] });
-  const runs = museWith('t3f', [{ hold, text: asking }, { text: answerOf() }]);
-  setSpec({ byPrompt: [{ match: 'reviewer A. Check', answers: [{ text: answerOf() }] }] });
-  const running = review.review(root, { files: ['src/q.js'], taskFile });
-  await waitFor(path.join(hold, 'started'));
-  fs.writeFileSync(path.join(root, 'src/q.js'), 'LIVE-PRIVATE-B\n'); // (the reviewed file changes while Muse reviews it)
-  fs.writeFileSync(path.join(hold, 'go'), '');
-  const r = await running;
-  assert.strictEqual(r.status, 'DONE', r.text);
-  const [first, files] = runs();
-  assert.ok(first.prompt.includes('## The project\'s files') && first.prompt.includes('\nsrc/ctx.js\n'), 'Muse sees the names it may ask for');
-  const session = c => c.args[c.args.indexOf('--session-id') + 1];
-  assert.strictEqual(session(files), session(first), 'one files round, in the same session');
-  assert.ok(files.prompt.includes('- src/q.js: already in your prompt\n') && files.prompt.includes('- alias/q.js: already in your prompt\n'));
-  assert.ok(files.prompt.includes('### src/ctx.js\n') && files.prompt.includes('CTX-1') && !files.prompt.includes('LIVE-PRIVATE-B'));
-  const s = stateOf(root);
-  assert.ok(s.changes[key('src/q.js')] && s.acks[key('src/q.js')] !== sha('LIVE-PRIVATE-B\n'), 'the live version stays pending');
-  fs.writeFileSync(path.join(root, 'src/ctx.js'), 'CTX-2\n');
-  const turn = fs.readFileSync(path.join(r.bundle, 'turn-1-B-files-1.md'), 'utf8');
-  assert.ok(turn.includes('CTX-1') && !turn.includes('CTX-2') && !turn.includes('LIVE-PRIVATE-B'), 'the turn keeps what was sent');
-  assert.ok(fs.existsSync(path.join(r.bundle, 'turn-1-B-1.md')), 'and Muse\'s first answer, which asked');
-  museOff();
-});
-
-test('a reviewed file recorded under a link\'s name is never sent again by its real name, even changed meanwhile', async () => {
-  const { root, taskFile } = project('t3l', { 'src/q.js': 'q0\n' });
-  fs.symlinkSync(path.join(root, 'src'), path.join(root, 'alias'), 'junction');
-  fs.writeFileSync(path.join(root, 'alias/q.js'), 'FROZEN-A\n'); // (an edit made through the link records the link's name)
-  seed(root, s => { s.changes = { [key('alias/q.js')]: change('alias/q.js', 'A', 1, null) }; });
-  const hold = fs.mkdtempSync(path.join(HOME, 't3l-hold-'));
-  const runs = museWith('t3l', [{ hold, text: JSON.stringify({ ...JSON.parse(answerOf()), more_files: ['src/q.js'] }) }, { text: answerOf() }]);
-  setSpec({ byPrompt: [{ match: 'reviewer A. Check', answers: [{ text: answerOf() }] }] });
-  const running = review.review(root, { session: 'A', taskFile });
-  await waitFor(path.join(hold, 'started'));
-  fs.writeFileSync(path.join(root, 'src/q.js'), 'LIVE-PRIVATE-B\n');
-  fs.writeFileSync(path.join(hold, 'go'), '');
-  const r = await running;
-  assert.strictEqual(r.status, 'DONE', r.text);
-  const files = runs()[1];
-  assert.ok(files.prompt.includes('- src/q.js: already in your prompt\n') && !files.prompt.includes('LIVE-PRIVATE-B'), files.prompt.slice(0, 400));
-  assert.ok(!fs.readFileSync(path.join(r.bundle, 'turn-1-B-files-1.md'), 'utf8').includes('LIVE-PRIVATE-B'));
-  museOff();
-});
-
 test('a file named for a review that is a link to somewhere outside the project is refused before anything runs or is kept', async () => {
   const { root, taskFile } = project('t4n', { 'src/a.js': 'a\n' });
   const outside = path.join(HOME, 't4n-private');
@@ -661,65 +570,6 @@ test('Muse rejects an innocent git-listed name for a tracked secrets file, by th
   const listed = new Set(['docs/context.txt', 'config/.env.production', '.env.example', 'src/a.js'].map(key));
   assert.strictEqual(review.unsendable(listed, 'docs/context.txt', 'config/.env.production'), 'a secrets file', 'a link named innocently to a secrets file');
   assert.deepStrictEqual([review.unsendable(listed, '.env.example', '.env.example'), review.unsendable(listed, 'src/a.js', 'src/a.js')], [null, null], 'an example and a plain file go');
-});
-
-test('UTF-16 trading helpers Muse asks for are sent decoded, in both byte orders', () => {
-  const le = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from('bool LotCapRemovedLE()\n', 'utf16le')]);
-  const be = Buffer.concat([Buffer.from([0xfe, 0xff]), Buffer.from('bool LotCapRemovedBE()\n', 'utf16le').swap16()]);
-  const { root } = project('m4u', { 'src/RiskLe.mqh': le, 'src/RiskBe.mqh': be });
-  const text = review.museSupply(root, { files: {} })(['src/RiskLe.mqh', 'src/RiskBe.mqh']);
-  assert.ok(text.includes('### src/RiskLe.mqh\n') && text.includes('bool LotCapRemovedLE()') && text.includes('### src/RiskBe.mqh\n') && text.includes('bool LotCapRemovedBE()'), text);
-  assert.ok(!text.includes('\u0000') && !text.includes('�'), 'no mojibake');
-});
-
-// (a risky review's answers: a BUG at src/payments.js, and a cross-check confirming one finding)
-const refundBug = () => answerOf({ verdict: 'ISSUES_FOUND', findings: [{ severity: 'HIGH', title: 'a refund can be paid twice', location: 'src/payments.js:1', trigger: 't', harm: 'h',
-  failure: 'f', fix: 'x', test: 'pay once', label: 'BUG', reqs: [] }] });
-const confirming = id => JSON.stringify({ marks: [{ id, mark: 'CONFIRM', label: 'BUG', evidence: '', same_as: null }] });
-
-test('a files round whose session record held a tool counts neither Muse answer and takes its verification away', async () => {
-  const { root, taskFile } = project('m1t', { 'src/payments.js': 'p0\n', 'src/helper.js': 'HELPER-CODE\n' });
-  fs.writeFileSync(path.join(root, 'src/payments.js'), 'p1\n');
-  seed(root, s => { s.plans = { [key('src/payments.js')]: planFor(taskFile) }; });
-  const asking = JSON.stringify({ ...JSON.parse(answerOf({ coverage: 'MUSE-FIRST' })), more_files: ['src/helper.js'] });
-  museWith('m1t', [{ text: asking }, { text: answerOf({ coverage: 'MUSE-SECOND' }), record: { tools: ['read_memory'] } }]);
-  const hold = fs.mkdtempSync(path.join(HOME, 'm1t-hold-'));
-  setSpec({ byPrompt: [{ match: 'Cross-check (you are reviewer A)', answers: [{ text: confirming('B1') }] }, { match: 'reviewer A. Check', answers: [{ text: answerOf() }] },
-    { match: 'reviewer B. Attack', answers: [{ hold, text: refundBug() }] }] });
-  const running = review.review(root, { files: ['src/payments.js'], taskFile, risky: true });
-  await waitFor(path.join(hold, 'started')); // (the GPT B that took Muse's seat)
-  const meanwhile = stateOf(root);
-  assert.deepStrictEqual([meanwhile.acks[key('src/payments.js')], (meanwhile.riskyReviews || {})[key('src/payments.js')]], [undefined, undefined], 'Muse\'s clean answers never count');
-  fs.writeFileSync(path.join(hold, 'go'), '');
-  const r = await running;
-  assert.strictEqual(r.status, 'DONE', r.text);
-  assert.match(r.text, /Muse didn't take part: its review didn't complete \(Muse's session held tools read_memory/);
-  const cfg = JSON.parse(fs.readFileSync(state.files.config(), 'utf8'));
-  assert.deepStrictEqual([cfg.museVerified, cfg.museSkills], [undefined, undefined], 'no longer verified');
-  const s = stateOf(root);
-  assert.deepStrictEqual(Object.values(s.chains[r.chain].findings).map(f => [f.title, f.label, f.status]), [['a refund can be paid twice', 'BUG', 'open']]);
-  assert.ok(s.riskyReviews[key('src/payments.js')], 'the GPT pair counts');
-  const names = fs.readdirSync(r.bundle);
-  assert.ok(names.some(n => n.startsWith('discarded-') && n.endsWith('turn-1-B-files-1.md') && fs.readFileSync(path.join(r.bundle, n), 'utf8').includes('HELPER-CODE')), 'what was sent is still on record');
-  assert.ok(names.filter(n => n.startsWith('turn-')).every(n => !/MUSE-FIRST|MUSE-SECOND/.test(fs.readFileSync(path.join(r.bundle, n), 'utf8'))), 'no replayed turn holds Muse\'s answers');
-  museOff();
-});
-
-test('Muse\'s cross-check gets no files round even when its answer asks for a live project file', async () => {
-  const { root, taskFile } = project('m2c', { 'src/payments.js': 'p0\n', 'src/live-notes.js': 'LIVE-GUARD-SENTINEL\n' });
-  fs.writeFileSync(path.join(root, 'src/payments.js'), 'p1\n');
-  seed(root, s => { s.plans = { [key('src/payments.js')]: planFor(taskFile) }; });
-  const asking = JSON.stringify({ ...JSON.parse(confirming('A1')), more_files: ['src/live-notes.js'] });
-  const runs = museWith('m2c', [{ text: answerOf() }, { text: asking }, { text: confirming('A1') }]);
-  setSpec({ byPrompt: [{ match: 'reviewer A. Check', answers: [{ text: refundBug() }] }] });
-  const r = await review.review(root, { files: ['src/payments.js'], taskFile, risky: true });
-  assert.strictEqual(r.status, 'DONE', r.text);
-  assert.strictEqual(runs().length, 3, 'Muse\'s review, its cross-check and that cross-check\'s repair');
-  assert.ok(runs().every(c => !c.prompt.includes('LIVE-GUARD-SENTINEL')), 'the live file is never sent');
-  assert.ok(!fs.readdirSync(r.bundle).some(n => /-files-/.test(n)), 'no files round');
-  const found = Object.values(stateOf(root).chains[r.chain].findings).map(f => [f.title, f.label, f.status]);
-  assert.deepStrictEqual(found, [['a refund can be paid twice', 'BUG', 'open']], 'A\'s BUG, confirmed by the repaired mark');
-  museOff();
 });
 
 test.after(() => fs.rmSync(HOME, { recursive: true, force: true }));
